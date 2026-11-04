@@ -24,6 +24,16 @@ struct ProcessDetailView: View {
         let derived = store.derived
         NavigationStack {
             List {
+                Section("工程について") {
+                    Text(process.educationText)
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(process.connectionNote)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 Section {
                     infoRow("工程の実効WPH", "\(MoneyFormat.decimal(derived.wph(process), digits: 2)) WPH")
                     infoRow("稼働台数", "\(derived.units(process))台")
@@ -128,19 +138,29 @@ private struct EquipmentRow: View {
             let unit = Engine.unitWPH(model: model, level: instance.level, state: state)
             let cost = Engine.upgradeCostYen(state: state, instance: instance)
             VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text(model.name)
-                        .font(.headline)
-                    Spacer()
-                    Text("Lv\(instance.level)")
-                        .font(.subheadline.bold())
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                HStack(alignment: .top, spacing: 12) {
+                    EquipmentIllustration(model: model)
+                        .frame(width: 76, height: 76)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .top) {
+                            Text(model.name)
+                                .font(.headline)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer()
+                            Text("Lv\(instance.level)")
+                                .font(.subheadline.bold())
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                        }
+                        Text("1台あたり実効 \(MoneyFormat.decimal(unit, digits: 2)) WPH（稼働率適用前）")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                Text("1台あたり実効 \(MoneyFormat.decimal(unit, digits: 2)) WPH（稼働率適用前）")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if let education = Catalog.education(for: model.id) {
+                    EquipmentEducationBlock(education: education)
+                }
                 HStack(spacing: 8) {
                     if let cost {
                         let after = Engine.lineWPHAfterUpgrading(state: state, instanceId: instance.id)
@@ -182,5 +202,40 @@ private struct EquipmentRow: View {
             Text("不明な装置（\(instance.modelId)）")
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+// MARK: - この装置について
+
+private struct EquipmentEducationBlock: View {
+    let education: EquipmentEducation
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("この装置について")
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
+            Text(education.summary)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(education.mechanism)
+                .font(.caption)
+                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 2) {
+                Label("豆知識", systemImage: "lightbulb.fill")
+                    .font(.caption.bold())
+                    .foregroundStyle(.orange)
+                Text(education.trivia)
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("代表メーカー：\(education.makers.joined(separator: "、"))")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(.tertiarySystemFill)))
     }
 }

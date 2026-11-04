@@ -92,13 +92,22 @@ private struct ShopModelCard: View {
         let owned = state.fab.equipment.filter { $0.modelId == model.id }.count
 
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top) {
+            HStack(alignment: .top, spacing: 10) {
+                EquipmentIllustration(model: model)
+                    .frame(width: 44, height: 44)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(model.process.displayName)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text(model.name)
                         .font(.headline)
+                    if let education = Catalog.education(for: model.id) {
+                        Text(education.summary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 Spacer()
                 if isLocked {

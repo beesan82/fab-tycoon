@@ -9,7 +9,7 @@ struct ContentView: View {
             Divider()
             TabView(selection: $store.selectedTab) {
                 LineView()
-                    .tabItem { Label("ライン", systemImage: "gearshape.2") }
+                    .tabItem { Label("フロア", systemImage: "square.grid.3x3.fill") }
                     .tag(AppTab.line)
                 ShopView()
                     .tabItem { Label("装置", systemImage: "cart") }
