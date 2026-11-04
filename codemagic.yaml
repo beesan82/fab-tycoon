@@ -1,0 +1,46 @@
+# Codemagic: signed build → TestFlight.
+# Started manually from the Codemagic UI only (no `triggering`), to save build minutes.
+#
+# One-time setup (Codemagic / App Store Connect; no secrets in this repo):
+#   1. App Store Connect integration "Pocket Agent ASC" is shared with the other apps.
+#   2. App Store Connect: app record for com.fabtycoon.app exists; its numeric Apple ID
+#      is in APP_STORE_APPLE_ID below.
+#   3. Signing files are NOT created during the build. `ios_signing` only picks files
+#      already saved in Settings → codemagic.yaml settings → Code signing identities:
+#      the team Apple Distribution certificate (pocketagent-dist) and the App Store
+#      profile "Fab Tycoon App Store" (created in the Developer portal, then Fetch profiles).
+workflows:
+  ios-testflight:
+    name: iOS TestFlight
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    integrations:
+      app_store_connect: Pocket Agent ASC
+    environment:
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.fabtycoon.app
+      vars:
+        XCODE_PROJECT: FabTycoon.xcodeproj
+        XCODE_SCHEME: FabTycoon
+        APP_STORE_APPLE_ID: "6830896541"
+      xcode: "27.0"
+    scripts:
+      - name: Apply signing profiles
+        script: xcode-project use-profiles
+      - name: Set build number (latest TestFlight build + 1)
+        script: |
+          LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" || echo 0)
+          agvtool new-version -all $((LATEST + 1))
+      - name: Build signed ipa
+        script: |
+          xcode-project build-ipa --project "$XCODE_PROJECT" --scheme "$XCODE_SCHEME"
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        auth: integration
+        # Internal testing needs no Beta App Review; internal group gets builds
+        # via automatic distribution.
+        submit_to_testflight: false
