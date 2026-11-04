@@ -26,6 +26,8 @@ workflows:
         APP_STORE_APPLE_ID: "6830896541"
       xcode: "27.0"
     scripts:
+      - name: Generate app icon (binary is not stored in the repo)
+        script: bash Scripts/generate_icon.sh
       - name: Apply signing profiles
         script: xcode-project use-profiles
       - name: Set build number (latest TestFlight build + 1)
