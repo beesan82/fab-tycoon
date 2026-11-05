@@ -300,7 +300,9 @@ struct FabFloorView: View {
                     centers: layout.flowCenters,
                     bottleneckRect: bottleneckRect(layout: layout, derived: derived),
                     lineWPH: derived.lineWPH,
-                    flowing: state.fab.running && derived.lineWPH > 0
+                    flowing: state.fab.running && derived.lineWPH > 0,
+                    segmentWPH: ProcessType.allCases.map { derived.wph($0) },
+                    bottleneck: derived.bottleneck
                 )
                 .frame(width: geo.size.width, height: geo.size.height)
             }
@@ -596,6 +598,11 @@ struct FloorFlowLayer: View {
     let bottleneckRect: CGRect?
     let lineWPH: Double
     let flowing: Bool
+    /// ProcessType.allCases 順の実効WPH（区間 i = 工程 i）
+    let segmentWPH: [Double]
+    let bottleneck: ProcessType?
+
+    @State private var clock = FloorFlowClock()
 
     private static let amber = Color(red: 1.0, green: 0.75, blue: 0.0)
     private static let dotCount = 6
@@ -606,15 +613,28 @@ struct FloorFlowLayer: View {
     }
 
     var body: some View {
+        let clock = clock
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !flowing && bottleneckRect == nil)) { timeline in
             Canvas { context, _ in
-                draw(in: context, time: timeline.date.timeIntervalSinceReferenceDate)
+                draw(in: context, time: timeline.date.timeIntervalSinceReferenceDate, clock: clock)
             }
         }
         .allowsHitTesting(false)
     }
 
-    private func draw(in context: GraphicsContext, time: Double) {
+    /// 区間の色：ボトルネック→赤、負荷80%以上→橙、それ以外→金色
+    private func segmentColor(_ index: Int) -> Color {
+        let processes = Array(ProcessType.allCases)
+        if index < processes.count, let bottleneck, processes[index] == bottleneck {
+            return .red
+        }
+        guard index < segmentWPH.count else { return Self.amber }
+        let wph = segmentWPH[index]
+        let load = wph > 0 ? min(lineWPH / wph, 1) : 1
+        return load >= 0.8 ? .orange : Self.amber
+    }
+
+    private func draw(in context: GraphicsContext, time: Double, clock: FloorFlowClock) {
         if let rect = bottleneckRect {
             let pulse = 0.55 + 0.45 * sin(time * 2 * Double.pi / 1.2)
             let border = Path(roundedRect: rect, cornerRadius: 9)
@@ -622,25 +642,65 @@ struct FloorFlowLayer: View {
         }
 
         guard centers.count > 1 else { return }
-        var path = Path()
-        path.addLines(centers)
-        context.stroke(
-            path,
-            with: .color(Self.amber.opacity(flowing ? 0.75 : 0.3)),
-            style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round)
-        )
+        // 平滑化クロックを進める（停止中も時刻だけ更新して再開時のジャンプを防ぐ）
+        let targetWeights = FlowPathMath.segmentTimeWeights(processWPH: segmentWPH, segmentCount: centers.count - 1)
+        clock.advance(now: time, targetWeights: targetWeights, targetPeriod: period, flowing: flowing)
+
+        for index in 0..<(centers.count - 1) {
+            var segment = Path()
+            segment.move(to: centers[index])
+            segment.addLine(to: centers[index + 1])
+            context.stroke(
+                segment,
+                with: .color(segmentColor(index).opacity(flowing ? 0.75 : 0.3)),
+                style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round)
+            )
+        }
 
         guard flowing else { return }
-        let total = FlowPathMath.totalLength(centers)
-        guard total > 0 else { return }
-        let progress = (time / period).truncatingRemainder(dividingBy: 1)
+        guard FlowPathMath.totalLength(centers) > 0 else { return }
+        let weights = clock.weights
         for index in 0..<Self.dotCount {
-            let fraction = (progress + Double(index) / Double(Self.dotCount)).truncatingRemainder(dividingBy: 1)
-            let point = FlowPathMath.point(on: centers, at: CGFloat(fraction) * total)
+            let fraction = (clock.phase + Double(index) / Double(Self.dotCount)).truncatingRemainder(dividingBy: 1)
+            let point = FlowPathMath.point(on: centers, atTimeFraction: fraction, segmentWeights: weights)
+            let color = segmentColor(FlowPathMath.segmentIndex(atTimeFraction: fraction, segmentWeights: weights))
             let dot = Path(ellipseIn: CGRect(x: point.x - 5, y: point.y - 5, width: 10, height: 10))
-            context.fill(dot, with: .color(Self.amber))
+            context.fill(dot, with: .color(color))
             context.stroke(dot, with: .color(.white), lineWidth: 1.5)
         }
+    }
+}
+
+/// フロー用の平滑化クロック。重み・周期を指数平滑し、位相を積分で進める。
+private final class FloorFlowClock {
+    private static let smoothingTime = 1.2
+    private static let maxStep = 0.1
+
+    private var lastTime: Double?
+    private(set) var phase: Double = 0
+    private(set) var weights: [Double] = []
+    private(set) var period: Double = 0
+
+    func advance(now: Double, targetWeights: [Double], targetPeriod: Double, flowing: Bool) {
+        // 初回・区間数変化時はターゲットにスナップ
+        guard let last = lastTime, weights.count == targetWeights.count, period > 0, period.isFinite else {
+            lastTime = now
+            weights = targetWeights
+            period = targetPeriod
+            return
+        }
+        let dt = min(max(now - last, 0), Self.maxStep)
+        lastTime = now
+        let alpha = 1 - exp(-dt / Self.smoothingTime)
+        for index in weights.indices {
+            weights[index] += (targetWeights[index] - weights[index]) * alpha
+        }
+        if targetPeriod.isFinite, targetPeriod > 0 {
+            period += (targetPeriod - period) * alpha
+        }
+        guard flowing, period > 0 else { return }
+        phase = (phase + dt / period).truncatingRemainder(dividingBy: 1)
+        if phase < 0 || !phase.isFinite { phase = 0 }
     }
 }
 
@@ -678,6 +738,71 @@ enum FlowPathMath {
             cumulative += length
         }
         return points[points.count - 1]
+    }
+
+    /// 各区間の時間シェア（WPH の逆数を正規化、合計1）。異常時は等重み。
+    /// segmentCount を省略すると processWPH の要素数を想定数とする。
+    static func segmentTimeWeights(processWPH: [Double], segmentCount: Int? = nil) -> [Double] {
+        let count = segmentCount ?? processWPH.count
+        guard count > 0 else { return [] }
+        let uniform = Array(repeating: 1.0 / Double(count), count: count)
+        guard processWPH.count == count, processWPH.contains(where: { $0.isFinite && $0 > 0 }) else {
+            return uniform
+        }
+        let inverses = processWPH.map { wph -> Double in
+            let safe = wph.isNaN ? 0 : wph
+            return 1.0 / max(safe, 0.05)
+        }
+        let total = inverses.reduce(0, +)
+        guard total.isFinite, total > 0 else { return uniform }
+        let weights = inverses.map { $0 / total }
+        guard weights.allSatisfy({ $0.isFinite }) else { return uniform }
+        return weights
+    }
+
+    /// 時間割合（0...1）が属する区間と、区間内の時間割合
+    private static func locate(timeFraction: Double, weights: [Double]) -> (index: Int, local: Double)? {
+        guard !weights.isEmpty else { return nil }
+        let total = weights.reduce(0) { $0 + max($1.isFinite ? $1 : 0, 0) }
+        guard total > 0, total.isFinite else { return nil }
+        var fraction = timeFraction.isFinite ? timeFraction.truncatingRemainder(dividingBy: 1) : 0
+        if fraction < 0 { fraction += 1 }
+        let target = fraction * total
+        var cumulative = 0.0
+        var lastPositive = 0
+        for (index, raw) in weights.enumerated() {
+            let weight = max(raw.isFinite ? raw : 0, 0)
+            guard weight > 0 else { continue }
+            lastPositive = index
+            if target < cumulative + weight {
+                return (index, min(max((target - cumulative) / weight, 0), 1))
+            }
+            cumulative += weight
+        }
+        return (lastPositive, 1)
+    }
+
+    /// 時間割合から位置を引く。区間内は「区間内時間割合 × 区間長」で線形補間。
+    static func point(on points: [CGPoint], atTimeFraction fraction: Double, segmentWeights: [Double]) -> CGPoint {
+        guard let first = points.first else { return .zero }
+        let lengths = segmentLengths(points)
+        let total = lengths.reduce(0, +)
+        guard total > 0 else { return first }
+        // 重みが区間数と合わない場合は距離等速にフォールバック
+        guard segmentWeights.count == lengths.count,
+              let located = locate(timeFraction: fraction, weights: segmentWeights) else {
+            let safe = fraction.isFinite ? fraction : 0
+            return point(on: points, at: CGFloat(safe) * total)
+        }
+        let a = points[located.index]
+        let b = points[located.index + 1]
+        let t = CGFloat(located.local)
+        return CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t)
+    }
+
+    /// 時間割合が属する区間の index
+    static func segmentIndex(atTimeFraction fraction: Double, segmentWeights: [Double]) -> Int {
+        locate(timeFraction: fraction, weights: segmentWeights)?.index ?? 0
     }
 }
 
