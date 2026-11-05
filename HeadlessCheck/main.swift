@@ -40,7 +40,7 @@ let d0 = Engine.derived(state: state)
 describe(d0)
 check(abs(d0.lineWPH - 3.4) < 1e-6, "初期ラインWPH ≈ 3.4")
 check(d0.bottleneck == .deposition, "初期ボトルネックは成膜")
-check(abs(d0.currentYield - 0.70) < 1e-9, "初期歩留まり 70%")
+check(abs(d0.currentYield - 0.6983) < 0.005, "初期歩留まり 約69.8%")
 
 // 2. 実10分相当の tick
 print("== 2. tick 0.25秒 × 2400回（実10分） ==")

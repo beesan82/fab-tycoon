@@ -94,7 +94,10 @@ struct EquipmentModel: Identifiable, Equatable {
     let nominalWPH: Double
     let supportedNodeIds: [String]
     let lithoClass: LithoClass?
-    let yieldBonus: Double
+    /// 歩留まり寄与：この装置で処理したウェハの良品率係数（改良で欠陥寄与が減る）
+    let yieldFactor: Double
+    /// 検出率の基礎値（検査装置のみ意味を持つ）
+    let detectionBase: Double
     /// 解放条件（nil なら最初から購入可能）
     let unlockNote: String?
 
@@ -106,7 +109,8 @@ struct EquipmentModel: Identifiable, Equatable {
         nominalWPH: Double,
         supportedNodeIds: [String],
         lithoClass: LithoClass? = nil,
-        yieldBonus: Double = 0,
+        yieldFactor: Double = 0.95,
+        detectionBase: Double = 0,
         unlockNote: String? = nil
     ) {
         self.id = id
@@ -116,7 +120,8 @@ struct EquipmentModel: Identifiable, Equatable {
         self.nominalWPH = nominalWPH
         self.supportedNodeIds = supportedNodeIds
         self.lithoClass = lithoClass
-        self.yieldBonus = yieldBonus
+        self.yieldFactor = yieldFactor
+        self.detectionBase = detectionBase
         self.unlockNote = unlockNote
     }
 
@@ -181,58 +186,70 @@ enum Catalog {
         // 露光
         EquipmentModel(id: "L1", name: "ArFドライ露光機", process: .lithography,
                        priceYen: 1_500_000_000, nominalWPH: 150, supportedNodeIds: ["n28"],
-                       lithoClass: .duvDry),
+                       lithoClass: .duvDry, yieldFactor: 0.950),
         EquipmentModel(id: "L2", name: "ArF液浸露光機", process: .lithography,
                        priceYen: 5_000_000_000, nominalWPH: 170, supportedNodeIds: ["n14", "n7"],
-                       lithoClass: .duvImm, unlockNote: "研究「液浸露光機」"),
+                       lithoClass: .duvImm, yieldFactor: 0.955, unlockNote: "研究「液浸露光機」"),
         EquipmentModel(id: "L3", name: "EUV露光機", process: .lithography,
                        priceYen: 20_000_000_000, nominalWPH: 120, supportedNodeIds: ["n7", "n5", "n3", "n2"],
-                       lithoClass: .euv, unlockNote: "研究「EUV露光」"),
+                       lithoClass: .euv, yieldFactor: 0.965, unlockNote: "研究「EUV露光」"),
         EquipmentModel(id: "L4", name: "High-NA EUV露光機", process: .lithography,
                        priceYen: 40_000_000_000, nominalWPH: 100, supportedNodeIds: ["n3", "n2"],
-                       lithoClass: .highNA, unlockNote: "研究「High-NA EUV」"),
+                       lithoClass: .highNA, yieldFactor: 0.970, unlockNote: "研究「High-NA EUV」"),
         // 成膜
         EquipmentModel(id: "D1", name: "PECVD装置", process: .deposition,
-                       priceYen: 300_000_000, nominalWPH: 80, supportedNodeIds: ["n28", "n14"]),
+                       priceYen: 300_000_000, nominalWPH: 80, supportedNodeIds: ["n28", "n14"],
+                       yieldFactor: 0.950),
         EquipmentModel(id: "D2", name: "ALD/CVDクラスタ", process: .deposition,
-                       priceYen: 1_200_000_000, nominalWPH: 100, supportedNodeIds: ["n14", "n7", "n5"]),
+                       priceYen: 1_200_000_000, nominalWPH: 100, supportedNodeIds: ["n14", "n7", "n5"],
+                       yieldFactor: 0.960),
         EquipmentModel(id: "D3", name: "先端ALD装置", process: .deposition,
-                       priceYen: 3_500_000_000, nominalWPH: 110, supportedNodeIds: ["n5", "n3", "n2"]),
+                       priceYen: 3_500_000_000, nominalWPH: 110, supportedNodeIds: ["n5", "n3", "n2"],
+                       yieldFactor: 0.968),
         // エッチング
         EquipmentModel(id: "E1", name: "プラズマエッチャ", process: .etching,
-                       priceYen: 300_000_000, nominalWPH: 60, supportedNodeIds: ["n28", "n14"]),
+                       priceYen: 300_000_000, nominalWPH: 60, supportedNodeIds: ["n28", "n14"],
+                       yieldFactor: 0.950),
         EquipmentModel(id: "E2", name: "高選択比エッチャ", process: .etching,
-                       priceYen: 1_500_000_000, nominalWPH: 75, supportedNodeIds: ["n14", "n7", "n5"]),
+                       priceYen: 1_500_000_000, nominalWPH: 75, supportedNodeIds: ["n14", "n7", "n5"],
+                       yieldFactor: 0.958),
         EquipmentModel(id: "E3", name: "原子層エッチャ（ALE）", process: .etching,
-                       priceYen: 4_500_000_000, nominalWPH: 85, supportedNodeIds: ["n5", "n3", "n2"]),
+                       priceYen: 4_500_000_000, nominalWPH: 85, supportedNodeIds: ["n5", "n3", "n2"],
+                       yieldFactor: 0.970),
         // イオン注入・熱処理
         EquipmentModel(id: "I1", name: "イオン注入機", process: .implant,
-                       priceYen: 400_000_000, nominalWPH: 200, supportedNodeIds: ["n28", "n14", "n7"]),
+                       priceYen: 400_000_000, nominalWPH: 200, supportedNodeIds: ["n28", "n14", "n7"],
+                       yieldFactor: 0.950),
         EquipmentModel(id: "I2", name: "高エネルギー注入＋レーザーアニール", process: .implant,
-                       priceYen: 1_500_000_000, nominalWPH: 220, supportedNodeIds: ["n7", "n5", "n3", "n2"]),
+                       priceYen: 1_500_000_000, nominalWPH: 220, supportedNodeIds: ["n7", "n5", "n3", "n2"],
+                       yieldFactor: 0.955),
         // CMP
         EquipmentModel(id: "C1", name: "CMP装置", process: .cmp,
-                       priceYen: 200_000_000, nominalWPH: 60, supportedNodeIds: ["n28", "n14", "n7"]),
+                       priceYen: 200_000_000, nominalWPH: 60, supportedNodeIds: ["n28", "n14", "n7"],
+                       yieldFactor: 0.950),
         EquipmentModel(id: "C2", name: "先端CMP装置", process: .cmp,
-                       priceYen: 1_000_000_000, nominalWPH: 70, supportedNodeIds: ["n7", "n5", "n3", "n2"]),
+                       priceYen: 1_000_000_000, nominalWPH: 70, supportedNodeIds: ["n7", "n5", "n3", "n2"],
+                       yieldFactor: 0.960),
         // 検査
         EquipmentModel(id: "Q1", name: "光学検査装置", process: .inspection,
                        priceYen: 250_000_000, nominalWPH: 50, supportedNodeIds: ["n28", "n14"],
-                       yieldBonus: 0),
+                       yieldFactor: 0.950, detectionBase: 0.55),
         EquipmentModel(id: "Q2", name: "電子ビーム検査装置", process: .inspection,
                        priceYen: 1_500_000_000, nominalWPH: 45, supportedNodeIds: ["n14", "n7", "n5"],
-                       yieldBonus: 0.02, unlockNote: "研究「EB検査装置」"),
+                       yieldFactor: 0.955, detectionBase: 0.70, unlockNote: "研究「EB検査装置」"),
         EquipmentModel(id: "Q3", name: "AI欠陥分類検査装置", process: .inspection,
                        priceYen: 5_000_000_000, nominalWPH: 60, supportedNodeIds: ["n5", "n3", "n2"],
-                       yieldBonus: 0.04),
+                       yieldFactor: 0.960, detectionBase: 0.82),
         // ダイシング/パッケージング
         EquipmentModel(id: "P1", name: "ブレードダイシング＋ワイヤボンド", process: .packaging,
-                       priceYen: 150_000_000, nominalWPH: 30, supportedNodeIds: ["n28", "n14"]),
+                       priceYen: 150_000_000, nominalWPH: 30, supportedNodeIds: ["n28", "n14"],
+                       yieldFactor: 0.950),
         EquipmentModel(id: "P2", name: "レーザーダイシング＋フリップチップ", process: .packaging,
-                       priceYen: 800_000_000, nominalWPH: 35, supportedNodeIds: ["n14", "n7", "n5"]),
+                       priceYen: 800_000_000, nominalWPH: 35, supportedNodeIds: ["n14", "n7", "n5"],
+                       yieldFactor: 0.958),
         EquipmentModel(id: "P3", name: "先端パッケージ（2.5D/チップレット）", process: .packaging,
                        priceYen: 3_000_000_000, nominalWPH: 40, supportedNodeIds: ["n5", "n3", "n2"],
-                       unlockNote: "研究「先端パッケージ」"),
+                       yieldFactor: 0.962, unlockNote: "研究「先端パッケージ」"),
     ]
 
     private static let nodeIndex: [String: NodeSpec] =
@@ -427,9 +444,31 @@ extension ProcessType {
         case .cmp:
             return "化学機械研磨。研磨液（スラリー）を流しながらウェハ表面を磨き、成膜やエッチングで生じた凹凸を平らにする工程。表面が平坦でないと次の露光でピントが合わず、パターンがぼやけてしまう。多層配線を可能にした立役者。"
         case .inspection:
-            return "欠陥や寸法のズレを、光や電子ビームで見つけ出す工程。途中で問題に早く気づけば、無駄な後工程を進めずに済み、歩留まり改善の手がかりも得られる。ものは作らないが、利益を守る要の工程。"
+            return "欠陥や寸法のズレを、光や電子ビームで見つけ出す工程。途中で問題に早く気づけば、無駄な後工程を進めずに済み、歩留まり改善の手がかりも得られる。ものは作らないが、利益を守る要の工程。不良は各工程で生まれ、検査で初めて見つかる。検査が弱いと不良はそのまま客先に届き、返品や信用問題につながる。"
         case .packaging:
             return "完成したウェハをチップ（ダイ）ごとに切り分け、基板に載せて樹脂で封止する後工程。外部端子とつながって、初めて電子部品として使えるようになる。近年は複数のチップを組み合わせる先端パッケージが性能を大きく左右する。"
+        }
+    }
+}
+
+extension ProcessType {
+    /// 現実の所要時間の目安（学習用）
+    var realDurationText: String {
+        switch self {
+        case .lithography:
+            return "目安：露光そのものは1枚あたり数十秒〜数分。ただし28nmでは約30回繰り返すため、露光だけで何時間も積み上がる"
+        case .deposition:
+            return "目安：1回あたり数分〜数十分。膜の種類や、複数枚をまとめるバッチ処理かどうかで大きく変わる"
+        case .etching:
+            return "目安：1回あたり数分程度。3D NANDのような深い穴を掘る工程では、十数分以上かかることもある"
+        case .implant:
+            return "目安：イオン注入は1回あたり数分。一方、酸化・拡散・アニールなどの熱処理は数時間単位のバッチ処理になる"
+        case .cmp:
+            return "目安：1回あたり数分程度。ただし層を重ねるたびに繰り返し登場する"
+        case .inspection:
+            return "目安：1回あたり数分〜。ウェハ全面を細かくスキャンする検査では、1枚に数十分かかることもある"
+        case .packaging:
+            return "目安：ダイシングは1枚あたり数分。組立・封止・最終テストまで含めると、日単位の時間がかかる工程もある"
         }
     }
 }

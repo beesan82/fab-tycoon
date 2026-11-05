@@ -32,12 +32,20 @@ struct ProcessDetailView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    Text(process.realDurationText)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Section {
                     infoRow("工程の実効WPH", "\(MoneyFormat.decimal(derived.wph(process), digits: 2)) WPH")
                     infoRow("稼働台数", "\(derived.units(process))台")
                     infoRow("パス数（\(Engine.currentNode(state: state).displayName)）", "\(passes(state: state))")
+                    infoRow("工程歩留まり", MoneyFormat.percent(derived.processYields[process] ?? 0))
+                    if process == .inspection {
+                        infoRow("検査検出率", MoneyFormat.percent(derived.detectionRate))
+                    }
                     if derived.bottleneck == process {
                         Label("この工程がボトルネックです", systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.red)
@@ -107,7 +115,13 @@ struct ProcessDetailView: View {
 
     private func sellMessage(for instance: EquipmentInstance, state: GameState, derived: DerivedState) -> String {
         let after = Engine.lineWPHAfterSelling(state: state, instanceId: instance.id)
+        let yieldAfter = Engine.processYieldAfterSelling(state: state, instanceId: instance.id)
         var text = "返金はモデル価格の50%です（改良投資分は戻りません）。\nラインWPH \(MoneyFormat.decimal(derived.lineWPH)) → \(MoneyFormat.decimal(after))"
+        text += "\n工程歩留まり \(MoneyFormat.percent(derived.processYields[process] ?? 0)) → \(MoneyFormat.percent(yieldAfter))"
+        if process == .inspection {
+            let detectionAfter = Engine.detectionRateAfterSelling(state: state, instanceId: instance.id)
+            text += "\n検出率 \(MoneyFormat.percent(derived.detectionRate)) → \(MoneyFormat.percent(detectionAfter))"
+        }
         if after <= 0 {
             text += "\nこの工程の装置がなくなり、ラインが停止します。"
         }
@@ -134,6 +148,7 @@ private struct EquipmentRow: View {
 
     var body: some View {
         let state = store.state
+        let derived = store.derived
         if let model = Catalog.model(id: instance.modelId) {
             let unit = Engine.unitWPH(model: model, level: instance.level, state: state)
             let cost = Engine.upgradeCostYen(state: state, instance: instance)
@@ -164,6 +179,7 @@ private struct EquipmentRow: View {
                 HStack(spacing: 8) {
                     if let cost {
                         let after = Engine.lineWPHAfterUpgrading(state: state, instanceId: instance.id)
+                        let yieldAfter = Engine.processYieldAfterUpgrading(state: state, instanceId: instance.id)
                         Button {
                             store.upgrade(instance.id)
                         } label: {
@@ -171,6 +187,13 @@ private struct EquipmentRow: View {
                                 Text("改良 \(MoneyFormat.yen(cost))")
                                 Text("ライン → \(MoneyFormat.decimal(after))")
                                     .font(.caption2)
+                                Text("工程歩留まり \(MoneyFormat.percent(derived.processYields[model.process] ?? 0)) → \(MoneyFormat.percent(yieldAfter))")
+                                    .font(.caption2)
+                                if model.process == .inspection {
+                                    let detectionAfter = Engine.detectionRateAfterUpgrading(state: state, instanceId: instance.id)
+                                    Text("検出率 \(MoneyFormat.percent(derived.detectionRate)) → \(MoneyFormat.percent(detectionAfter))")
+                                        .font(.caption2)
+                                }
                             }
                             .frame(maxWidth: .infinity)
                         }

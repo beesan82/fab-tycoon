@@ -31,6 +31,12 @@ struct LineView: View {
                     lockBanner(next: next)
                         .padding(.horizontal)
                 }
+
+                Text("現実の28nmロジックでは、ウェハ投入から出荷まで約1〜2か月、工程は数百ステップに及ぶのが目安です。このゲームはその時間を×600に圧縮しています。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal)
             }
             .padding(.vertical)
         }
@@ -91,9 +97,26 @@ struct LineView: View {
             Text("単価 \(MoneyFormat.yen(derived.currentPriceYen))／個")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(clockText(gameHours: state.gameHoursElapsed))
+                    .font(.subheadline.bold())
+                    .monospacedDigit()
+                Text("現実の1秒＝ゲーム内10分")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding()
         .background(RoundedRectangle(cornerRadius: 14).fill(Color(.secondarySystemGroupedBackground)))
+    }
+
+    /// 「Day 3 07:30」形式のゲーム内時計
+    private func clockText(gameHours: Double) -> String {
+        let totalMinutes = Int(max(gameHours, 0) * 60)
+        let day = totalMinutes / 1440 + 1
+        let hour = (totalMinutes / 60) % 24
+        let minute = totalMinutes % 60
+        return "Day \(day) \(String(format: "%02d", hour)):\(String(format: "%02d", minute))"
     }
 
     @ViewBuilder
@@ -142,10 +165,16 @@ struct LineView: View {
                 Text(process.displayName)
                     .font(.title3.bold())
             }
-            Text("装置 \(count)台 ・ 実効WPH \(MoneyFormat.decimal(wph, digits: 2)) ・ 負荷 \(MoneyFormat.percent(load, digits: 0))")
+            Text("装置 \(count)台 ・ 実効WPH \(MoneyFormat.decimal(wph, digits: 2)) ・ 負荷 \(MoneyFormat.percent(load, digits: 0)) ・ 工程歩留まり \(MoneyFormat.percent(derived.processYields[process] ?? 0))")
                 .font(.subheadline)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
+            if process == .inspection {
+                Label("検出率 \(MoneyFormat.percent(derived.detectionRate))（見逃した不良はそのまま出荷されます）", systemImage: "magnifyingglass")
+                    .font(.subheadline)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
             if derived.bottleneck == process {
                 Label("このラインの速度はここで決まっています", systemImage: "exclamationmark.triangle.fill")
                     .font(.subheadline.bold())
@@ -209,7 +238,7 @@ struct LineView: View {
             Button {
                 store.sellAllInventory()
             } label: {
-                Text("一括売却（\(MoneyFormat.yen(inventory * derived.currentPriceYen))）")
+                Text("一括売却（\(MoneyFormat.yen(Engine.inventorySaleValueYen(state: state, priceYen: derived.currentPriceYen)))）")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)

@@ -14,11 +14,22 @@ struct DerivedState: Equatable {
     var lineWPH: Double
     var bottleneck: ProcessType?
     var secondBottleneck: ProcessType?
-    /// 検査ボーナス込み・クランプ済みの歩留まり
+    /// 互換用。lineYield と同値（ライン歩留まり・検査前）
     var currentYield: Double
-    /// 学習曲線のみの歩留まり（ボーナス前）
+    /// 学習曲線のみの歩留まり（従来式）
     var learnedYield: Double
-    var inspectionBonus: Double
+    /// 工程ごとの工程歩留まり（稼働装置0台の工程は 0）
+    var processYields: [ProcessType: Double]
+    /// ライン歩留まり（検査前）= 1 − (1 − Π工程歩留まり) × 学習による欠陥縮小率
+    var lineYield: Double
+    /// 検査で不良を見つけて廃棄できる割合
+    var detectionRate: Double
+    /// 総生産ダイに対する出荷不良ダイの割合
+    var shippedDefectFraction: Double
+    /// 出荷したチップのうち良品の割合
+    var shippedYield: Double
+    /// 出荷したチップのうち不良の割合（市場不良率）
+    var marketDefectRate: Double
     var isLearning: Bool
     var cycleFactor: Double
     var walkFactor: Double
@@ -61,7 +72,11 @@ enum MarketCondition: Equatable {
 struct TickResult: Equatable {
     var producedWafers: Double
     var goodChips: Double
+    /// 純売上（市場不良ペナルティ控除後）
     var revenueYen: Double
+    /// 販売分に含まれていた不良チップ数
+    var shippedDefectChips: Double = 0
+    var marketPenaltyYen: Double = 0
 
     static let zero = TickResult(producedWafers: 0, goodChips: 0, revenueYen: 0)
 }
@@ -96,8 +111,8 @@ enum BuyBlockReason: Equatable {
 
 enum Engine {
     static let uptime = 0.85
-    /// 実1秒 = ゲーム内1分
-    static let gameMinutesPerRealSecond = 1.0
+    /// 実1秒 = ゲーム内10分（×600）。生産単位は WPH（ゲーム内1時間あたり枚数）
+    static let gameMinutesPerRealSecond = 10.0
     static let inventoryCap = 10_000.0
     static let offlineCapSeconds = 4.0 * 3_600
     static let offlineEfficiency = 0.5
@@ -112,6 +127,22 @@ enum Engine {
     static let upgradeCostRate = 0.2
     static let sellRefundRate = 0.5
     static let recentPriceSmoothing = 0.1
+    /// 改良1レベルごとの欠陥寄与の残存率（−8%/Lv）
+    static let defectReductionPerLevel = 0.92
+    /// 検出率の上限
+    static let maxDetectionRate = 0.95
+    /// 検査能力の余裕度による検出率の上乗せ幅
+    static let detectionHeadroomBonus = 0.30
+    /// 市場不良1個あたりの返品・対応コスト（販売額に対する倍率）
+    static let marketDefectPenaltyRate = 1.5
+
+    // 次ラウンドの製品選択機能のための継ぎ目。現在は全て 1.0（製品選択UIは未実装）
+    /// 製品ごとの歩留まり倍率（lineYield の最終段に乗算）
+    static let productYieldMultiplier = 1.0
+    /// 製品ごとの単価倍率（currentPriceYen に乗算）
+    static let productPriceMultiplier = 1.0
+    /// 製品ごとの市場不良ペナルティ倍率（ペナルティ額に乗算）
+    static let productMarketPenaltyMultiplier = 1.0
 
     // MARK: 派生計算
 
@@ -163,18 +194,25 @@ enum Engine {
             units[process] = 0
         }
 
-        var inspectionBonus = 0.0
+        // 工程歩留まり用：unitWPH（稼働率適用前）で重み付けした effFactor の合計
+        var weightedFactor: [ProcessType: Double] = [:]
+        var detectionBase = 0.0
         for instance in state.fab.equipment {
             guard let model = Catalog.model(id: instance.modelId), isActive(model, nodeId: node.id) else { continue }
             let passes = passCount(for: model.process, node: node, topLitho: topLitho)
-            wph[model.process, default: 0] += model.nominalWPH * levelMultiplier(instance.level) / Double(passes)
+            let unit = model.nominalWPH * levelMultiplier(instance.level) / Double(passes)
+            wph[model.process, default: 0] += unit
             units[model.process, default: 0] += 1
+            weightedFactor[model.process, default: 0] += unit * effectiveYieldFactor(model, level: instance.level)
             if model.process == .inspection {
-                inspectionBonus = max(inspectionBonus, model.yieldBonus)
+                detectionBase = max(detectionBase, model.detectionBase)
             }
         }
+        var processYields: [ProcessType: Double] = [:]
         for process in ProcessType.allCases {
-            wph[process] = (wph[process] ?? 0) * uptime
+            let raw = wph[process] ?? 0
+            processYields[process] = (units[process] ?? 0) > 0 && raw > 0 ? (weightedFactor[process] ?? 0) / raw : 0
+            wph[process] = raw * uptime
         }
 
         let lineWPH = ProcessType.allCases.map { wph[$0] ?? 0 }.min() ?? 0
@@ -184,13 +222,32 @@ enum Engine {
             return wa != wb ? wa < wb : a.order < b.order
         }
 
+        // 学習曲線は「欠陥の縮小」として効く（開始時 1.0）
         let learned = state.learningWafers[node.id] ?? 0
         let learnedYield = node.yieldMax - (node.yieldMax - node.yieldInit) * exp(-learned / node.learnWafers)
-        let currentYield = min(max(learnedYield + inspectionBonus, 0), 0.99)
+        let learningDefectScale = node.yieldInit < 1 ? (1 - learnedYield) / (1 - node.yieldInit) : 0
+        let processProduct = ProcessType.allCases.reduce(1.0) { $0 * (processYields[$1] ?? 0) }
+        let rawLineYield = 1 - (1 - processProduct) * learningDefectScale
+        let lineYield = min(max(rawLineYield * productYieldMultiplier, 0), 0.99)
+
+        // 検査スクリーニング：基礎検出率＋検査能力の余裕度
+        let inspectionWPH = wph[.inspection] ?? 0
+        var detectionRate = 0.0
+        if (units[.inspection] ?? 0) > 0, inspectionWPH > 0 {
+            let headroom = inspectionWPH / max(lineWPH, 1e-9)
+            detectionRate = min(maxDetectionRate, max(0, detectionBase + detectionHeadroomBonus * (1 - 1 / headroom)))
+        }
+        let shippedDefectFraction = (1 - lineYield) * (1 - detectionRate)
+        let shippedTotal = lineYield + shippedDefectFraction
+        let shippedYield = shippedTotal > 0 ? lineYield / shippedTotal : 1
+        let marketDefectRate = shippedTotal > 0 ? shippedDefectFraction / shippedTotal : 0
 
         let cycleFactor = 1 + marketCycleAmplitude * sin(2 * Double.pi * state.market.gameTimeMinutes / marketCycleMinutes)
-        let price = node.chipBasePriceYen * cycleFactor * state.market.walkFactor
-        let marginPerWafer = Double(node.diesPerWafer) * currentYield * price - node.waferCostYen
+        let price = node.chipBasePriceYen * cycleFactor * state.market.walkFactor * productPriceMultiplier
+        // 純売上 = (良品+出荷不良)×単価 − 出荷不良×単価×1.5×製品倍率 をウェハ1枚あたりに直したもの
+        let penaltyRate = marketDefectPenaltyRate * productMarketPenaltyMultiplier
+        let marginPerWafer = Double(node.diesPerWafer) * price
+            * (lineYield + shippedDefectFraction * (1 - penaltyRate)) - node.waferCostYen
 
         return DerivedState(
             nodeId: node.id,
@@ -200,15 +257,34 @@ enum Engine {
             lineWPH: lineWPH,
             bottleneck: ranked.first,
             secondBottleneck: ranked.count > 1 ? ranked[1] : nil,
-            currentYield: currentYield,
+            currentYield: lineYield,
             learnedYield: learnedYield,
-            inspectionBonus: inspectionBonus,
+            processYields: processYields,
+            lineYield: lineYield,
+            detectionRate: detectionRate,
+            shippedDefectFraction: shippedDefectFraction,
+            shippedYield: shippedYield,
+            marketDefectRate: marketDefectRate,
             isLearning: learnedYield < node.yieldMax - 0.005,
             cycleFactor: cycleFactor,
             walkFactor: state.market.walkFactor,
             currentPriceYen: price,
-            incomePerMinuteYen: lineWPH * marginPerWafer
+            // lineWPH はゲーム内1時間あたり → 実1分 = ゲーム内 gameMinutesPerRealSecond 時間
+            incomePerMinuteYen: lineWPH * marginPerWafer * gameMinutesPerRealSecond
         )
+    }
+
+    /// 装置1台の実効歩留まり寄与。改良1レベルごとに欠陥寄与が8%減る
+    static func effectiveYieldFactor(_ model: EquipmentModel, level: Int) -> Double {
+        1 - (1 - model.yieldFactor) * pow(defectReductionPerLevel, Double(level - 1))
+    }
+
+    /// 出荷チップの純売上（不良混入率 defectRate の分だけ販売額の150%×製品倍率を差し引く）
+    static func netSale(chips: Double, defectRate: Double, priceYen: Double)
+        -> (revenueYen: Double, defectChips: Double, penaltyYen: Double) {
+        let defects = chips * defectRate
+        let penalty = defects * priceYen * marketDefectPenaltyRate * productMarketPenaltyMultiplier
+        return (chips * priceYen - penalty, defects, penalty)
     }
 
     // MARK: Tick
@@ -232,6 +308,7 @@ enum Engine {
         }
 
         state.stats.playSeconds += dtRealSeconds
+        state.gameHoursElapsed += gameMinutes / 60
 
         let d = derived(state: state)
         let node = currentNode(state: state)
@@ -254,33 +331,50 @@ enum Engine {
         state.stats.totalWafersInput += flow
         state.fab.wipWafers = (state.fab.wipWafers + flow).truncatingRemainder(dividingBy: 1)
 
-        let chips = flow * Double(node.diesPerWafer)
-        let good = chips * d.currentYield
-        let defect = chips * (1 - d.currentYield)
-        state.stats.totalGoodChips += good
-        state.stats.totalDefectChips += defect
-        state.stats.defectLossYen += defect * price
+        // 不良は各工程で生まれ、検査で見つかった分だけ廃棄される。残りは良品に混ざって出荷される
+        let grossDies = flow * Double(node.diesPerWafer)
+        let goodDies = grossDies * d.lineYield
+        let defectDies = grossDies - goodDies
+        let detectedDies = defectDies * d.detectionRate
+        let shippedDefectDies = defectDies - detectedDies
+        state.stats.totalGoodChips += goodDies
+        state.stats.totalDefectChips += detectedDies
+        state.stats.defectLossYen += detectedDies * price
 
+        let outputChips = goodDies + shippedDefectDies
+        let defectMix = outputChips > 0 ? shippedDefectDies / outputChips : 0
         var soldChips = 0.0
         if state.fab.autoSellEnabled {
-            soldChips = good
+            soldChips = outputChips
         } else {
-            state.fab.inventoryChips += good
+            // 不良は区別できないので在庫に混ざる
+            state.fab.inventoryChips += outputChips
             if state.fab.inventoryChips > inventoryCap {
                 soldChips = state.fab.inventoryChips - inventoryCap
                 state.fab.inventoryChips = inventoryCap
             }
         }
-        let revenue = soldChips * price
-        if revenue > 0 {
-            recordSale(state: &state, revenueYen: revenue, priceYen: price)
+        var sale = (revenueYen: 0.0, defectChips: 0.0, penaltyYen: 0.0)
+        if soldChips > 0 {
+            sale = netSale(chips: soldChips, defectRate: defectMix, priceYen: price)
+            state.stats.totalShippedChips += soldChips
+            state.stats.totalMarketDefectChips += sale.defectChips
+            state.stats.totalMarketPenaltyYen += sale.penaltyYen
+            recordSale(state: &state, revenueYen: sale.revenueYen, priceYen: price)
         }
 
-        return TickResult(producedWafers: flow, goodChips: good, revenueYen: revenue)
+        return TickResult(
+            producedWafers: flow,
+            goodChips: goodDies,
+            revenueYen: sale.revenueYen,
+            shippedDefectChips: sale.defectChips,
+            marketPenaltyYen: sale.penaltyYen
+        )
     }
 
     private static func recordSale(state: inout GameState, revenueYen: Double, priceYen: Double) {
-        state.cashYen += revenueYen
+        // 不良が多すぎると純売上がマイナスになりうるため、現金は0で下げ止める
+        state.cashYen = max(0, state.cashYen + revenueYen)
         state.stats.totalRevenueYen += revenueYen
         state.market.recentAvgPriceYen =
             state.market.recentAvgPriceYen * (1 - recentPriceSmoothing) + priceYen * recentPriceSmoothing
@@ -292,6 +386,8 @@ enum Engine {
         let capped = min(max(elapsedRealSeconds, 0), offlineCapSeconds)
         let effective = capped * offlineEfficiency
         let frozenPrice = state.market.recentAvgPriceYen
+        // オフライン中はゲーム内時計を進めない（tick が加算した分をループ後に戻す）
+        let savedGameHours = state.gameHoursElapsed
 
         var remaining = effective
         var produced = 0.0
@@ -305,6 +401,7 @@ enum Engine {
             revenue += result.revenueYen
             remaining -= step
         }
+        state.gameHoursElapsed = savedGameHours
 
         return OfflineReport(
             elapsedSeconds: capped,
@@ -383,39 +480,106 @@ enum Engine {
         return true
     }
 
-    /// 在庫チップを指定価格で一括売却し、売上額を返す
+    /// 在庫チップを一括売却した場合の純売上（現在の市場不良率を混入率とみなす）
+    static func inventorySaleValueYen(state: GameState, priceYen: Double) -> Double {
+        netSale(chips: state.fab.inventoryChips, defectRate: derived(state: state).marketDefectRate, priceYen: priceYen).revenueYen
+    }
+
+    /// 在庫チップを指定価格で一括売却し、純売上（市場不良ペナルティ控除後）を返す
     @discardableResult
     static func sellInventory(state: inout GameState, priceYen: Double) -> Double {
         let chips = state.fab.inventoryChips
         guard chips > 0 else { return 0 }
+        let sale = netSale(chips: chips, defectRate: derived(state: state).marketDefectRate, priceYen: priceYen)
         state.fab.inventoryChips = 0
-        let revenue = chips * priceYen
-        recordSale(state: &state, revenueYen: revenue, priceYen: priceYen)
-        return revenue
+        state.stats.totalShippedChips += chips
+        state.stats.totalMarketDefectChips += sale.defectChips
+        state.stats.totalMarketPenaltyYen += sale.penaltyYen
+        recordSale(state: &state, revenueYen: sale.revenueYen, priceYen: priceYen)
+        return sale.revenueYen
     }
 
     // MARK: プレビュー
 
-    /// 指定モデルを1台追加した場合のラインWPH（資金・スロットは無視）
-    static func lineWPHAfterAdding(state: GameState, modelId: String) -> Double {
+    private static func stateAfterAdding(_ state: GameState, modelId: String) -> GameState {
         var copy = state
         copy.fab.equipment.append(EquipmentInstance(modelId: modelId))
-        return derived(state: copy).lineWPH
+        return copy
     }
 
-    /// 指定装置を1段階改良した場合のラインWPH（資金は無視）
-    static func lineWPHAfterUpgrading(state: GameState, instanceId: UUID) -> Double {
+    private static func stateAfterUpgrading(_ state: GameState, instanceId: UUID) -> GameState {
         var copy = state
         if let index = copy.fab.equipment.firstIndex(where: { $0.id == instanceId }) {
             copy.fab.equipment[index].level = min(copy.fab.equipment[index].level + 1, maxLevel)
         }
-        return derived(state: copy).lineWPH
+        return copy
+    }
+
+    private static func stateAfterSelling(_ state: GameState, instanceId: UUID) -> GameState {
+        var copy = state
+        copy.fab.equipment.removeAll { $0.id == instanceId }
+        return copy
+    }
+
+    private static func processOf(instanceId: UUID, in state: GameState) -> ProcessType? {
+        guard let instance = state.fab.equipment.first(where: { $0.id == instanceId }) else { return nil }
+        return Catalog.model(id: instance.modelId)?.process
+    }
+
+    /// 指定モデルを1台追加した場合のラインWPH（資金・スロットは無視）
+    static func lineWPHAfterAdding(state: GameState, modelId: String) -> Double {
+        derived(state: stateAfterAdding(state, modelId: modelId)).lineWPH
+    }
+
+    /// 指定装置を1段階改良した場合のラインWPH（資金は無視）
+    static func lineWPHAfterUpgrading(state: GameState, instanceId: UUID) -> Double {
+        derived(state: stateAfterUpgrading(state, instanceId: instanceId)).lineWPH
     }
 
     /// 指定装置を売却した場合のラインWPH
     static func lineWPHAfterSelling(state: GameState, instanceId: UUID) -> Double {
-        var copy = state
-        copy.fab.equipment.removeAll { $0.id == instanceId }
-        return derived(state: copy).lineWPH
+        derived(state: stateAfterSelling(state, instanceId: instanceId)).lineWPH
+    }
+
+    /// 指定モデルを1台追加した場合の、そのモデルの工程の工程歩留まり
+    static func processYieldAfterAdding(state: GameState, modelId: String) -> Double {
+        guard let process = Catalog.model(id: modelId)?.process else { return 0 }
+        return derived(state: stateAfterAdding(state, modelId: modelId)).processYields[process] ?? 0
+    }
+
+    /// 指定装置を1段階改良した場合の、その装置の工程の工程歩留まり
+    static func processYieldAfterUpgrading(state: GameState, instanceId: UUID) -> Double {
+        guard let process = processOf(instanceId: instanceId, in: state) else { return 0 }
+        return derived(state: stateAfterUpgrading(state, instanceId: instanceId)).processYields[process] ?? 0
+    }
+
+    /// 指定装置を売却した場合の、その装置の工程の工程歩留まり
+    static func processYieldAfterSelling(state: GameState, instanceId: UUID) -> Double {
+        guard let process = processOf(instanceId: instanceId, in: state) else { return 0 }
+        return derived(state: stateAfterSelling(state, instanceId: instanceId)).processYields[process] ?? 0
+    }
+
+    static func lineYieldAfterAdding(state: GameState, modelId: String) -> Double {
+        derived(state: stateAfterAdding(state, modelId: modelId)).lineYield
+    }
+
+    static func lineYieldAfterUpgrading(state: GameState, instanceId: UUID) -> Double {
+        derived(state: stateAfterUpgrading(state, instanceId: instanceId)).lineYield
+    }
+
+    static func lineYieldAfterSelling(state: GameState, instanceId: UUID) -> Double {
+        derived(state: stateAfterSelling(state, instanceId: instanceId)).lineYield
+    }
+
+    static func detectionRateAfterAdding(state: GameState, modelId: String) -> Double {
+        derived(state: stateAfterAdding(state, modelId: modelId)).detectionRate
+    }
+
+    static func detectionRateAfterUpgrading(state: GameState, instanceId: UUID) -> Double {
+        derived(state: stateAfterUpgrading(state, instanceId: instanceId)).detectionRate
+    }
+
+    static func detectionRateAfterSelling(state: GameState, instanceId: UUID) -> Double {
+        derived(state: stateAfterSelling(state, instanceId: instanceId)).detectionRate
     }
 }

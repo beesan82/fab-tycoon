@@ -131,12 +131,6 @@ private struct ShopModelCard: View {
             .font(.caption)
             .foregroundStyle(.secondary)
 
-            if model.yieldBonus > 0 {
-                Text("歩留まり +\(MoneyFormat.percent(model.yieldBonus, digits: 0))")
-                    .font(.caption)
-                    .foregroundStyle(.green)
-            }
-
             if isLocked {
                 ForEach(lockReasons, id: \.self) { reason in
                     Label(reason, systemImage: "lock")
@@ -162,6 +156,14 @@ private struct ShopModelCard: View {
                     Text("この工程はボトルネックではないため、ラインWPHは増えません")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                }
+                let currentYield = store.derived.processYields[model.process] ?? 0
+                let predictedYield = Engine.processYieldAfterAdding(state: state, modelId: model.id)
+                fromToRow("購入後 工程歩留まり", current: currentYield, predicted: predictedYield)
+                if model.process == .inspection {
+                    let currentDetection = store.derived.detectionRate
+                    let predictedDetection = Engine.detectionRateAfterAdding(state: state, modelId: model.id)
+                    fromToRow("購入後 検出率", current: currentDetection, predicted: predictedDetection)
                 }
                 if let message = blockMessage(block) {
                     Label(message, systemImage: "exclamationmark.circle")
@@ -196,6 +198,19 @@ private struct ShopModelCard: View {
             Spacer()
             Text(value)
                 .monospacedDigit()
+        }
+        .font(.subheadline)
+    }
+
+    /// 割合の From→To 行。改善時のみ緑
+    private func fromToRow(_ title: String, current: Double, predicted: Double) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Text("\(MoneyFormat.percent(current)) → \(MoneyFormat.percent(predicted))")
+                .monospacedDigit()
+                .bold()
+                .foregroundStyle(predicted > current + 1e-9 ? Color.green : Color.secondary)
         }
         .font(.subheadline)
     }
