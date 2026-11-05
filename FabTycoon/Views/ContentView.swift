@@ -14,6 +14,9 @@ struct ContentView: View {
                 ShopView()
                     .tabItem { Label("装置", systemImage: "cart") }
                     .tag(AppTab.shop)
+                ProductsView()
+                    .tabItem { Label("製品", systemImage: "shippingbox") }
+                    .tag(AppTab.products)
                 StatsView()
                     .tabItem { Label("統計", systemImage: "chart.bar") }
                     .tag(AppTab.stats)

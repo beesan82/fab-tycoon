@@ -60,7 +60,9 @@ struct GameState: Codable, Equatable {
                 wipWafers: 0,
                 inventoryChips: 0,
                 autoSellEnabled: true,
-                running: true
+                running: true,
+                storedEquipment: [],
+                expansionCount: 0
             ),
             market: MarketState(),
             learningWafers: [:],
@@ -141,8 +143,47 @@ struct Fab: Codable, Equatable, Identifiable {
     var inventoryChips: Double
     var autoSellEnabled: Bool
     var running: Bool
+    /// 倉庫（未設置の所有装置）。スロットを消費せず、集計にも含めない
+    var storedEquipment: [EquipmentInstance]
+    /// 増床回数
+    var expansionCount: Int
 
+    /// 倉庫の装置は枠を消費しない
     var freeSlots: Int { max(0, slots - equipment.count) }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case currentNodeId
+        case slots
+        case equipment
+        case wipWafers
+        case inventoryChips
+        case autoSellEnabled
+        case running
+        case storedEquipment
+        case expansionCount
+    }
+}
+
+// 旧セーブ互換：倉庫・増床導入前のセーブも読めるようにする。
+// extension に置くことで memberwise init を残す。
+extension Fab {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        currentNodeId = try container.decode(String.self, forKey: .currentNodeId)
+        slots = try container.decode(Int.self, forKey: .slots)
+        equipment = try container.decode([EquipmentInstance].self, forKey: .equipment)
+        wipWafers = try container.decodeIfPresent(Double.self, forKey: .wipWafers) ?? 0
+        inventoryChips = try container.decodeIfPresent(Double.self, forKey: .inventoryChips) ?? 0
+        autoSellEnabled = try container.decodeIfPresent(Bool.self, forKey: .autoSellEnabled) ?? true
+        running = try container.decodeIfPresent(Bool.self, forKey: .running) ?? true
+        storedEquipment = try container.decodeIfPresent([EquipmentInstance].self, forKey: .storedEquipment) ?? []
+        // 増床回数導入前のセーブは、初期12枠からの増分（1回 +4枠）で推定する
+        expansionCount = try container.decodeIfPresent(Int.self, forKey: .expansionCount) ?? max(0, (slots - 12) / 4)
+    }
 }
 
 struct EquipmentInstance: Codable, Equatable, Identifiable {

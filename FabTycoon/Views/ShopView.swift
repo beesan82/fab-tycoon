@@ -17,6 +17,8 @@ struct ShopView: View {
                 filterBar
                 slotSummary
                     .padding(.horizontal)
+                expansionRow
+                    .padding(.horizontal)
                 ForEach(filteredModels) { model in
                     ShopModelCard(model: model)
                         .padding(.horizontal)
@@ -55,6 +57,46 @@ struct ShopView: View {
         }
         .font(.subheadline)
     }
+
+    /// 増床（スロット +4）
+    private var expansionRow: some View {
+        let state = store.state
+        let fab = state.fab
+        let cost = Engine.expansionCostYen(state: state)
+        let canExpand = Engine.canExpandFab(state: state)
+        return HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("増床（スロット拡張）")
+                    .font(.subheadline.bold())
+                Text("スロット \(fab.slots) → \(fab.slots + Engine.expansionSlotCount)")
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            VStack(alignment: .trailing, spacing: 2) {
+                Button {
+                    store.expandFab()
+                } label: {
+                    VStack(spacing: 2) {
+                        Text("増床する（+\(Engine.expansionSlotCount)枠）")
+                        Text(MoneyFormat.yen(cost))
+                            .font(.caption2)
+                            .monospacedDigit()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canExpand)
+                if !canExpand {
+                    Text("資金不足（あと\(MoneyFormat.yen(cost - state.cashYen))）")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+        }
+        .padding()
+        .background(RoundedRectangle(cornerRadius: 14).fill(Color(.secondarySystemGroupedBackground)))
+    }
 }
 
 // MARK: - フィルタチップ
@@ -89,7 +131,8 @@ private struct ShopModelCard: View {
         let lockReasons = Engine.lockReasons(model: model, nodeId: node.id)
         let isLocked = !lockReasons.isEmpty
         let block = Engine.buyBlockReason(state: state, modelId: model.id)
-        let owned = state.fab.equipment.filter { $0.modelId == model.id }.count
+        // 所持台数は設置中＋倉庫
+        let owned = Engine.ownedCount(state: state, modelIds: [model.id])
 
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 10) {

@@ -143,6 +143,12 @@ enum Engine {
     static let subsidyRate = 1.0 / 3.0
     /// 交付可能額が1000万円未満なら申請不可
     static let subsidyMinimumGrantYen = 10_000_000.0
+    /// 増床の初回価格（第1ファブ、DESIGN.md §2.7）
+    static let expansionBasePriceYen = 500_000_000.0
+    /// 増床1回ごとの価格倍率
+    static let expansionPriceGrowth = 1.6
+    /// 増床1回で増えるスロット数
+    static let expansionSlotCount = 4
 
     // MARK: 製品倍率
 
@@ -503,10 +509,68 @@ enum Engine {
 
     @discardableResult
     static func sellEquipment(state: inout GameState, instanceId: UUID) -> Bool {
+        // 設置中・倉庫のどちらからでも売却できる
+        if let index = state.fab.equipment.firstIndex(where: { $0.id == instanceId }) {
+            let refund = sellRefundYen(instance: state.fab.equipment[index])
+            state.fab.equipment.remove(at: index)
+            state.cashYen += refund
+            return true
+        }
+        if let index = state.fab.storedEquipment.firstIndex(where: { $0.id == instanceId }) {
+            let refund = sellRefundYen(instance: state.fab.storedEquipment[index])
+            state.fab.storedEquipment.remove(at: index)
+            state.cashYen += refund
+            return true
+        }
+        return false
+    }
+
+    // MARK: 付け替え（倉庫）
+
+    /// 設置中の装置を倉庫へ外す（無料。レベル・購入日時は保持）
+    @discardableResult
+    static func detachEquipment(state: inout GameState, instanceId: UUID) -> Bool {
         guard let index = state.fab.equipment.firstIndex(where: { $0.id == instanceId }) else { return false }
-        let refund = sellRefundYen(instance: state.fab.equipment[index])
-        state.fab.equipment.remove(at: index)
-        state.cashYen += refund
+        let instance = state.fab.equipment.remove(at: index)
+        state.fab.storedEquipment.append(instance)
+        return true
+    }
+
+    /// 倉庫の装置を再設置できるか（倉庫に存在し、空きスロットがある）
+    static func canAttachEquipment(state: GameState, instanceId: UUID) -> Bool {
+        state.fab.storedEquipment.contains { $0.id == instanceId } && state.fab.freeSlots > 0
+    }
+
+    /// 倉庫の装置をラインに設置する（空きスロットが必要）
+    @discardableResult
+    static func attachEquipment(state: inout GameState, instanceId: UUID) -> Bool {
+        guard state.fab.freeSlots > 0,
+              let index = state.fab.storedEquipment.firstIndex(where: { $0.id == instanceId })
+        else { return false }
+        let instance = state.fab.storedEquipment.remove(at: index)
+        state.fab.equipment.append(instance)
+        return true
+    }
+
+    // MARK: 増床
+
+    /// 次回の増床価格（初回価格 × 1.6^増床回数）
+    static func expansionCostYen(state: GameState) -> Double {
+        expansionBasePriceYen * pow(expansionPriceGrowth, Double(state.fab.expansionCount))
+    }
+
+    static func canExpandFab(state: GameState) -> Bool {
+        state.cashYen >= expansionCostYen(state: state)
+    }
+
+    /// 増床してスロットを +4 する。補助金の累計設備投資には数えない
+    @discardableResult
+    static func expandFab(state: inout GameState) -> Bool {
+        let cost = expansionCostYen(state: state)
+        guard state.cashYen >= cost else { return false }
+        state.cashYen -= cost
+        state.fab.slots += expansionSlotCount
+        state.fab.expansionCount += 1
         return true
     }
 
@@ -533,10 +597,10 @@ enum Engine {
 
     // MARK: 製品
 
-    /// 設置済み装置のうち modelIds に含まれる台数。要求はファブの設備能力に対する条件なので、
-    /// 現在ノードで稼働しているか（isActive）は問わない
+    /// 所有装置（設置中＋倉庫）のうち modelIds に含まれる台数。要求はファブの設備能力に対する条件なので、
+    /// 現在ノードで稼働しているか（isActive）や設置中かどうかは問わない
     static func ownedCount(state: GameState, modelIds: [String]) -> Int {
-        state.fab.equipment.filter { modelIds.contains($0.modelId) }.count
+        (state.fab.equipment + state.fab.storedEquipment).filter { modelIds.contains($0.modelId) }.count
     }
 
     /// 要求の選択肢のいずれかを満たしていれば充足
@@ -680,11 +744,13 @@ enum Engine {
     private static func stateAfterSelling(_ state: GameState, instanceId: UUID) -> GameState {
         var copy = state
         copy.fab.equipment.removeAll { $0.id == instanceId }
+        copy.fab.storedEquipment.removeAll { $0.id == instanceId }
         return copy
     }
 
     private static func processOf(instanceId: UUID, in state: GameState) -> ProcessType? {
-        guard let instance = state.fab.equipment.first(where: { $0.id == instanceId }) else { return nil }
+        guard let instance = (state.fab.equipment + state.fab.storedEquipment).first(where: { $0.id == instanceId })
+        else { return nil }
         return Catalog.model(id: instance.modelId)?.process
     }
 

@@ -4,6 +4,7 @@ import SwiftUI
 enum AppTab: Hashable {
     case line
     case shop
+    case products
     case stats
 }
 
@@ -138,6 +139,27 @@ final class GameStore: ObservableObject {
     @discardableResult
     func sellEquipment(_ instanceId: UUID) -> Bool {
         let ok = Engine.sellEquipment(state: &state, instanceId: instanceId)
+        refresh()
+        return ok
+    }
+
+    @discardableResult
+    func detachEquipment(_ instanceId: UUID) -> Bool {
+        let ok = Engine.detachEquipment(state: &state, instanceId: instanceId)
+        refresh()
+        return ok
+    }
+
+    @discardableResult
+    func attachEquipment(_ instanceId: UUID) -> Bool {
+        let ok = Engine.attachEquipment(state: &state, instanceId: instanceId)
+        refresh()
+        return ok
+    }
+
+    @discardableResult
+    func expandFab() -> Bool {
+        let ok = Engine.expandFab(state: &state)
         refresh()
         return ok
     }

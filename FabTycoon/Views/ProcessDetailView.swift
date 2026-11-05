@@ -15,8 +15,14 @@ struct ProcessDetailView: View {
         self.onAddEquipment = onAddEquipment
     }
 
+    /// 設置中の装置（この工程分）
     private var instances: [EquipmentInstance] {
         store.state.fab.equipment.filter { Catalog.model(id: $0.modelId)?.process == process }
+    }
+
+    /// 倉庫の装置（この工程分）
+    private var storedInstances: [EquipmentInstance] {
+        store.state.fab.storedEquipment.filter { Catalog.model(id: $0.modelId)?.process == process }
     }
 
     var body: some View {
@@ -55,15 +61,27 @@ struct ProcessDetailView: View {
                     }
                 }
 
-                Section("装置（改良・売却）") {
+                Section("設置中の装置") {
                     if instances.isEmpty {
                         Text("装置がありません。この工程が止まるとライン全体が停止します。")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     }
                     ForEach(instances) { instance in
-                        EquipmentRow(instance: instance) {
-                            pendingSell = instance
+                        EquipmentRow(
+                            instance: instance,
+                            onSell: { pendingSell = instance },
+                            onDetach: { store.detachEquipment(instance.id) }
+                        )
+                    }
+                }
+
+                if !storedInstances.isEmpty {
+                    Section("倉庫の装置") {
+                        ForEach(storedInstances) { instance in
+                            StoredEquipmentRow(instance: instance) {
+                                pendingSell = instance
+                            }
                         }
                     }
                 }
@@ -114,6 +132,9 @@ struct ProcessDetailView: View {
     }
 
     private func sellMessage(for instance: EquipmentInstance, state: GameState, derived: DerivedState) -> String {
+        if state.fab.storedEquipment.contains(where: { $0.id == instance.id }) {
+            return "返金はモデル価格の50%です。倉庫の装置はラインに影響していないため、売却してもラインWPH・歩留まりは変わりません。"
+        }
         let after = Engine.lineWPHAfterSelling(state: state, instanceId: instance.id)
         let yieldAfter = Engine.processYieldAfterSelling(state: state, instanceId: instance.id)
         var text = "返金はモデル価格の50%です（改良投資分は戻りません）。\nラインWPH \(MoneyFormat.decimal(derived.lineWPH)) → \(MoneyFormat.decimal(after))"
@@ -153,6 +174,7 @@ private struct EquipmentRow: View {
     @EnvironmentObject private var store: GameStore
     let instance: EquipmentInstance
     let onSell: () -> Void
+    let onDetach: () -> Void
 
     var body: some View {
         let state = store.state
@@ -226,6 +248,72 @@ private struct EquipmentRow: View {
                         .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
+                    Button {
+                        onDetach()
+                    } label: {
+                        Text("倉庫へ外す")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+            .padding(.vertical, 4)
+        } else {
+            Text("不明な装置（\(instance.modelId)）")
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+// MARK: - 倉庫の装置行
+
+private struct StoredEquipmentRow: View {
+    @EnvironmentObject private var store: GameStore
+    let instance: EquipmentInstance
+    let onSell: () -> Void
+
+    var body: some View {
+        let canAttach = store.state.fab.freeSlots > 0
+        if let model = Catalog.model(id: instance.modelId) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .center, spacing: 12) {
+                    EquipmentIllustration(model: model)
+                        .frame(width: 44, height: 44)
+                    Text(model.name)
+                        .font(.headline)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Text("Lv\(instance.level)")
+                        .font(.subheadline.bold())
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                }
+                HStack(spacing: 8) {
+                    Button {
+                        store.attachEquipment(instance.id)
+                    } label: {
+                        Text("設置する")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canAttach)
+                    Button(role: .destructive) {
+                        onSell()
+                    } label: {
+                        VStack(spacing: 2) {
+                            Text("売却")
+                            Text("+\(MoneyFormat.yen(Engine.sellRefundYen(instance: instance)))")
+                                .font(.caption2)
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                if !canAttach {
+                    Text("空きスロットがありません")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .padding(.vertical, 4)
