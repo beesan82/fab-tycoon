@@ -135,14 +135,35 @@ enum Engine {
     static let detectionHeadroomBonus = 0.30
     /// 市場不良1個あたりの返品・対応コスト（販売額に対する倍率）
     static let marketDefectPenaltyRate = 1.5
+    /// 補助金の審査期間（ゲーム内5日）
+    static let subsidyReviewHours = 120.0
+    /// 補助金のクールダウン（前回交付からゲーム内30日）
+    static let subsidyCooldownHours = 720.0
+    /// 交付上限は累計設備投資の1/3
+    static let subsidyRate = 1.0 / 3.0
+    /// 交付可能額が1000万円未満なら申請不可
+    static let subsidyMinimumGrantYen = 10_000_000.0
 
-    // 次ラウンドの製品選択機能のための継ぎ目。現在は全て 1.0（製品選択UIは未実装）
-    /// 製品ごとの歩留まり倍率（lineYield の最終段に乗算）
-    static let productYieldMultiplier = 1.0
+    // MARK: 製品倍率
+
+    static func currentProduct(state: GameState) -> ProductSpec {
+        Catalog.product(id: state.currentProductId) ?? Catalog.defaultProduct
+    }
+
+    /// 製品ごとの歩留まり倍率（欠陥側に 1/倍率 で効く）
+    static func productYieldMultiplier(state: GameState) -> Double {
+        currentProduct(state: state).yieldMultiplier
+    }
+
     /// 製品ごとの単価倍率（currentPriceYen に乗算）
-    static let productPriceMultiplier = 1.0
+    static func productPriceMultiplier(state: GameState) -> Double {
+        currentProduct(state: state).priceMultiplier
+    }
+
     /// 製品ごとの市場不良ペナルティ倍率（ペナルティ額に乗算）
-    static let productMarketPenaltyMultiplier = 1.0
+    static func productMarketPenaltyMultiplier(state: GameState) -> Double {
+        currentProduct(state: state).marketPenaltyMultiplier
+    }
 
     // MARK: 派生計算
 
@@ -228,7 +249,8 @@ enum Engine {
         let learningDefectScale = node.yieldInit < 1 ? (1 - learnedYield) / (1 - node.yieldInit) : 0
         let processProduct = ProcessType.allCases.reduce(1.0) { $0 * (processYields[$1] ?? 0) }
         let rawLineYield = 1 - (1 - processProduct) * learningDefectScale
-        let lineYield = min(max(rawLineYield * productYieldMultiplier, 0), 0.99)
+        // 製品倍率は欠陥側に効く（倍率 >1 で欠陥が 1/倍率 に縮み、<1 で増える）
+        let lineYield = min(max(1 - (1 - rawLineYield) / productYieldMultiplier(state: state), 0), 0.99)
 
         // 検査スクリーニング：基礎検出率＋検査能力の余裕度
         let inspectionWPH = wph[.inspection] ?? 0
@@ -243,9 +265,9 @@ enum Engine {
         let marketDefectRate = shippedTotal > 0 ? shippedDefectFraction / shippedTotal : 0
 
         let cycleFactor = 1 + marketCycleAmplitude * sin(2 * Double.pi * state.market.gameTimeMinutes / marketCycleMinutes)
-        let price = node.chipBasePriceYen * cycleFactor * state.market.walkFactor * productPriceMultiplier
+        let price = node.chipBasePriceYen * cycleFactor * state.market.walkFactor * productPriceMultiplier(state: state)
         // 純売上 = (良品+出荷不良)×単価 − 出荷不良×単価×1.5×製品倍率 をウェハ1枚あたりに直したもの
-        let penaltyRate = marketDefectPenaltyRate * productMarketPenaltyMultiplier
+        let penaltyRate = marketDefectPenaltyRate * productMarketPenaltyMultiplier(state: state)
         let marginPerWafer = Double(node.diesPerWafer) * price
             * (lineYield + shippedDefectFraction * (1 - penaltyRate)) - node.waferCostYen
 
@@ -280,10 +302,10 @@ enum Engine {
     }
 
     /// 出荷チップの純売上（不良混入率 defectRate の分だけ販売額の150%×製品倍率を差し引く）
-    static func netSale(chips: Double, defectRate: Double, priceYen: Double)
+    static func netSale(chips: Double, defectRate: Double, priceYen: Double, penaltyMultiplier: Double)
         -> (revenueYen: Double, defectChips: Double, penaltyYen: Double) {
         let defects = chips * defectRate
-        let penalty = defects * priceYen * marketDefectPenaltyRate * productMarketPenaltyMultiplier
+        let penalty = defects * priceYen * marketDefectPenaltyRate * penaltyMultiplier
         return (chips * priceYen - penalty, defects, penalty)
     }
 
@@ -309,6 +331,11 @@ enum Engine {
 
         state.stats.playSeconds += dtRealSeconds
         state.gameHoursElapsed += gameMinutes / 60
+        // 補助金の交付はオンライン中のみ進める。offlineProgress は frozenPriceYen を渡して
+        // tick を呼ぶので、frozenPriceYen が nil のときだけ精算する（オフラインでは審査が進まない）
+        if frozenPriceYen == nil {
+            settleSubsidyIfDue(state: &state)
+        }
 
         let d = derived(state: state)
         let node = currentNode(state: state)
@@ -356,7 +383,8 @@ enum Engine {
         }
         var sale = (revenueYen: 0.0, defectChips: 0.0, penaltyYen: 0.0)
         if soldChips > 0 {
-            sale = netSale(chips: soldChips, defectRate: defectMix, priceYen: price)
+            sale = netSale(chips: soldChips, defectRate: defectMix, priceYen: price,
+                           penaltyMultiplier: productMarketPenaltyMultiplier(state: state))
             state.stats.totalShippedChips += soldChips
             state.stats.totalMarketDefectChips += sale.defectChips
             state.stats.totalMarketPenaltyYen += sale.penaltyYen
@@ -457,6 +485,7 @@ enum Engine {
         guard canBuy(state: state, modelId: modelId), let model = Catalog.model(id: modelId) else { return false }
         state.cashYen -= model.priceYen
         state.fab.equipment.append(EquipmentInstance(modelId: modelId, level: 1, purchasedAt: now))
+        state.subsidy.totalInvestedYen += model.priceYen
         return true
     }
 
@@ -468,6 +497,7 @@ enum Engine {
         else { return false }
         state.cashYen -= cost
         state.fab.equipment[index].level += 1
+        state.subsidy.totalInvestedYen += cost
         return true
     }
 
@@ -482,7 +512,8 @@ enum Engine {
 
     /// 在庫チップを一括売却した場合の純売上（現在の市場不良率を混入率とみなす）
     static func inventorySaleValueYen(state: GameState, priceYen: Double) -> Double {
-        netSale(chips: state.fab.inventoryChips, defectRate: derived(state: state).marketDefectRate, priceYen: priceYen).revenueYen
+        netSale(chips: state.fab.inventoryChips, defectRate: derived(state: state).marketDefectRate, priceYen: priceYen,
+                penaltyMultiplier: productMarketPenaltyMultiplier(state: state)).revenueYen
     }
 
     /// 在庫チップを指定価格で一括売却し、純売上（市場不良ペナルティ控除後）を返す
@@ -490,13 +521,144 @@ enum Engine {
     static func sellInventory(state: inout GameState, priceYen: Double) -> Double {
         let chips = state.fab.inventoryChips
         guard chips > 0 else { return 0 }
-        let sale = netSale(chips: chips, defectRate: derived(state: state).marketDefectRate, priceYen: priceYen)
+        let sale = netSale(chips: chips, defectRate: derived(state: state).marketDefectRate, priceYen: priceYen,
+                           penaltyMultiplier: productMarketPenaltyMultiplier(state: state))
         state.fab.inventoryChips = 0
         state.stats.totalShippedChips += chips
         state.stats.totalMarketDefectChips += sale.defectChips
         state.stats.totalMarketPenaltyYen += sale.penaltyYen
         recordSale(state: &state, revenueYen: sale.revenueYen, priceYen: priceYen)
         return sale.revenueYen
+    }
+
+    // MARK: 製品
+
+    /// 設置済み装置のうち modelIds に含まれる台数。要求はファブの設備能力に対する条件なので、
+    /// 現在ノードで稼働しているか（isActive）は問わない
+    static func ownedCount(state: GameState, modelIds: [String]) -> Int {
+        state.fab.equipment.filter { modelIds.contains($0.modelId) }.count
+    }
+
+    /// 要求の選択肢のいずれかを満たしていれば充足
+    static func isSatisfied(state: GameState, requirement: ProductRequirement) -> Bool {
+        requirement.options.contains { ownedCount(state: state, modelIds: $0.modelIds) >= $0.count }
+    }
+
+    /// 未充足の要求ラベル（空なら選択可能）
+    static func productBlockReasons(state: GameState, productId: String) -> [String] {
+        guard let product = Catalog.product(id: productId) else { return ["不明な製品です"] }
+        return product.requirements
+            .filter { !isSatisfied(state: state, requirement: $0) }
+            .map { $0.label }
+    }
+
+    static func canSelectProduct(state: GameState, productId: String) -> Bool {
+        Catalog.product(id: productId) != nil && productBlockReasons(state: state, productId: productId).isEmpty
+    }
+
+    /// 指定製品に切り替えた場合の派生状態（プレビュー用）
+    static func derived(state: GameState, asProduct productId: String) -> DerivedState {
+        var copy = state
+        copy.currentProductId = productId
+        return derived(state: copy)
+    }
+
+    @discardableResult
+    static func switchProduct(state: inout GameState, productId: String) -> Bool {
+        guard Catalog.product(id: productId) != nil, productId != state.currentProductId else { return false }
+        guard canSelectProduct(state: state, productId: productId) else { return false }
+        if state.fab.inventoryChips > 0 {
+            // 在庫は旧製品の単価・不良率で精算してから切り替える
+            sellInventory(state: &state, priceYen: derived(state: state).currentPriceYen)
+        }
+        state.currentProductId = productId
+        return true
+    }
+
+    // MARK: 国庫補助金
+
+    /// 今申請した場合の交付額（累計設備投資の1/3 − 受給済み）
+    static func subsidyCapYen(state: GameState) -> Double {
+        max(0, state.subsidy.totalInvestedYen * subsidyRate - state.subsidy.totalReceivedYen)
+    }
+
+    /// 申請できない理由（nil なら申請可能）
+    static func subsidyBlockReason(state: GameState) -> String? {
+        if state.subsidy.pendingGrantAtHours != nil { return "審査中です" }
+        if let last = state.subsidy.lastGrantAtHours,
+           state.gameHoursElapsed - last < subsidyCooldownHours { return "クールダウン中です" }
+        if subsidyCapYen(state: state) < subsidyMinimumGrantYen { return "交付可能額が1,000万円未満のため申請できません" }
+        return nil
+    }
+
+    static func canApplySubsidy(state: GameState) -> Bool { subsidyBlockReason(state: state) == nil }
+
+    @discardableResult
+    static func applySubsidy(state: inout GameState) -> Bool {
+        guard canApplySubsidy(state: state) else { return false }
+        // 申請時点で額を確定する
+        state.subsidy.pendingGrantYen = subsidyCapYen(state: state)
+        state.subsidy.pendingGrantAtHours = state.gameHoursElapsed + subsidyReviewHours
+        return true
+    }
+
+    /// 審査期間が明けていれば交付する
+    static func settleSubsidyIfDue(state: inout GameState) {
+        guard let due = state.subsidy.pendingGrantAtHours, state.gameHoursElapsed >= due else { return }
+        let grant = state.subsidy.pendingGrantYen
+        state.cashYen += grant
+        state.subsidy.totalReceivedYen += grant
+        state.subsidy.lastGrantAtHours = state.gameHoursElapsed
+        state.subsidy.pendingGrantYen = 0
+        state.subsidy.pendingGrantAtHours = nil
+    }
+
+    // 緊急救済枠：工程の装置がなくなりラインが止まり、買い戻す資金もない詰み状態からの救済
+
+    static let emergencyMarginRate = 0.2   // 緊急交付の余裕分（最安機種価格の20%）
+
+    /// 指定工程で、現行ノードで購入可能な機種（lockReasons が空）の最安価格。該当機種がなければ nil
+    static func cheapestModelPriceYen(state: GameState, process: ProcessType) -> Double? {
+        Catalog.models(for: process)
+            .filter { lockReasons(model: $0, nodeId: state.fab.currentNodeId).isEmpty }
+            .map { $0.priceYen }
+            .min()
+    }
+
+    /// ラインが止まっている工程（稼働装置0台）について、現行ノードで購入可能な機種の最安価格。
+    /// 全工程が稼働中なら nil。要求判定と同じく、対象は設置済み台数ではなく derived の稼働台数で見る。
+    static func cheapestStoppedProcessPriceYen(state: GameState) -> Double? {
+        let d = derived(state: state)
+        return ProcessType.allCases
+            .filter { d.units($0) == 0 }
+            .compactMap { cheapestModelPriceYen(state: state, process: $0) }
+            .min()
+    }
+
+    /// 緊急救済で今すぐ交付できる額（常に > 0）。対象外なら nil。
+    /// 対象：ラインWPHが0（いずれかの工程に稼働装置がない）かつ、所持金が「止まっている工程の最安機種価格」未満。
+    /// 額：最安機種価格 − 所持金 ＋ 最安機種価格 × emergencyMarginRate（余裕分）
+    static func emergencyGrantYen(state: GameState) -> Double? {
+        let d = derived(state: state)
+        guard d.lineWPH <= 0, let cheapest = cheapestStoppedProcessPriceYen(state: state) else { return nil }
+        guard state.cashYen < cheapest else { return nil }
+        return cheapest - state.cashYen + cheapest * emergencyMarginRate
+    }
+
+    static func canApplyEmergencySubsidy(state: GameState) -> Bool {
+        emergencyGrantYen(state: state) != nil
+    }
+
+    @discardableResult
+    static func applyEmergencySubsidy(state: inout GameState) -> Bool {
+        guard let amount = emergencyGrantYen(state: state) else { return false }
+        // 審査なしで即時交付。受給累計に数え、通常補助金のクールダウン起算点もここに置く
+        // （緊急交付を使うと通常申請も30日不可）。緊急枠自体はクールダウンで止めない
+        // （複数工程が止まっている場合に繰り返し使って立て直すための救済措置のため）。
+        state.cashYen += amount
+        state.subsidy.totalReceivedYen += amount
+        state.subsidy.lastGrantAtHours = state.gameHoursElapsed
+        return true
     }
 
     // MARK: プレビュー
@@ -539,6 +701,12 @@ enum Engine {
     /// 指定装置を売却した場合のラインWPH
     static func lineWPHAfterSelling(state: GameState, instanceId: UUID) -> Double {
         derived(state: stateAfterSelling(state, instanceId: instanceId)).lineWPH
+    }
+
+    /// 指定装置を売却した場合の、その装置の工程の稼働台数（derived 基準）
+    static func activeUnitsAfterSelling(state: GameState, instanceId: UUID) -> Int {
+        guard let process = processOf(instanceId: instanceId, in: state) else { return 0 }
+        return derived(state: stateAfterSelling(state, instanceId: instanceId)).units(process)
     }
 
     /// 指定モデルを1台追加した場合の、そのモデルの工程の工程歩留まり

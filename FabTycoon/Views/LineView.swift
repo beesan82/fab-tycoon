@@ -198,7 +198,7 @@ struct LineView: View {
                 Button {
                     selectedProcess = process
                 } label: {
-                    Text("改良する")
+                    Text("装置を管理（改良・売却）")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)

@@ -130,6 +130,33 @@ struct EquipmentModel: Identifiable, Equatable {
     }
 }
 
+// MARK: - 製品
+
+/// 製品の装置要求の選択肢（modelIds のいずれかを合計 count 台以上設置）
+struct ProductRequirementOption: Equatable {
+    let modelIds: [String]
+    let count: Int
+}
+
+struct ProductRequirement: Equatable {
+    let label: String
+    /// OR条件：いずれか1つを満たせばよい
+    let options: [ProductRequirementOption]
+}
+
+struct ProductSpec: Identifiable, Equatable {
+    let id: String
+    let name: String
+    /// ヘッダーバッジ用の短い名前
+    let shortName: String
+    /// 学習用の説明文（なぜ単価・歩留まり・ペナルティがそうなるか）
+    let description: String
+    let priceMultiplier: Double
+    let yieldMultiplier: Double
+    let marketPenaltyMultiplier: Double
+    let requirements: [ProductRequirement]
+}
+
 // MARK: - カタログ
 
 enum Catalog {
@@ -252,16 +279,62 @@ enum Catalog {
                        yieldFactor: 0.962, unlockNote: "研究「先端パッケージ」"),
     ]
 
+    static let defaultProductId = "logic"
+
+    static let products: [ProductSpec] = [
+        ProductSpec(
+            id: "logic", name: "汎用ロジック", shortName: "汎用ロジック",
+            description: "スマホや家電に載る標準的なロジックチップ。需要が安定しており、標準的な設備構成でバランスよく作れる。単価・歩留まり・不良の代償のすべてが基準となる製品。",
+            priceMultiplier: 1.0, yieldMultiplier: 1.0, marketPenaltyMultiplier: 1.0,
+            requirements: []
+        ),
+        ProductSpec(
+            id: "power", name: "パワー／アナログ系", shortName: "パワー・アナログ",
+            description: "電源制御やセンサー向けの成熟製品。微細化の限界を攻めない設計なので欠陥が出にくく、歩留まりが高い。その代わり付加価値が低く、単価は安め。",
+            priceMultiplier: 0.6, yieldMultiplier: 1.10, marketPenaltyMultiplier: 1.0,
+            requirements: []
+        ),
+        ProductSpec(
+            id: "highperf", name: "高性能チップ（AI・サーバー向け）", shortName: "高性能チップ",
+            description: "AIサーバー向けの最先端チップ。ダイが大きいほど欠陥を含む確率が上がるため歩留まりは下がるが、単価は跳ね上がる。EUV露光と高度な検査が前提で、不良を出したときの代償も大きい。",
+            priceMultiplier: 2.8, yieldMultiplier: 0.85, marketPenaltyMultiplier: 1.5,
+            requirements: [
+                ProductRequirement(label: "EUV露光機（L3）以上 1台",
+                                   options: [ProductRequirementOption(modelIds: ["L3", "L4"], count: 1)]),
+                ProductRequirement(label: "電子ビーム検査（Q2）以上 1台",
+                                   options: [ProductRequirementOption(modelIds: ["Q2", "Q3"], count: 1)]),
+            ]
+        ),
+        ProductSpec(
+            id: "automotive", name: "車載チップ", shortName: "車載チップ",
+            description: "自動車向けのチップ。単価は高めだが、人命に関わるため不良の代償が段違いに重い。返品・リコール対応のコストが大きく、高度な検査体制が実質的に必須となる。",
+            priceMultiplier: 1.6, yieldMultiplier: 1.0, marketPenaltyMultiplier: 3.0,
+            requirements: [
+                ProductRequirement(label: "AI検査装置（Q3）1台、または電子ビーム検査（Q2）2台",
+                                   options: [
+                                       ProductRequirementOption(modelIds: ["Q3"], count: 1),
+                                       ProductRequirementOption(modelIds: ["Q2"], count: 2),
+                                   ]),
+            ]
+        ),
+    ]
+
     private static let nodeIndex: [String: NodeSpec] =
         Dictionary(uniqueKeysWithValues: nodes.map { ($0.id, $0) })
     private static let modelIndex: [String: EquipmentModel] =
         Dictionary(uniqueKeysWithValues: equipment.map { ($0.id, $0) })
+    private static let productIndex: [String: ProductSpec] =
+        Dictionary(uniqueKeysWithValues: products.map { ($0.id, $0) })
 
     static var defaultNode: NodeSpec { nodes[0] }
+
+    static var defaultProduct: ProductSpec { productIndex[defaultProductId] ?? products[0] }
 
     static func node(id: String) -> NodeSpec? { nodeIndex[id] }
 
     static func model(id: String) -> EquipmentModel? { modelIndex[id] }
+
+    static func product(id: String) -> ProductSpec? { productIndex[id] }
 
     static func models(for process: ProcessType) -> [EquipmentModel] {
         equipment.filter { $0.process == process }

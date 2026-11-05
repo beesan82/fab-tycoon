@@ -14,6 +14,10 @@ struct GameState: Codable, Equatable {
     var createdAt: Date
     /// 経過ゲーム内時間（hours）。オフライン時間は加算しない
     var gameHoursElapsed: Double = 0
+    /// 製造中の製品ID（Catalog.products）
+    var currentProductId: String = Catalog.defaultProductId
+    /// 国庫補助金の申請・受給状況
+    var subsidy: SubsidyState = SubsidyState()
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion
@@ -25,6 +29,13 @@ struct GameState: Codable, Equatable {
         case lastSavedAt
         case createdAt
         case gameHoursElapsed
+        case currentProductId
+        case subsidy
+    }
+
+    /// 設置済み装置の購入価格合計（改良費は含まない）
+    static func equipmentPurchaseTotalYen(_ equipment: [EquipmentInstance]) -> Double {
+        equipment.reduce(0.0) { $0 + (Catalog.model(id: $1.modelId)?.priceYen ?? 0) }
     }
 
     static func initial(now: Date = Date()) -> GameState {
@@ -56,7 +67,9 @@ struct GameState: Codable, Equatable {
             stats: Stats(),
             lastSavedAt: now,
             createdAt: now,
-            gameHoursElapsed: 0
+            gameHoursElapsed: 0,
+            currentProductId: Catalog.defaultProductId,
+            subsidy: SubsidyState(totalInvestedYen: equipmentPurchaseTotalYen(equipment))
         )
     }
 }
@@ -75,6 +88,45 @@ extension GameState {
         lastSavedAt = try container.decode(Date.self, forKey: .lastSavedAt)
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         gameHoursElapsed = try container.decodeIfPresent(Double.self, forKey: .gameHoursElapsed) ?? 0
+        currentProductId = try container.decodeIfPresent(String.self, forKey: .currentProductId) ?? Catalog.defaultProductId
+        // 補助金導入前のセーブは、設置済み装置の購入価格合計を累計設備投資とみなす
+        subsidy = try container.decodeIfPresent(SubsidyState.self, forKey: .subsidy)
+            ?? SubsidyState(totalInvestedYen: GameState.equipmentPurchaseTotalYen(fab.equipment))
+    }
+}
+
+/// 国庫補助金の申請・受給状況
+struct SubsidyState: Codable, Equatable {
+    /// 審査中の交付予定額（0なら申請なし）
+    var pendingGrantYen: Double = 0
+    /// 交付予定時刻（gameHoursElapsed 基準）。nil なら申請なし
+    var pendingGrantAtHours: Double? = nil
+    /// 累計設備投資額（購入＋改良）
+    var totalInvestedYen: Double = 0
+    /// 累計受給額
+    var totalReceivedYen: Double = 0
+    /// 最終交付時刻（gameHoursElapsed 基準）
+    var lastGrantAtHours: Double? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case pendingGrantYen
+        case pendingGrantAtHours
+        case totalInvestedYen
+        case totalReceivedYen
+        case lastGrantAtHours
+    }
+}
+
+// 旧セーブ互換：全フィールドを欠けていてもデフォルト値で読む
+extension SubsidyState {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = SubsidyState()
+        pendingGrantYen = try container.decodeIfPresent(Double.self, forKey: .pendingGrantYen) ?? defaults.pendingGrantYen
+        pendingGrantAtHours = try container.decodeIfPresent(Double.self, forKey: .pendingGrantAtHours) ?? defaults.pendingGrantAtHours
+        totalInvestedYen = try container.decodeIfPresent(Double.self, forKey: .totalInvestedYen) ?? defaults.totalInvestedYen
+        totalReceivedYen = try container.decodeIfPresent(Double.self, forKey: .totalReceivedYen) ?? defaults.totalReceivedYen
+        lastGrantAtHours = try container.decodeIfPresent(Double.self, forKey: .lastGrantAtHours) ?? defaults.lastGrantAtHours
     }
 }
 

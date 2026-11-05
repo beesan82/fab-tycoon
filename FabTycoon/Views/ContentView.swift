@@ -35,6 +35,7 @@ struct HeaderView: View {
 
     var body: some View {
         let node = Engine.currentNode(state: state)
+        let product = Catalog.product(id: state.currentProductId) ?? Catalog.defaultProduct
         let condition = derived.marketCondition
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
@@ -59,6 +60,7 @@ struct HeaderView: View {
             }
             HStack(spacing: 8) {
                 BadgeView(text: node.displayName, systemImage: "cpu", color: .blue)
+                BadgeView(text: product.shortName, systemImage: "shippingbox", color: .purple)
                 BadgeView(text: "市況 \(condition.label)", systemImage: condition.symbolName, color: condition.color)
                 Spacer()
                 if let next = Catalog.nextNode(after: node.id) {

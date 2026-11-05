@@ -154,6 +154,27 @@ final class GameStore: ObservableObject {
         return revenue
     }
 
+    @discardableResult
+    func switchProduct(_ productId: String) -> Bool {
+        let ok = Engine.switchProduct(state: &state, productId: productId)
+        refresh()
+        return ok
+    }
+
+    @discardableResult
+    func applySubsidy() -> Bool {
+        let ok = Engine.applySubsidy(state: &state)
+        refresh()
+        return ok
+    }
+
+    @discardableResult
+    func applyEmergencySubsidy() -> Bool {
+        let ok = Engine.applyEmergencySubsidy(state: &state)
+        refresh()
+        return ok
+    }
+
     func openShop(for process: ProcessType?) {
         shopProcessFilter = process
         selectedTab = .shop

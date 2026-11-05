@@ -55,7 +55,7 @@ struct ProcessDetailView: View {
                     }
                 }
 
-                Section("装置") {
+                Section("装置（改良・売却）") {
                     if instances.isEmpty {
                         Text("装置がありません。この工程が止まるとライン全体が停止します。")
                             .font(.callout)
@@ -122,7 +122,15 @@ struct ProcessDetailView: View {
             let detectionAfter = Engine.detectionRateAfterSelling(state: state, instanceId: instance.id)
             text += "\n検出率 \(MoneyFormat.percent(derived.detectionRate)) → \(MoneyFormat.percent(detectionAfter))"
         }
-        if after <= 0 {
+        // 稼働装置が0台になる売却は強く警告し、買い戻せない場合は詰みを明示する
+        let unitsAfter = Engine.activeUnitsAfterSelling(state: state, instanceId: instance.id)
+        if derived.units(process) > 0 && unitsAfter == 0 {
+            text += "\n\n⚠️ この装置を売ると\(process.displayName)の装置が0台になり、ラインが停止します。"
+            let cashAfter = state.cashYen + Engine.sellRefundYen(instance: instance)
+            if let cheapest = Engine.cheapestModelPriceYen(state: state, process: process), cashAfter < cheapest {
+                text += "\n買い戻す資金も足りません（最安機種 \(MoneyFormat.yen(cheapest))）。このままだと詰みます（止まったラインは統計画面の緊急救済の補助金で立て直せます）。"
+            }
+        } else if after <= 0 {
             text += "\nこの工程の装置がなくなり、ラインが停止します。"
         }
         return text
