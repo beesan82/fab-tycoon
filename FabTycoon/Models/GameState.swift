@@ -40,7 +40,7 @@ struct GameState: Codable, Equatable {
 
     static func initial(now: Date = Date()) -> GameState {
         let starter: [(String, Int)] = [
-            ("L1", 1), ("D1", 2), ("E1", 3), ("I1", 1), ("C1", 1), ("Q1", 1), ("P1", 1),
+            ("L1", 2), ("D1", 2), ("E1", 3), ("I1", 1), ("C1", 1), ("Q1", 1), ("P1", 1),
         ]
         var equipment: [EquipmentInstance] = []
         for (modelId, count) in starter {
@@ -50,7 +50,7 @@ struct GameState: Codable, Equatable {
         }
         return GameState(
             schemaVersion: currentSchemaVersion,
-            cashYen: 600_000_000,
+            cashYen: 3_000_000_000,
             fab: Fab(
                 id: UUID(),
                 name: "第1ファブ",
@@ -204,10 +204,11 @@ struct EquipmentInstance: Codable, Equatable, Identifiable {
 struct MarketState: Codable, Equatable {
     var gameTimeMinutes: Double = 0
     var walkFactor: Double = 1.0
-    var recentAvgPriceYen: Double = 120_000
+    var recentAvgPriceYen: Double = 1_200
 }
 
 struct Stats: Codable, Equatable {
+    /// 粗利（売上 − 原価 − 市場不良ペナルティの累計）
     var totalRevenueYen: Double = 0
     var totalWafersInput: Double = 0
     var totalGoodChips: Double = 0
@@ -220,6 +221,10 @@ struct Stats: Codable, Equatable {
     var totalMarketDefectChips: Double = 0
     /// 市場不良による返品・対応コストの累計（円）
     var totalMarketPenaltyYen: Double = 0
+    /// 総売上（原価・ペナルティ控除前）
+    var totalGrossSalesYen: Double = 0
+    /// 売上原価の累計
+    var totalCogsYen: Double = 0
 
     enum CodingKeys: String, CodingKey {
         case totalRevenueYen
@@ -231,6 +236,8 @@ struct Stats: Codable, Equatable {
         case totalShippedChips
         case totalMarketDefectChips
         case totalMarketPenaltyYen
+        case totalGrossSalesYen
+        case totalCogsYen
     }
 }
 
@@ -248,5 +255,7 @@ extension Stats {
         totalShippedChips = try container.decodeIfPresent(Double.self, forKey: .totalShippedChips) ?? defaults.totalShippedChips
         totalMarketDefectChips = try container.decodeIfPresent(Double.self, forKey: .totalMarketDefectChips) ?? defaults.totalMarketDefectChips
         totalMarketPenaltyYen = try container.decodeIfPresent(Double.self, forKey: .totalMarketPenaltyYen) ?? defaults.totalMarketPenaltyYen
+        totalGrossSalesYen = try container.decodeIfPresent(Double.self, forKey: .totalGrossSalesYen) ?? defaults.totalGrossSalesYen
+        totalCogsYen = try container.decodeIfPresent(Double.self, forKey: .totalCogsYen) ?? defaults.totalCogsYen
     }
 }

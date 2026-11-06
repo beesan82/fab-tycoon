@@ -68,6 +68,8 @@ enum LithoClass: String, Codable, CaseIterable, Comparable {
 
 // MARK: - ノード
 
+// diesPerWafer / chipBasePriceYen / waferCostYen はスライス1では不使用（データとして保持）。
+// 単価・ダイ数は製品側（ProductSpec）、ランニングコストは製品別のCOGS率に統合している。
 struct NodeSpec: Identifiable, Equatable {
     let id: String
     let displayName: String
@@ -151,7 +153,12 @@ struct ProductSpec: Identifiable, Equatable {
     let shortName: String
     /// 学習用の説明文（なぜ単価・歩留まり・ペナルティがそうなるか）
     let description: String
-    let priceMultiplier: Double
+    /// ウェハ1枚から取れるダイ数
+    let diesPerWafer: Int
+    /// ダイ1個の基準単価（円）
+    let diePriceYen: Double
+    /// 売上原価率
+    let cogsRate: Double
     let yieldMultiplier: Double
     let marketPenaltyMultiplier: Double
     let requirements: [ProductRequirement]
@@ -169,7 +176,7 @@ enum Catalog {
             id: "n28", displayName: "28nm", diesPerWafer: 100,
             yieldInit: 0.70, yieldMax: 0.95, learnWafers: 500,
             chipBasePriceYen: 120_000, waferCostYen: 500_000,
-            passes: passTable([30, 40, 40, 15, 10, 5, 1]),
+            passes: passTable([15, 20, 20, 8, 5, 3, 1]),
             lithoPassOverrides: [:]
         ),
         NodeSpec(
@@ -212,67 +219,67 @@ enum Catalog {
     static let equipment: [EquipmentModel] = [
         // 露光
         EquipmentModel(id: "L1", name: "ArFドライ露光機", process: .lithography,
-                       priceYen: 1_500_000_000, nominalWPH: 150, supportedNodeIds: ["n28"],
+                       priceYen: 4_000_000_000, nominalWPH: 150, supportedNodeIds: ["n28"],
                        lithoClass: .duvDry, yieldFactor: 0.950),
         EquipmentModel(id: "L2", name: "ArF液浸露光機", process: .lithography,
-                       priceYen: 5_000_000_000, nominalWPH: 170, supportedNodeIds: ["n14", "n7"],
+                       priceYen: 11_000_000_000, nominalWPH: 275, supportedNodeIds: ["n14", "n7"],
                        lithoClass: .duvImm, yieldFactor: 0.955, unlockNote: "研究「液浸露光機」"),
         EquipmentModel(id: "L3", name: "EUV露光機", process: .lithography,
-                       priceYen: 20_000_000_000, nominalWPH: 120, supportedNodeIds: ["n7", "n5", "n3", "n2"],
+                       priceYen: 26_000_000_000, nominalWPH: 160, supportedNodeIds: ["n7", "n5", "n3", "n2"],
                        lithoClass: .euv, yieldFactor: 0.965, unlockNote: "研究「EUV露光」"),
         EquipmentModel(id: "L4", name: "High-NA EUV露光機", process: .lithography,
-                       priceYen: 40_000_000_000, nominalWPH: 100, supportedNodeIds: ["n3", "n2"],
+                       priceYen: 55_000_000_000, nominalWPH: 180, supportedNodeIds: ["n3", "n2"],
                        lithoClass: .highNA, yieldFactor: 0.970, unlockNote: "研究「High-NA EUV」"),
         // 成膜
         EquipmentModel(id: "D1", name: "PECVD装置", process: .deposition,
-                       priceYen: 300_000_000, nominalWPH: 80, supportedNodeIds: ["n28", "n14"],
+                       priceYen: 800_000_000, nominalWPH: 100, supportedNodeIds: ["n28", "n14"],
                        yieldFactor: 0.950),
         EquipmentModel(id: "D2", name: "ALD/CVDクラスタ", process: .deposition,
-                       priceYen: 1_200_000_000, nominalWPH: 100, supportedNodeIds: ["n14", "n7", "n5"],
+                       priceYen: 1_500_000_000, nominalWPH: 150, supportedNodeIds: ["n14", "n7", "n5"],
                        yieldFactor: 0.960),
         EquipmentModel(id: "D3", name: "先端ALD装置", process: .deposition,
-                       priceYen: 3_500_000_000, nominalWPH: 110, supportedNodeIds: ["n5", "n3", "n2"],
+                       priceYen: 2_500_000_000, nominalWPH: 120, supportedNodeIds: ["n5", "n3", "n2"],
                        yieldFactor: 0.968),
         // エッチング
         EquipmentModel(id: "E1", name: "プラズマエッチャ", process: .etching,
-                       priceYen: 300_000_000, nominalWPH: 60, supportedNodeIds: ["n28", "n14"],
+                       priceYen: 800_000_000, nominalWPH: 80, supportedNodeIds: ["n28", "n14"],
                        yieldFactor: 0.950),
         EquipmentModel(id: "E2", name: "高選択比エッチャ", process: .etching,
-                       priceYen: 1_500_000_000, nominalWPH: 75, supportedNodeIds: ["n14", "n7", "n5"],
+                       priceYen: 1_500_000_000, nominalWPH: 120, supportedNodeIds: ["n14", "n7", "n5"],
                        yieldFactor: 0.958),
         EquipmentModel(id: "E3", name: "原子層エッチャ（ALE）", process: .etching,
-                       priceYen: 4_500_000_000, nominalWPH: 85, supportedNodeIds: ["n5", "n3", "n2"],
+                       priceYen: 2_000_000_000, nominalWPH: 40, supportedNodeIds: ["n5", "n3", "n2"],
                        yieldFactor: 0.970),
         // イオン注入・熱処理
         EquipmentModel(id: "I1", name: "イオン注入機", process: .implant,
-                       priceYen: 400_000_000, nominalWPH: 200, supportedNodeIds: ["n28", "n14", "n7"],
+                       priceYen: 1_000_000_000, nominalWPH: 100, supportedNodeIds: ["n28", "n14", "n7"],
                        yieldFactor: 0.950),
         EquipmentModel(id: "I2", name: "高エネルギー注入＋レーザーアニール", process: .implant,
-                       priceYen: 1_500_000_000, nominalWPH: 220, supportedNodeIds: ["n7", "n5", "n3", "n2"],
+                       priceYen: 2_000_000_000, nominalWPH: 150, supportedNodeIds: ["n7", "n5", "n3", "n2"],
                        yieldFactor: 0.955),
         // CMP
         EquipmentModel(id: "C1", name: "CMP装置", process: .cmp,
-                       priceYen: 200_000_000, nominalWPH: 60, supportedNodeIds: ["n28", "n14", "n7"],
+                       priceYen: 600_000_000, nominalWPH: 60, supportedNodeIds: ["n28", "n14", "n7"],
                        yieldFactor: 0.950),
         EquipmentModel(id: "C2", name: "先端CMP装置", process: .cmp,
-                       priceYen: 1_000_000_000, nominalWPH: 70, supportedNodeIds: ["n7", "n5", "n3", "n2"],
+                       priceYen: 1_200_000_000, nominalWPH: 90, supportedNodeIds: ["n7", "n5", "n3", "n2"],
                        yieldFactor: 0.960),
         // 検査
         EquipmentModel(id: "Q1", name: "光学検査装置", process: .inspection,
-                       priceYen: 250_000_000, nominalWPH: 50, supportedNodeIds: ["n28", "n14"],
+                       priceYen: 1_500_000_000, nominalWPH: 120, supportedNodeIds: ["n28", "n14"],
                        yieldFactor: 0.950, detectionBase: 0.55),
         EquipmentModel(id: "Q2", name: "電子ビーム検査装置", process: .inspection,
-                       priceYen: 1_500_000_000, nominalWPH: 45, supportedNodeIds: ["n14", "n7", "n5"],
+                       priceYen: 4_000_000_000, nominalWPH: 15, supportedNodeIds: ["n14", "n7", "n5"],
                        yieldFactor: 0.955, detectionBase: 0.70, unlockNote: "研究「EB検査装置」"),
         EquipmentModel(id: "Q3", name: "AI欠陥分類検査装置", process: .inspection,
-                       priceYen: 5_000_000_000, nominalWPH: 60, supportedNodeIds: ["n5", "n3", "n2"],
+                       priceYen: 6_000_000_000, nominalWPH: 100, supportedNodeIds: ["n5", "n3", "n2"],
                        yieldFactor: 0.960, detectionBase: 0.82),
         // ダイシング/パッケージング
         EquipmentModel(id: "P1", name: "ブレードダイシング＋ワイヤボンド", process: .packaging,
-                       priceYen: 150_000_000, nominalWPH: 30, supportedNodeIds: ["n28", "n14"],
+                       priceYen: 300_000_000, nominalWPH: 60, supportedNodeIds: ["n28", "n14"],
                        yieldFactor: 0.950),
         EquipmentModel(id: "P2", name: "レーザーダイシング＋フリップチップ", process: .packaging,
-                       priceYen: 800_000_000, nominalWPH: 35, supportedNodeIds: ["n14", "n7", "n5"],
+                       priceYen: 800_000_000, nominalWPH: 100, supportedNodeIds: ["n14", "n7", "n5"],
                        yieldFactor: 0.958),
         EquipmentModel(id: "P3", name: "先端パッケージ（2.5D/チップレット）", process: .packaging,
                        priceYen: 3_000_000_000, nominalWPH: 40, supportedNodeIds: ["n5", "n3", "n2"],
@@ -285,19 +292,22 @@ enum Catalog {
         ProductSpec(
             id: "logic", name: "汎用ロジック", shortName: "汎用ロジック",
             description: "スマホや家電に載る標準的なロジックチップ。需要が安定しており、標準的な設備構成でバランスよく作れる。単価・歩留まり・不良の代償のすべてが基準となる製品。",
-            priceMultiplier: 1.0, yieldMultiplier: 1.0, marketPenaltyMultiplier: 1.0,
+            diesPerWafer: 600, diePriceYen: 1_200, cogsRate: 0.45,
+            yieldMultiplier: 1.0, marketPenaltyMultiplier: 1.0,
             requirements: []
         ),
         ProductSpec(
             id: "power", name: "パワー／アナログ系", shortName: "パワー・アナログ",
-            description: "電源制御やセンサー向けの成熟製品。微細化の限界を攻めない設計なので欠陥が出にくく、歩留まりが高い。その代わり付加価値が低く、単価は安め。",
-            priceMultiplier: 0.6, yieldMultiplier: 1.10, marketPenaltyMultiplier: 1.0,
+            description: "電源制御やセンサー向けの成熟製品。微細化の限界を攻めない設計なので欠陥が出にくく、歩留まりが高い。その代わりダイが大きく取れる数が少なく、ウェハ1枚あたりの売上は控えめ。",
+            diesPerWafer: 250, diePriceYen: 1_500, cogsRate: 0.50,
+            yieldMultiplier: 1.10, marketPenaltyMultiplier: 1.0,
             requirements: []
         ),
         ProductSpec(
             id: "highperf", name: "高性能チップ（AI・サーバー向け）", shortName: "高性能チップ",
             description: "AIサーバー向けの最先端チップ。ダイが大きいほど欠陥を含む確率が上がるため歩留まりは下がるが、単価は跳ね上がる。EUV露光と高度な検査が前提で、不良を出したときの代償も大きい。",
-            priceMultiplier: 2.8, yieldMultiplier: 0.85, marketPenaltyMultiplier: 1.5,
+            diesPerWafer: 45, diePriceYen: 90_000, cogsRate: 0.55,
+            yieldMultiplier: 0.85, marketPenaltyMultiplier: 1.5,
             requirements: [
                 ProductRequirement(label: "EUV露光機（L3）以上 1台",
                                    options: [ProductRequirementOption(modelIds: ["L3", "L4"], count: 1)]),
@@ -308,7 +318,8 @@ enum Catalog {
         ProductSpec(
             id: "automotive", name: "車載チップ", shortName: "車載チップ",
             description: "自動車向けのチップ。単価は高めだが、人命に関わるため不良の代償が段違いに重い。返品・リコール対応のコストが大きく、高度な検査体制が実質的に必須となる。",
-            priceMultiplier: 1.6, yieldMultiplier: 1.0, marketPenaltyMultiplier: 3.0,
+            diesPerWafer: 500, diePriceYen: 2_000, cogsRate: 0.48,
+            yieldMultiplier: 1.0, marketPenaltyMultiplier: 3.0,
             requirements: [
                 ProductRequirement(label: "AI検査装置（Q3）1台、または電子ビーム検査（Q2）2台",
                                    options: [
@@ -529,7 +540,7 @@ extension ProcessType {
     var realDurationText: String {
         switch self {
         case .lithography:
-            return "目安：露光そのものは1枚あたり数十秒〜数分。ただし28nmでは約30回繰り返すため、露光だけで何時間も積み上がる"
+            return "目安：露光そのものは1枚あたり数十秒〜数分。ただし28nmでは約15回繰り返すため、露光だけで何時間も積み上がる"
         case .deposition:
             return "目安：1回あたり数分〜数十分。膜の種類や、複数枚をまとめるバッチ処理かどうかで大きく変わる"
         case .etching:

@@ -12,7 +12,9 @@ struct StatsView: View {
                 subsidySection
             }
             Section("累計") {
-                row("売上", MoneyFormat.yen(stats.totalRevenueYen))
+                row("売上", MoneyFormat.yen(stats.totalGrossSalesYen))
+                row("売上原価", MoneyFormat.yen(stats.totalCogsYen))
+                row("粗利", MoneyFormat.yen(stats.totalRevenueYen))
                 row("投入ウェハ", "\(MoneyFormat.decimal(stats.totalWafersInput, digits: 1)) 枚")
                 row("良品チップ", "\(MoneyFormat.count(stats.totalGoodChips)) 個")
                 row("欠陥チップ（検査で廃棄）", "\(MoneyFormat.count(stats.totalDefectChips)) 個")
@@ -164,7 +166,7 @@ struct ProductsView: View {
             Text(product.description)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text("単価 \(multiplierText(product.priceMultiplier))／歩留まり \(multiplierText(product.yieldMultiplier))／ペナルティ \(multiplierText(product.marketPenaltyMultiplier))")
+            Text("ダイ単価 \(MoneyFormat.yen(product.diePriceYen)) × \(product.diesPerWafer)個/ウェハ／歩留まり \(multiplierText(product.yieldMultiplier))／ペナルティ \(multiplierText(product.marketPenaltyMultiplier))／原価率 \(MoneyFormat.percent(product.cogsRate))")
                 .font(.caption.weight(.semibold))
                 .monospacedDigit()
             ForEach(product.requirements, id: \.label) { requirement in

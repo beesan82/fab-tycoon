@@ -38,7 +38,8 @@ var state = GameState.initial()
 let initialCash = state.cashYen
 let d0 = Engine.derived(state: state)
 describe(d0)
-check(abs(d0.lineWPH - 3.4) < 1e-6, "初期ラインWPH ≈ 3.4")
+check(initialCash == 3_000_000_000, "初期資金は30億円")
+check(abs(d0.lineWPH - 8.5) < 1e-6, "初期ラインWPH ≈ 8.5")
 check(d0.bottleneck == .deposition, "初期ボトルネックは成膜")
 check(abs(d0.currentYield - 0.6983) < 0.005, "初期歩留まり 約69.8%")
 
@@ -67,6 +68,8 @@ check(goodChips > 0 && state.stats.totalGoodChips > 0, "良品チップが生産
 check(state.stats.totalRevenueYen > 0, "売上が立った")
 check(state.cashYen > initialCash, "資金が初期より増えた")
 check(abs(state.stats.playSeconds - 600) < 1e-6, "プレイ時間が600秒")
+check(abs(state.stats.totalRevenueYen - (state.stats.totalGrossSalesYen - state.stats.totalCogsYen - state.stats.totalMarketPenaltyYen)) < 1.0, "粗利 = 売上 − 原価 − ペナルティ")
+check(state.stats.totalGrossSalesYen > 0 && state.stats.totalCogsYen > 0, "売上と原価が計上された")
 
 // 4. D1 購入
 print("== 4. D1 購入 ==")
@@ -79,7 +82,7 @@ print("  ラインWPH: \(num(before)) → \(num(after))（予測 \(num(predicted
 print("  資金: \(num(cashBeforeBuy, 0))円 → \(num(state.cashYen, 0))円")
 check(after > before, "購入後にラインWPHが上がった")
 check(abs(after - predicted) < 1e-9, "プレビューと実際が一致")
-check(abs(cashBeforeBuy - state.cashYen - 300_000_000) < 1e-6, "D1 価格 3億円が引かれた")
+check(abs(cashBeforeBuy - state.cashYen - 800_000_000) < 1e-6, "D1 価格 8億円が引かれた")
 
 // 追加: オフライン進行
 print("== 追加. オフライン進行（1時間不在） ==")

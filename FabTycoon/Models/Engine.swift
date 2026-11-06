@@ -72,7 +72,7 @@ enum MarketCondition: Equatable {
 struct TickResult: Equatable {
     var producedWafers: Double
     var goodChips: Double
-    /// 純売上（市場不良ペナルティ控除後）
+    /// 純売上（市場不良ペナルティ・売上原価控除後）
     var revenueYen: Double
     /// 販売分に含まれていた不良チップ数
     var shippedDefectChips: Double = 0
@@ -144,7 +144,7 @@ enum Engine {
     /// 交付可能額が1000万円未満なら申請不可
     static let subsidyMinimumGrantYen = 10_000_000.0
     /// 増床の初回価格（第1ファブ、DESIGN.md §2.7）
-    static let expansionBasePriceYen = 500_000_000.0
+    static let expansionBasePriceYen = 3_000_000_000.0
     /// 増床1回ごとの価格倍率
     static let expansionPriceGrowth = 1.6
     /// 増床1回で増えるスロット数
@@ -161,9 +161,19 @@ enum Engine {
         currentProduct(state: state).yieldMultiplier
     }
 
-    /// 製品ごとの単価倍率（currentPriceYen に乗算）
-    static func productPriceMultiplier(state: GameState) -> Double {
-        currentProduct(state: state).priceMultiplier
+    /// 製品ごとのダイ1個の基準単価（円）
+    static func productDiePriceYen(state: GameState) -> Double {
+        currentProduct(state: state).diePriceYen
+    }
+
+    /// 製品ごとのウェハ1枚あたりのダイ数
+    static func productDiesPerWafer(state: GameState) -> Int {
+        currentProduct(state: state).diesPerWafer
+    }
+
+    /// 製品ごとの売上原価率
+    static func productCogsRate(state: GameState) -> Double {
+        currentProduct(state: state).cogsRate
     }
 
     /// 製品ごとの市場不良ペナルティ倍率（ペナルティ額に乗算）
@@ -271,11 +281,14 @@ enum Engine {
         let marketDefectRate = shippedTotal > 0 ? shippedDefectFraction / shippedTotal : 0
 
         let cycleFactor = 1 + marketCycleAmplitude * sin(2 * Double.pi * state.market.gameTimeMinutes / marketCycleMinutes)
-        let price = node.chipBasePriceYen * cycleFactor * state.market.walkFactor * productPriceMultiplier(state: state)
-        // 純売上 = (良品+出荷不良)×単価 − 出荷不良×単価×1.5×製品倍率 をウェハ1枚あたりに直したもの
+        let price = productDiePriceYen(state: state) * cycleFactor * state.market.walkFactor
+        // 純売上（原価・ペナルティ控除後）をウェハ1枚あたりに直したもの
+        // = (良品+出荷不良)×単価×(1−原価率) − 出荷不良×単価×1.5×製品倍率
         let penaltyRate = marketDefectPenaltyRate * productMarketPenaltyMultiplier(state: state)
-        let marginPerWafer = Double(node.diesPerWafer) * price
-            * (lineYield + shippedDefectFraction * (1 - penaltyRate)) - node.waferCostYen
+        let dies = Double(productDiesPerWafer(state: state))
+        let grossPerWafer = dies * price * (lineYield + shippedDefectFraction)
+        let penaltyPerWafer = dies * price * shippedDefectFraction * penaltyRate
+        let marginPerWafer = grossPerWafer * (1 - productCogsRate(state: state)) - penaltyPerWafer
 
         return DerivedState(
             nodeId: node.id,
@@ -348,24 +361,19 @@ enum Engine {
         let price = frozenPriceYen ?? d.currentPriceYen
 
         // 投入ウェハ（lineWPH はゲーム内1時間あたり）
-        var flow = d.lineWPH * gameMinutes / 60
-        if node.waferCostYen > 0, flow * node.waferCostYen > state.cashYen {
-            flow = max(0, state.cashYen / node.waferCostYen)
-        }
+        let flow = d.lineWPH * gameMinutes / 60
         guard flow > 0 else {
             state.fab.running = false
             return .zero
         }
         state.fab.running = true
 
-        let materialCost = flow * node.waferCostYen
-        state.cashYen = max(0, state.cashYen - materialCost)
         state.learningWafers[node.id, default: 0] += flow
         state.stats.totalWafersInput += flow
         state.fab.wipWafers = (state.fab.wipWafers + flow).truncatingRemainder(dividingBy: 1)
 
         // 不良は各工程で生まれ、検査で見つかった分だけ廃棄される。残りは良品に混ざって出荷される
-        let grossDies = flow * Double(node.diesPerWafer)
+        let grossDies = flow * Double(productDiesPerWafer(state: state))
         let goodDies = grossDies * d.lineYield
         let defectDies = grossDies - goodDies
         let detectedDies = defectDies * d.detectionRate
@@ -388,19 +396,25 @@ enum Engine {
             }
         }
         var sale = (revenueYen: 0.0, defectChips: 0.0, penaltyYen: 0.0)
+        var netYen = 0.0
         if soldChips > 0 {
+            let grossYen = soldChips * price
             sale = netSale(chips: soldChips, defectRate: defectMix, priceYen: price,
                            penaltyMultiplier: productMarketPenaltyMultiplier(state: state))
+            let cogsYen = grossYen * productCogsRate(state: state)
+            netYen = sale.revenueYen - cogsYen
+            state.stats.totalGrossSalesYen += grossYen
+            state.stats.totalCogsYen += cogsYen
             state.stats.totalShippedChips += soldChips
             state.stats.totalMarketDefectChips += sale.defectChips
             state.stats.totalMarketPenaltyYen += sale.penaltyYen
-            recordSale(state: &state, revenueYen: sale.revenueYen, priceYen: price)
+            recordSale(state: &state, revenueYen: netYen, priceYen: price)
         }
 
         return TickResult(
             producedWafers: flow,
             goodChips: goodDies,
-            revenueYen: sale.revenueYen,
+            revenueYen: netYen,
             shippedDefectChips: sale.defectChips,
             marketPenaltyYen: sale.penaltyYen
         )
@@ -574,25 +588,31 @@ enum Engine {
         return true
     }
 
-    /// 在庫チップを一括売却した場合の純売上（現在の市場不良率を混入率とみなす）
+    /// 在庫チップを一括売却した場合の純売上（現在の市場不良率を混入率とみなす。売上原価控除後）
     static func inventorySaleValueYen(state: GameState, priceYen: Double) -> Double {
         netSale(chips: state.fab.inventoryChips, defectRate: derived(state: state).marketDefectRate, priceYen: priceYen,
                 penaltyMultiplier: productMarketPenaltyMultiplier(state: state)).revenueYen
+            - state.fab.inventoryChips * priceYen * productCogsRate(state: state)
     }
 
-    /// 在庫チップを指定価格で一括売却し、純売上（市場不良ペナルティ控除後）を返す
+    /// 在庫チップを指定価格で一括売却し、純売上（市場不良ペナルティ・売上原価控除後）を返す
     @discardableResult
     static func sellInventory(state: inout GameState, priceYen: Double) -> Double {
         let chips = state.fab.inventoryChips
         guard chips > 0 else { return 0 }
         let sale = netSale(chips: chips, defectRate: derived(state: state).marketDefectRate, priceYen: priceYen,
                            penaltyMultiplier: productMarketPenaltyMultiplier(state: state))
+        let grossYen = chips * priceYen
+        let cogsYen = grossYen * productCogsRate(state: state)
+        let netYen = sale.revenueYen - cogsYen
         state.fab.inventoryChips = 0
+        state.stats.totalGrossSalesYen += grossYen
+        state.stats.totalCogsYen += cogsYen
         state.stats.totalShippedChips += chips
         state.stats.totalMarketDefectChips += sale.defectChips
         state.stats.totalMarketPenaltyYen += sale.penaltyYen
-        recordSale(state: &state, revenueYen: sale.revenueYen, priceYen: priceYen)
-        return sale.revenueYen
+        recordSale(state: &state, revenueYen: netYen, priceYen: priceYen)
+        return netYen
     }
 
     // MARK: 製品
