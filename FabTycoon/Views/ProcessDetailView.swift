@@ -47,6 +47,10 @@ struct ProcessDetailView: View {
                 Section {
                     infoRow("工程の実効WPH", "\(MoneyFormat.decimal(derived.wph(process), digits: 2)) WPH")
                     infoRow("稼働台数", "\(derived.units(process))台")
+                    let standby = Engine.standbyCount(state: state, process: process)
+                    if standby > 0 {
+                        infoRow("待機台数", "\(standby)台")
+                    }
                     infoRow("パス数（\(Engine.currentNode(state: state).displayName)）", "\(passes(state: state))")
                     infoRow("工程歩留まり", MoneyFormat.percent(derived.processYields[process] ?? 0))
                     if process == .inspection {
@@ -182,10 +186,13 @@ private struct EquipmentRow: View {
         if let model = Catalog.model(id: instance.modelId) {
             let unit = Engine.unitWPH(model: model, level: instance.level, state: state)
             let cost = Engine.upgradeCostYen(state: state, instance: instance)
+            let isStandby = Engine.isStandby(instance, state: state)
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .top, spacing: 12) {
                     EquipmentIllustration(model: model)
                         .frame(width: 76, height: 76)
+                        .grayscale(isStandby ? 1 : 0)
+                        .opacity(isStandby ? 0.5 : 1)
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(alignment: .top) {
                             Text(model.name)
@@ -198,10 +205,19 @@ private struct EquipmentRow: View {
                                 .padding(.vertical, 2)
                                 .background(Capsule().fill(Color.accentColor.opacity(0.15)))
                         }
-                        Text("1台あたり実効 \(MoneyFormat.decimal(unit, digits: 2)) WPH（稼働率適用前）")
+                        Text(isStandby
+                             ? "1台あたり実効 0.00 WPH（待機中）"
+                             : "1台あたり実効 \(MoneyFormat.decimal(unit, digits: 2)) WPH（稼働率適用前）")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(isStandby ? Color.orange : Color.secondary)
                     }
+                }
+                if isStandby {
+                    Label("待機中：現在のノード（\(Engine.currentNode(state: state).displayName)）では稼働しません。スロットを空けるなら倉庫へ外しましょう。",
+                          systemImage: "pause.circle.fill")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if let education = Catalog.education(for: model.id) {
                     EquipmentEducationBlock(education: education)
@@ -248,13 +264,25 @@ private struct EquipmentRow: View {
                         .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
-                    Button {
-                        onDetach()
-                    } label: {
-                        Text("倉庫へ外す")
-                            .frame(maxWidth: .infinity)
+                    if isStandby {
+                        // 待機中の装置はスロットを塞ぐだけなので、外す操作を目立たせる
+                        Button {
+                            onDetach()
+                        } label: {
+                            Text("倉庫へ外す")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.orange)
+                    } else {
+                        Button {
+                            onDetach()
+                        } label: {
+                            Text("倉庫へ外す")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
                     }
-                    .buttonStyle(.bordered)
                 }
             }
             .padding(.vertical, 4)

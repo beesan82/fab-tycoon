@@ -6,11 +6,17 @@ enum FloorSelection: Equatable {
     case shipping
 }
 
+/// 移行確認シートの対象ノード
+struct NodeSwitchTarget: Identifiable, Equatable {
+    let id: String
+}
+
 struct LineView: View {
     @EnvironmentObject private var store: GameStore
     @State private var selectedProcess: ProcessType?
     @State private var selection: FloorSelection = .process(.lithography)
     @State private var didInitSelection = false
+    @State private var nodeSwitchTarget: NodeSwitchTarget?
 
     var body: some View {
         let state = store.state
@@ -30,10 +36,8 @@ struct LineView: View {
                 detailCard(state: state, derived: derived)
                     .padding(.horizontal)
 
-                if let next = Catalog.nextNode(after: node.id) {
-                    lockBanner(next: next)
-                        .padding(.horizontal)
-                }
+                nodeSection(state: state, node: node)
+                    .padding(.horizontal)
 
                 Text("現実の28nmロジックでは、ウェハ投入から出荷まで約1〜2か月、工程は数百ステップに及ぶのが目安です。このゲームはその時間を×600に圧縮しています。")
                     .font(.footnote)
@@ -55,6 +59,10 @@ struct LineView: View {
                 store.openShop(for: process)
             }
             .environmentObject(store)
+        }
+        .sheet(item: $nodeSwitchTarget) { target in
+            NodeSwitchSheet(targetNodeId: target.id)
+                .environmentObject(store)
         }
     }
 
@@ -164,7 +172,7 @@ struct LineView: View {
     @ViewBuilder
     private func statusLabel(state: GameState, derived: DerivedState) -> some View {
         if derived.lineWPH <= 0 {
-            Label("停止中：装置ゼロの工程あり", systemImage: "exclamationmark.triangle.fill")
+            Label("停止中：稼働装置ゼロの工程あり", systemImage: "exclamationmark.triangle.fill")
                 .font(.caption.bold())
                 .foregroundStyle(.red)
         } else {
@@ -188,6 +196,7 @@ struct LineView: View {
 
     private func processCard(_ process: ProcessType, state: GameState, derived: DerivedState) -> some View {
         let count = state.fab.equipment.filter { Catalog.model(id: $0.modelId)?.process == process }.count
+        let standby = Engine.standbyCount(state: state, process: process)
         let wph = derived.wph(process)
         let load: Double = wph > 0 ? min(max(derived.lineWPH / wph, 0), 1) : 0
         let node = Engine.currentNode(state: state)
@@ -203,10 +212,16 @@ struct LineView: View {
                 Text(process.displayName)
                     .font(.title3.bold())
             }
-            Text("装置 \(count)台 ・ 実効WPH \(MoneyFormat.decimal(wph, digits: 2)) ・ 負荷 \(MoneyFormat.percent(load, digits: 0)) ・ 工程歩留まり \(MoneyFormat.percent(derived.processYields[process] ?? 0))")
+            Text("装置 \(count)台（稼働\(derived.units(process))台） ・ 実効WPH \(MoneyFormat.decimal(wph, digits: 2)) ・ 負荷 \(MoneyFormat.percent(load, digits: 0)) ・ 工程歩留まり \(MoneyFormat.percent(derived.processYields[process] ?? 0))")
                 .font(.subheadline)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
+            if standby > 0 {
+                Label("待機中の装置が\(standby)台あります（現在のノードでは稼働しません）", systemImage: "pause.circle.fill")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if process == .inspection {
                 Label("検出率 \(MoneyFormat.percent(derived.detectionRate))（見逃した不良はそのまま出荷されます）", systemImage: "magnifyingglass")
                     .font(.subheadline)
@@ -287,17 +302,69 @@ struct LineView: View {
         .background(RoundedRectangle(cornerRadius: 14).fill(Color(.secondarySystemGroupedBackground)))
     }
 
-    // MARK: ロックバナー
+    // MARK: ノード
 
-    private func lockBanner(next: NodeSpec) -> some View {
-        HStack(spacing: 12) {
+    private func previousNode(before id: String) -> NodeSpec? {
+        guard let index = Catalog.nodes.firstIndex(where: { $0.id == id }), index > 0 else { return nil }
+        return Catalog.nodes[index - 1]
+    }
+
+    private func nodeSection(state: GameState, node: NodeSpec) -> some View {
+        let next = Catalog.nextNode(after: node.id)
+        let previous = previousNode(before: node.id)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Label("ノード", systemImage: "cpu")
+                    .font(.headline)
+                Spacer()
+                BadgeView(text: "現在 \(node.displayName)", systemImage: nil, color: .blue)
+                if let next {
+                    BadgeView(text: "次 \(next.displayName)", systemImage: nil, color: .gray)
+                }
+            }
+            if let next {
+                if Engine.canSwitchNode(state: state, toNodeId: next.id) {
+                    Button {
+                        nodeSwitchTarget = NodeSwitchTarget(id: next.id)
+                    } label: {
+                        Label("\(next.displayName)へ移行", systemImage: "arrow.up.forward.circle.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                } else {
+                    lockBanner(next: next, state: state)
+                }
+            }
+            if let previous, Engine.canSwitchNode(state: state, toNodeId: previous.id) {
+                Button {
+                    nodeSwitchTarget = NodeSwitchTarget(id: previous.id)
+                } label: {
+                    Label("\(previous.displayName)へ戻す", systemImage: "arrow.uturn.backward.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 14).fill(Color(.secondarySystemGroupedBackground)))
+    }
+
+    private func lockBanner(next: NodeSpec, state: GameState) -> some View {
+        let researchName = Engine.nodeUnlockResearch(nodeId: next.id)?.name
+        let needsResearch = Catalog.isPlayable(nodeId: next.id) && !Engine.isNodeUnlocked(state: state, nodeId: next.id)
+        let title = needsResearch ? "\(next.displayName)は研究で解放" : "\(next.displayName)は今後のアップデートで解放"
+        let detail = needsResearch
+            ? "研究『\(researchName ?? "\(next.displayName)プロセス")』を完了すると移行できます"
+            : "次のノードは今後のアップデートで解放されます"
+        return HStack(spacing: 12) {
             Image(systemName: "lock.fill")
                 .font(.title2)
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(next.displayName)は研究で解放（準備中）")
+                Text(title)
                     .font(.subheadline.bold())
-                Text("研究を進めると次のノードへ移行できます（準備中）")
+                Text(detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -309,6 +376,135 @@ struct LineView: View {
                 .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [5]))
                 .foregroundStyle(.secondary)
         )
+    }
+}
+
+// MARK: - ノード移行確認シート
+
+struct NodeSwitchSheet: View {
+    @EnvironmentObject private var store: GameStore
+    @Environment(\.dismiss) private var dismiss
+
+    let targetNodeId: String
+
+    var body: some View {
+        let state = store.state
+        let from = store.derived
+        let to = Engine.derived(state: state, asNode: targetNodeId)
+        let fromNode = Engine.currentNode(state: state)
+        let target = Catalog.node(id: targetNodeId) ?? Catalog.defaultNode
+        let warnings = Engine.nodeSwitchWarnings(state: state, toNodeId: targetNodeId)
+        let willStop = !Engine.stoppedProcesses(state: state, atNode: targetNodeId).isEmpty
+        let blockReason = Engine.nodeSwitchBlockReason(state: state, toNodeId: targetNodeId)
+        let fromLearned = state.learningWafers[fromNode.id] ?? 0
+        let targetLearned = state.learningWafers[target.id] ?? 0
+        NavigationStack {
+            List {
+                Section {
+                    HStack(spacing: 12) {
+                        Text(fromNode.displayName)
+                        Image(systemName: "arrow.right")
+                            .foregroundStyle(.secondary)
+                        Text(target.displayName)
+                            .foregroundStyle(.blue)
+                    }
+                    .font(.title2.bold())
+                    .frame(maxWidth: .infinity)
+                }
+
+                Section("移行前 → 移行後") {
+                    fromToRow("ラインWPH",
+                              from: MoneyFormat.decimal(from.lineWPH, digits: 2),
+                              to: MoneyFormat.decimal(to.lineWPH, digits: 2),
+                              improved: to.lineWPH > from.lineWPH + 1e-9)
+                    fromToRow("歩留まり",
+                              from: MoneyFormat.percent(from.lineYield),
+                              to: MoneyFormat.percent(to.lineYield),
+                              improved: to.lineYield > from.lineYield + 1e-9)
+                    fromToRow("収入/分",
+                              from: MoneyFormat.signedYen(from.incomePerMinuteYen),
+                              to: MoneyFormat.signedYen(to.incomePerMinuteYen),
+                              improved: to.incomePerMinuteYen > from.incomePerMinuteYen + 1e-9)
+                    fromToRow("検出率",
+                              from: MoneyFormat.percent(from.detectionRate),
+                              to: MoneyFormat.percent(to.detectionRate),
+                              improved: to.detectionRate > from.detectionRate + 1e-9)
+                }
+
+                if willStop || !warnings.isEmpty {
+                    Section("注意") {
+                        if willStop {
+                            Label("移行直後はラインが停止します", systemImage: "exclamationmark.octagon.fill")
+                                .font(.headline)
+                                .foregroundStyle(.red)
+                        }
+                        ForEach(warnings, id: \.self) { warning in
+                            Label(warning, systemImage: "exclamationmark.triangle.fill")
+                                .font(.subheadline)
+                                .foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
+                Section("歩留まりの学習") {
+                    Text(targetLearned > 0
+                         ? "\(target.displayName)では、これまでに流した累計\(MoneyFormat.count(targetLearned))枚分の学習から再開します。"
+                         : "\(target.displayName)では歩留まりが初期値 \(MoneyFormat.percent(target.yieldInit)) から学習し直しになります。新しいノードはウェハを流すほど歩留まりが上がります。")
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("\(fromNode.displayName)の学習進捗（累計\(MoneyFormat.count(fromLearned))枚）は保持され、戻したときはそこから再開します。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Section {
+                    Button {
+                        store.switchNode(targetNodeId)
+                        dismiss()
+                    } label: {
+                        Text("移行する")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(blockReason != nil)
+                    if let blockReason {
+                        Text(blockReason)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                    Button(role: .cancel) {
+                        dismiss()
+                    } label: {
+                        Text("キャンセル")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+            .navigationTitle("\(target.displayName)へ移行")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("閉じる") { dismiss() }
+                }
+            }
+        }
+    }
+
+    /// From→To 行。改善時のみ緑
+    private func fromToRow(_ title: String, from: String, to: String, improved: Bool) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Text("\(from) → \(to)")
+                .monospacedDigit()
+                .bold()
+                .foregroundStyle(improved ? Color.green : Color.secondary)
+        }
+        .font(.subheadline)
     }
 }
 
@@ -393,9 +589,11 @@ struct FabFloorView: View {
         return Button {
             selection = .process(process)
         } label: {
+            let models = installedModels(for: process, state: state)
             FloorBayView(
                 process: process,
-                models: installedModels(for: process, state: state),
+                models: models,
+                standbyModelIds: Set(models.filter { !$0.supports(nodeId: state.fab.currentNodeId) }.map { $0.id }),
                 wph: derived.wph(process),
                 isBottleneck: derived.bottleneck == process,
                 isSecond: derived.secondBottleneck == process,
@@ -523,6 +721,8 @@ private struct FloorBayHeader: View {
 struct FloorBayView: View {
     let process: ProcessType
     let models: [EquipmentModel]
+    /// 現在のノードに非対応で待機中のモデルID
+    var standbyModelIds: Set<String> = []
     let wph: Double
     let isBottleneck: Bool
     let isSecond: Bool
@@ -575,10 +775,17 @@ struct FloorBayView: View {
     private func iconRow(_ row: [EquipmentModel], side: CGFloat) -> some View {
         HStack(spacing: 2) {
             ForEach(Array(row.enumerated()), id: \.offset) { item in
+                let isStandby = standbyModelIds.contains(item.element.id)
                 EquipmentIllustration(model: item.element)
                     .frame(width: side, height: side)
+                    .grayscale(isStandby ? 1 : 0)
+                    .opacity(isStandby ? 0.4 : 1)
             }
         }
+    }
+
+    private var standbyCount: Int {
+        models.filter { standbyModelIds.contains($0.id) }.count
     }
 
     private func iconSide(count: Int) -> CGFloat {
@@ -602,6 +809,15 @@ struct FloorBayView: View {
                     .padding(.horizontal, 4)
                     .padding(.vertical, 1)
                     .background(Capsule().fill(process.accent))
+            }
+            if standbyCount > 0 {
+                Text("待機\(standbyCount)")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.gray))
+                    .fixedSize()
             }
             Spacer(minLength: 0)
             Text("×\(models.count)台")

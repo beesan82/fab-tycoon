@@ -242,7 +242,7 @@ try? fileManager.removeItem(at: tempRoot)
 // 0.3.0: 目標と図鑑
 print("== 0.3.0. カタログ件数・図鑑の解放 ==")
 let glossaryInitial = GameState.initial()
-check(Catalog.milestones.count == 12, "マイルストーンは12本")
+check(Catalog.milestones.count == 14, "マイルストーンは14本")
 check(Catalog.glossaryTerms.count == 30, "用語は30本")
 check(Engine.glossaryEntries(state: glossaryInitial).count == 57, "図鑑の全エントリは57件")
 check(Engine.glossaryUnlockedCount(state: glossaryInitial) == 26, "初期状態の図鑑の解放数は26（装置7＋工程7＋用語12）")
@@ -508,6 +508,137 @@ check(v2NoResearchState.research.completedIds.isEmpty, "研究なしのセーブ
 let v2NoResearchDerived = Engine.derived(state: v2NoResearchState)
 check(abs(v2NoResearchDerived.lineWPH - 8.5) < 1e-6, "研究なしのラインWPH は 8.5")
 check(abs(v2NoResearchDerived.currentYield - 0.6983) < 0.005, "研究なしの歩留まりは 約69.8%")
+
+// 0.5.0: 14nm移行
+print("== 0.5.0. 14nm の定数 ==")
+guard let node14 = Catalog.node(id: "n14") else { fail("n14 がカタログに無い") }
+check(node14.priceMultiplier == 3.5, "14nm の単価倍率は 3.5")
+check(node14.cogsAddition == 0.03, "14nm の原価率加算は 0.03")
+check(node14.learnWafers == 2_000, "14nm の learnWafers は 2,000")
+check(Catalog.isPlayable(nodeId: "n14"), "14nm はプレイ可能")
+
+print("== 0.5.0. 移行のゲート ==")
+var gateState = GameState.initial()
+gateState.cashYen = 100_000_000_000
+let initialGateReason = Engine.nodeSwitchBlockReason(state: gateState, toNodeId: "n14")
+print("  初期: \(initialGateReason ?? "-")")
+check(!Engine.canSwitchNode(state: gateState, toNodeId: "n14"), "初期状態では 14nm へ移行できない")
+check(initialGateReason?.contains("研究") == true, "初期状態の理由に「研究」が含まれる")
+let gateImmersionDone = completeResearch(&gateState, "unlock_immersion", startAt: t0)
+check(!Engine.canSwitchNode(state: gateState, toNodeId: "n14"), "液浸露光機の研究だけでは 14nm へ移行できない")
+completeResearch(&gateState, "unlock_14nm", startAt: gateImmersionDone)
+check(Engine.canSwitchNode(state: gateState, toNodeId: "n14"), "14nmプロセスの研究完了後は 14nm へ移行できる")
+
+/// 研究2件（液浸露光機・14nmプロセス）を完了した初期状態
+func readyFor14nm() -> GameState {
+    var s = GameState.initial()
+    s.cashYen = 200_000_000_000
+    let immersionDone = completeResearch(&s, "unlock_immersion", startAt: t0)
+    completeResearch(&s, "unlock_14nm", startAt: immersionDone)
+    return s
+}
+
+print("== 0.5.0. 移行と収支 ==")
+var nodeState = readyFor14nm()
+nodeState.learningWafers["n28"] = 100_000
+let income28 = Engine.derived(state: nodeState).incomePerMinuteYen
+let switchWarnings = Engine.nodeSwitchWarnings(state: nodeState, toNodeId: "n14")
+for warning in switchWarnings {
+    print("  警告: \(warning)")
+}
+check(switchWarnings.contains { $0.contains("L2") }, "移行前の警告で L2 の購入が案内される")
+check(Engine.switchNode(state: &nodeState, toNodeId: "n14"), "14nm へ移行できた")
+check(nodeState.fab.currentNodeId == "n14", "現在のノードが n14")
+check(nodeState.stats.achievedMilestones["node_14"] != nil, "マイルストーン node_14 を達成")
+let justSwitched = Engine.derived(state: nodeState)
+check(justSwitched.lineWPH == 0, "移行直後はラインWPH 0（L1 が待機）")
+guard let standbyL1 = nodeState.fab.equipment.first(where: { $0.modelId == "L1" }) else { fail("L1 が設置されていない") }
+check(Engine.isStandby(standbyL1, state: nodeState), "L1 は待機中")
+check(Engine.standbyCount(state: nodeState, process: .lithography) == 2, "露光の待機台数は 2")
+var poorSwitched = nodeState
+poorSwitched.cashYen = 0
+check(Engine.emergencyGrantYen(state: poorSwitched) == nil, "待機による停止は緊急救済の対象外（ノードを戻せば稼働する）")
+check(Engine.canRestartLineWithOwnedEquipment(state: poorSwitched), "14nm で待機停止中でも、所有装置で 28nm に戻せば再稼働する")
+// 待機中の L1 を全て倉庫へ外しても、所有関係は変わらないため対象外のまま（付け替えでの回避を塞ぐ）
+var detachedStandby = poorSwitched
+for instance in detachedStandby.fab.equipment where instance.modelId == "L1" {
+    check(Engine.detachEquipment(state: &detachedStandby, instanceId: instance.id), "待機中の L1 を倉庫へ外せる")
+}
+check(detachedStandby.fab.equipment.allSatisfy { $0.modelId != "L1" }, "設置中の L1 は 0 台")
+check(detachedStandby.fab.storedEquipment.contains { $0.modelId == "L1" }, "L1 は倉庫にある")
+check(Engine.canRestartLineWithOwnedEquipment(state: detachedStandby), "L1 を倉庫へ外しても、所有装置で 28nm に戻せば再稼働する")
+check(Engine.emergencyGrantYen(state: detachedStandby) == nil, "待機装置を全て倉庫へ外しても緊急救済の対象外")
+
+print("== 0.5.0. 緊急救済（古典的詰み） ==")
+// 28nm で検査装置を全て手放し、どのノードでも再稼働しない詰みは従来どおり対象になる
+var deadlock = GameState.initial()
+for instance in deadlock.fab.equipment where instance.modelId == "Q1" {
+    check(Engine.sellEquipment(state: &deadlock, instanceId: instance.id), "Q1 を売却できる")
+}
+deadlock.cashYen = 0
+check(Engine.derived(state: deadlock).lineWPH == 0, "検査装置が無くラインが止まっている")
+check(!Engine.canRestartLineWithOwnedEquipment(state: deadlock), "所有装置ではどのノードでも再稼働しない")
+let deadlockGrant = Engine.emergencyGrantYen(state: deadlock)
+print("  緊急交付額: \(num(deadlockGrant ?? -1, 0))円")
+check(deadlockGrant != nil && deadlockGrant! > 0, "どのノードでも再稼働しない詰みは緊急救済の対象")
+check(Engine.applyEmergencySubsidy(state: &deadlock), "緊急救済が発動する")
+check(deadlock.cashYen > 0, "緊急救済で資金が交付された")
+check(Engine.detachEquipment(state: &nodeState, instanceId: standbyL1.id), "待機中の L1 を1台倉庫へ外せる")
+check(Engine.standbyCount(state: nodeState, process: .lithography) == 1, "外した後の露光の待機台数は 1")
+check(Engine.attachEquipment(state: &nodeState, instanceId: standbyL1.id), "L1 を再設置できる")
+check(Engine.buy(state: &nodeState, modelId: "L2"), "14nm では L2 を購入できる")
+let withL2 = Engine.derived(state: nodeState)
+let incomeRatio0 = withL2.incomePerMinuteYen / income28
+print("  ラインWPH: \(num(withL2.lineWPH, 3))  歩留まり: \(num(withL2.lineYield * 100, 2))%  収入/分: 28nm \(num(income28, 0))円 → 14nm \(num(withL2.incomePerMinuteYen, 0))円（比 \(num(incomeRatio0, 3))）")
+check(abs(withL2.lineWPH - 3.09) < 0.05, "L2 購入後のラインWPH が 約3.09")
+check(incomeRatio0 >= 0.5 && incomeRatio0 <= 1.1, "移行直後の収入比（14nm/28nm）が 0.5〜1.1")
+nodeState.learningWafers["n14"] = 2_000
+let incomeRatio2000 = Engine.derived(state: nodeState).incomePerMinuteYen / income28
+print("  学習2,000枚: 収入比 \(num(incomeRatio2000, 3))")
+check(incomeRatio2000 > 1.0, "14nm で2,000枚学習すると収入が 28nm を上回る")
+nodeState.learningWafers["n14"] = 5_000
+Engine.evaluateMilestones(state: &nodeState)
+check(nodeState.stats.achievedMilestones["yield_80_n14"] != nil, "学習5,000枚で yield_80_n14 を達成")
+let learned28BeforeTick = nodeState.learningWafers["n28"]
+let learned14BeforeTick = nodeState.learningWafers["n14"] ?? 0
+for _ in 0..<40 {
+    Engine.tick(state: &nodeState, dtRealSeconds: 0.25)
+}
+check((nodeState.learningWafers["n14"] ?? 0) > learned14BeforeTick, "14nm 稼働中は learningWafers[n14] が増える")
+check(nodeState.learningWafers["n28"] == learned28BeforeTick, "14nm 稼働中は learningWafers[n28] が変わらない")
+
+print("== 0.5.0. 車載チップ（14nm で Q2×2） ==")
+completeResearch(&nodeState, "unlock_eb", startAt: t0)
+for instance in nodeState.fab.equipment where instance.modelId == "L1" {
+    check(Engine.detachEquipment(state: &nodeState, instanceId: instance.id), "L1 を倉庫へ外せる")
+}
+check(Engine.buy(state: &nodeState, modelId: "Q2"), "Q2 を1台目購入できる")
+check(Engine.buy(state: &nodeState, modelId: "Q2"), "Q2 を2台目購入できる")
+check(Engine.canSelectProduct(state: nodeState, productId: "automotive"), "14nm で Q2×2 稼働なら車載チップを選べる")
+check(Engine.switchProduct(state: &nodeState, productId: "automotive"), "車載チップへ切り替えられた")
+check(Engine.switchNode(state: &nodeState, toNodeId: "n28"), "28nm へ戻せた")
+check(nodeState.currentProductId == "logic", "28nm へ戻すと製品は汎用ロジックに戻る")
+check(!Engine.canSelectProduct(state: nodeState, productId: "automotive"), "28nm では Q2 が稼働しないので車載チップを選べない")
+
+print("== 0.5.0. 往復 ==")
+var roundTripNode = readyFor14nm()
+let learned28BeforeRoundTrip = roundTripNode.learningWafers["n28"]
+check(Engine.switchNode(state: &roundTripNode, toNodeId: "n14"), "14nm へ移行できた")
+roundTripNode.learningWafers["n14"] = 500
+check(Engine.switchNode(state: &roundTripNode, toNodeId: "n28"), "28nm へ戻せた")
+check(roundTripNode.fab.currentNodeId == "n28", "現在のノードが n28")
+check(abs(Engine.derived(state: roundTripNode).lineWPH - 8.5) < 1e-6, "戻した後のラインWPH は 8.5")
+check(roundTripNode.learningWafers["n14"] == 500, "learningWafers[n14] = 500 が保持される")
+check(roundTripNode.learningWafers["n28"] == learned28BeforeRoundTrip, "learningWafers[n28] は移行前と同じ")
+
+print("== 0.5.0. v3 セーブ互換 ==")
+let v3Dir = makeDirectory("v3")
+writeObject(encodedObject(GameState.initial()), to: v3Dir.appendingPathComponent(SaveManager.fileName))
+var v3Manager = SaveManager(directory: v3Dir)
+let v3Loaded = v3Manager.load()
+check(v3Loaded != nil, "v3 セーブを読み込める")
+check(v3Loaded?.schemaVersion == 3, "v3 セーブの schemaVersion は 3 のまま")
+check(v3Loaded?.fab.currentNodeId == "n28", "v3 セーブの現在ノードは n28")
 
 try? fileManager.removeItem(at: tempRoot)
 

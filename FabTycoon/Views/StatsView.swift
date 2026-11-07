@@ -56,6 +56,7 @@ struct StatsView: View {
                 row("市場不良率", MoneyFormat.percent(derived.marketDefectRate))
             }
             Section("現在") {
+                row("ノード", Engine.currentNode(state: store.state).displayName)
                 row("製造製品", currentProduct.name)
                 row("ラインWPH", MoneyFormat.decimal(derived.lineWPH, digits: 2))
                 row("チップ単価", MoneyFormat.yen(derived.currentPriceYen))
@@ -248,7 +249,8 @@ struct ProductsView: View {
             Text(product.description)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text("ダイ単価 \(MoneyFormat.yen(product.diePriceYen)) × \(product.diesPerWafer)個/ウェハ／歩留まり \(multiplierText(product.yieldMultiplier))／ペナルティ \(multiplierText(product.marketPenaltyMultiplier))／原価率 \(MoneyFormat.percent(product.cogsRate))")
+            // 単価・原価率は現在ノードの倍率・加算を反映した値
+            Text("ダイ単価 \(MoneyFormat.yen(Engine.diePriceYen(state: store.state, productId: product.id))) × \(product.diesPerWafer)個/ウェハ／歩留まり \(multiplierText(product.yieldMultiplier))／ペナルティ \(multiplierText(product.marketPenaltyMultiplier))／原価率 \(MoneyFormat.percent(Engine.cogsRate(state: store.state, productId: product.id)))")
                 .font(.caption.weight(.semibold))
                 .monospacedDigit()
             ForEach(product.requirements, id: \.label) { requirement in
@@ -263,13 +265,13 @@ struct ProductsView: View {
 
     private func requirementRow(_ requirement: ProductRequirement) -> some View {
         let satisfied = Engine.isSatisfied(state: store.state, requirement: requirement)
-        let owned = requirement.options
-            .map { Engine.ownedCount(state: store.state, modelIds: $0.modelIds) }
+        let active = requirement.options
+            .map { Engine.activeCount(state: store.state, modelIds: $0.modelIds) }
             .max() ?? 0
         return HStack(alignment: .firstTextBaseline, spacing: 4) {
             Image(systemName: satisfied ? "checkmark.circle.fill" : "xmark.circle.fill")
                 .foregroundStyle(satisfied ? Color.green : Color.red)
-            Text("\(requirement.label)（現在 \(owned)台）")
+            Text("\(requirement.label)（稼働 \(active)台）")
         }
         .font(.caption)
     }

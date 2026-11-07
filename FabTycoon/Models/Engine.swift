@@ -181,9 +181,9 @@ enum Engine {
         currentProduct(state: state).yieldMultiplier
     }
 
-    /// 製品ごとのダイ1個の基準単価（円）
+    /// ダイ1個の基準単価（円）= 製品のダイ単価 × 現在ノードの単価倍率
     static func productDiePriceYen(state: GameState) -> Double {
-        currentProduct(state: state).diePriceYen
+        currentProduct(state: state).diePriceYen * nodePriceMultiplier(state: state)
     }
 
     /// 製品ごとのウェハ1枚あたりのダイ数
@@ -191,9 +191,33 @@ enum Engine {
         currentProduct(state: state).diesPerWafer
     }
 
-    /// 製品ごとの売上原価率
+    /// 製品単体の売上原価率（ノード加算前）
     static func productCogsRate(state: GameState) -> Double {
         currentProduct(state: state).cogsRate
+    }
+
+    // MARK: ノード経済
+
+    /// 現在ノードのダイ単価倍率
+    static func nodePriceMultiplier(state: GameState) -> Double {
+        currentNode(state: state).priceMultiplier
+    }
+
+    /// 実際に適用する売上原価率 = 製品の原価率 + 現在ノードの加算（0...0.95）
+    static func cogsRate(state: GameState) -> Double {
+        cogsRate(state: state, productId: state.currentProductId)
+    }
+
+    /// 指定製品を現在ノードで作った場合の売上原価率（表示用）
+    static func cogsRate(state: GameState, productId: String) -> Double {
+        let product = Catalog.product(id: productId) ?? Catalog.defaultProduct
+        return min(max(product.cogsRate + currentNode(state: state).cogsAddition, 0), 0.95)
+    }
+
+    /// 指定製品を現在ノードで作った場合のダイ単価（市況適用前、表示用）
+    static func diePriceYen(state: GameState, productId: String) -> Double {
+        let product = Catalog.product(id: productId) ?? Catalog.defaultProduct
+        return product.diePriceYen * nodePriceMultiplier(state: state)
     }
 
     /// 製品ごとの市場不良ペナルティ倍率（ペナルティ額に乗算）
@@ -315,7 +339,7 @@ enum Engine {
         let dies = Double(productDiesPerWafer(state: state))
         let grossPerWafer = dies * price * (lineYield + shippedDefectFraction)
         let penaltyPerWafer = dies * price * shippedDefectFraction * penaltyRate
-        let marginPerWafer = grossPerWafer * (1 - productCogsRate(state: state)) - penaltyPerWafer
+        let marginPerWafer = grossPerWafer * (1 - cogsRate(state: state)) - penaltyPerWafer
 
         return DerivedState(
             nodeId: node.id,
@@ -436,7 +460,7 @@ enum Engine {
             let grossYen = soldChips * price
             sale = netSale(chips: soldChips, defectRate: defectMix, priceYen: price,
                            penaltyMultiplier: productMarketPenaltyMultiplier(state: state))
-            let cogsYen = grossYen * productCogsRate(state: state)
+            let cogsYen = grossYen * cogsRate(state: state)
             netYen = sale.revenueYen - cogsYen
             state.stats.totalGrossSalesYen += grossYen
             state.stats.totalCogsYen += cogsYen
@@ -661,7 +685,7 @@ enum Engine {
     static func inventorySaleValueYen(state: GameState, priceYen: Double) -> Double {
         netSale(chips: state.fab.inventoryChips, defectRate: derived(state: state).marketDefectRate, priceYen: priceYen,
                 penaltyMultiplier: productMarketPenaltyMultiplier(state: state)).revenueYen
-            - state.fab.inventoryChips * priceYen * productCogsRate(state: state)
+            - state.fab.inventoryChips * priceYen * cogsRate(state: state)
     }
 
     /// 在庫チップを指定価格で一括売却し、純売上（市場不良ペナルティ・売上原価控除後）を返す
@@ -672,7 +696,7 @@ enum Engine {
         let sale = netSale(chips: chips, defectRate: derived(state: state).marketDefectRate, priceYen: priceYen,
                            penaltyMultiplier: productMarketPenaltyMultiplier(state: state))
         let grossYen = chips * priceYen
-        let cogsYen = grossYen * productCogsRate(state: state)
+        let cogsYen = grossYen * cogsRate(state: state)
         let netYen = sale.revenueYen - cogsYen
         state.fab.inventoryChips = 0
         state.stats.totalGrossSalesYen += grossYen
@@ -686,15 +710,24 @@ enum Engine {
 
     // MARK: 製品
 
-    /// 所有装置（設置中＋倉庫）のうち modelIds に含まれる台数。要求はファブの設備能力に対する条件なので、
-    /// 現在ノードで稼働しているか（isActive）や設置中かどうかは問わない
+    /// 所有装置（設置中＋倉庫）のうち modelIds に含まれる台数（図鑑の解放・ショップの所持台数用）。
+    /// 稼働しているかどうかは問わない
     static func ownedCount(state: GameState, modelIds: [String]) -> Int {
         (state.fab.equipment + state.fab.storedEquipment).filter { modelIds.contains($0.modelId) }.count
     }
 
-    /// 要求の選択肢のいずれかを満たしていれば充足
+    /// 設置中の装置のうち modelIds に含まれ、現在のノードで稼働している台数
+    static func activeCount(state: GameState, modelIds: [String]) -> Int {
+        let nodeId = state.fab.currentNodeId
+        return state.fab.equipment.filter { instance in
+            guard modelIds.contains(instance.modelId), let model = Catalog.model(id: instance.modelId) else { return false }
+            return isActive(model, nodeId: nodeId)
+        }.count
+    }
+
+    /// 要求の選択肢のいずれかを満たしていれば充足（設置中かつ現在のノードで稼働している台数で判定）
     static func isSatisfied(state: GameState, requirement: ProductRequirement) -> Bool {
-        requirement.options.contains { ownedCount(state: state, modelIds: $0.modelIds) >= $0.count }
+        requirement.options.contains { activeCount(state: state, modelIds: $0.modelIds) >= $0.count }
     }
 
     /// 未充足の要求ラベル（空なら選択可能）
@@ -725,6 +758,127 @@ enum Engine {
             sellInventory(state: &state, priceYen: derived(state: state).currentPriceYen)
         }
         state.currentProductId = productId
+        return true
+    }
+
+    // MARK: 待機（スタンバイ）
+
+    /// 設置中だが、モデルが現在のノードに非対応で稼働していない
+    static func isStandby(_ instance: EquipmentInstance, state: GameState) -> Bool {
+        guard state.fab.equipment.contains(where: { $0.id == instance.id }),
+              let model = Catalog.model(id: instance.modelId)
+        else { return false }
+        return !isActive(model, nodeId: state.fab.currentNodeId)
+    }
+
+    /// 工程別の待機台数
+    static func standbyCount(state: GameState, process: ProcessType) -> Int {
+        let nodeId = state.fab.currentNodeId
+        return state.fab.equipment.filter { instance in
+            guard let model = Catalog.model(id: instance.modelId), model.process == process else { return false }
+            return !isActive(model, nodeId: nodeId)
+        }.count
+    }
+
+    // MARK: ノード切替
+
+    /// ノードの解放に必要な研究の解放キー（キーが無いノードは研究不要）
+    private static let nodeUnlockKeys: [String: String] = ["n14": "node14"]
+
+    /// ノードを解放する研究（研究不要・未実装なら nil）
+    static func nodeUnlockResearch(nodeId: String) -> ResearchSpec? {
+        guard let key = nodeUnlockKeys[nodeId] else { return nil }
+        return Catalog.research.first { $0.effect == .unlock(key) }
+    }
+
+    /// ノードの解放研究が完了しているか（研究不要のノードは true）
+    static func isNodeUnlocked(state: GameState, nodeId: String) -> Bool {
+        guard let key = nodeUnlockKeys[nodeId] else { return true }
+        return isResearchUnlocked(state: state, key: key)
+    }
+
+    /// ノードへ切り替えられない理由（nil なら切替可能）
+    static func nodeSwitchBlockReason(state: GameState, toNodeId: String) -> String? {
+        guard let node = Catalog.node(id: toNodeId) else { return "不明なノードです" }
+        if toNodeId == state.fab.currentNodeId { return "現在のノードです" }
+        guard Catalog.isPlayable(nodeId: toNodeId) else { return "\(node.displayName)は今後のアップデートで解放されます" }
+        if !isNodeUnlocked(state: state, nodeId: toNodeId) {
+            let researchName = nodeUnlockResearch(nodeId: toNodeId)?.name ?? "\(node.displayName)プロセス"
+            return "研究「\(researchName)」が必要です"
+        }
+        return nil
+    }
+
+    static func canSwitchNode(state: GameState, toNodeId: String) -> Bool {
+        nodeSwitchBlockReason(state: state, toNodeId: toNodeId) == nil
+    }
+
+    /// ノード切替後の状態（在庫売却なし。製品が選択不可なら既定製品に戻す）
+    private static func stateAfterSwitchingNode(_ state: GameState, toNodeId: String) -> GameState {
+        var copy = state
+        copy.fab.currentNodeId = toNodeId
+        if !canSelectProduct(state: copy, productId: copy.currentProductId) {
+            copy.currentProductId = Catalog.defaultProductId
+        }
+        return copy
+    }
+
+    /// 指定ノードへ切り替えた場合の派生状態（プレビュー用。製品が戻る場合は戻した後の値）
+    static func derived(state: GameState, asNode nodeId: String) -> DerivedState {
+        derived(state: stateAfterSwitchingNode(state, toNodeId: nodeId))
+    }
+
+    /// 指定ノードで稼働台数 0 になる工程
+    static func stoppedProcesses(state: GameState, atNode nodeId: String) -> [ProcessType] {
+        let d = derived(state: state, asNode: nodeId)
+        return ProcessType.allCases.filter { d.units($0) == 0 }
+    }
+
+    /// 移行確認シート用の警告文
+    static func nodeSwitchWarnings(state: GameState, toNodeId: String) -> [String] {
+        guard let target = Catalog.node(id: toNodeId) else { return [] }
+        let after = stateAfterSwitchingNode(state, toNodeId: toNodeId)
+        var warnings: [String] = []
+        for process in stoppedProcesses(state: state, atNode: toNodeId) {
+            var text = "\(process.displayName)の装置が稼働しません（ラインが停止します）"
+            if let model = Catalog.models(for: process)
+                .filter({ $0.supports(nodeId: toNodeId) })
+                .min(by: { $0.priceYen < $1.priceYen }) {
+                text += "。\(model.name)（\(model.id)）の購入が必要です"
+                if let researchId = model.unlockResearchId, !state.research.completedIds.contains(researchId) {
+                    text += "（\(model.unlockNote ?? "研究")で解放）"
+                } else if state.cashYen < model.priceYen {
+                    text += "（資金があと\(MoneyFormat.yen(model.priceYen - state.cashYen))不足）"
+                }
+            }
+            warnings.append(text)
+        }
+        let standby = after.fab.equipment.filter { isStandby($0, state: after) }.count
+        if standby > 0 {
+            warnings.append("\(standby)台の装置が\(target.displayName)非対応のため待機になります")
+        }
+        if after.currentProductId != state.currentProductId {
+            let name = currentProduct(state: state).name
+            warnings.append("現在の製品『\(name)』は移行先で製造できないため、\(Catalog.defaultProduct.name)に戻ります")
+        }
+        if state.fab.inventoryChips > 0 {
+            warnings.append("在庫チップは現在の単価で売却されます")
+        }
+        return warnings
+    }
+
+    /// ノードを切り替える。在庫は旧ノードの単価で精算し、新ノードで作れない製品は既定製品に戻す
+    @discardableResult
+    static func switchNode(state: inout GameState, toNodeId: String) -> Bool {
+        guard canSwitchNode(state: state, toNodeId: toNodeId) else { return false }
+        if state.fab.inventoryChips > 0 {
+            sellInventory(state: &state, priceYen: derived(state: state).currentPriceYen)
+        }
+        state.fab.currentNodeId = toNodeId
+        if !canSelectProduct(state: state, productId: state.currentProductId) {
+            state.currentProductId = Catalog.defaultProductId
+        }
+        evaluateMilestones(state: &state)
         return true
     }
 
@@ -821,12 +975,35 @@ enum Engine {
             .min()
     }
 
+    /// 所有装置（設置中＋倉庫）すべてを設置した仮定の状態。
+    /// 倉庫からの再設置は無料なので、詰み判定では所有装置すべてを使えるものとして評価する
+    private static func stateWithAllOwnedEquipmentInstalled(_ state: GameState) -> GameState {
+        var copy = state
+        copy.fab.equipment += copy.fab.storedEquipment
+        copy.fab.storedEquipment = []
+        return copy
+    }
+
+    /// 切替可能なノード（プレイ可能かつ解放済み）のいずれかで、所有装置を使ってラインが再稼働するか。
+    /// 再稼働するなら、ノード切替と無料の付け替えで立て直せる（＝詰みではない）。
+    /// 待機装置を倉庫へ外しても所有関係は変わらないため、この判定は付け替えで回避できない
+    static func canRestartLineWithOwnedEquipment(state: GameState) -> Bool {
+        let fielded = stateWithAllOwnedEquipmentInstalled(state)
+        return Catalog.nodes.contains { node in
+            Catalog.isPlayable(nodeId: node.id)
+                && isNodeUnlocked(state: state, nodeId: node.id)
+                && derived(state: fielded, asNode: node.id).lineWPH > 0
+        }
+    }
+
     /// 緊急救済で今すぐ交付できる額（常に > 0）。対象外なら nil。
-    /// 対象：ラインWPHが0（いずれかの工程に稼働装置がない）かつ、所持金が「止まっている工程の最安機種価格」未満。
+    /// 対象：ラインWPHが0（いずれかの工程に稼働装置がない）かつ、所持金が「止まっている工程の最安機種価格」未満、
+    /// かつ解放済みノードへの切替（と無料の付け替え）でも再稼働しない、本当に詰んだ場合のみ。
     /// 額：最安機種価格 − 所持金 ＋ 最安機種価格 × emergencyMarginRate（余裕分）
     static func emergencyGrantYen(state: GameState) -> Double? {
         let d = derived(state: state)
         guard d.lineWPH <= 0, let cheapest = cheapestStoppedProcessPriceYen(state: state) else { return nil }
+        guard !canRestartLineWithOwnedEquipment(state: state) else { return nil }
         guard state.cashYen < cheapest else { return nil }
         return cheapest - state.cashYen + cheapest * emergencyMarginRate
     }
@@ -1064,6 +1241,10 @@ extension Engine {
             return state.subsidy.totalReceivedYen > 0
         case .nonDefaultProduct:
             return state.currentProductId != Catalog.defaultProductId
+        case .currentNodeIs(let nodeId):
+            return state.fab.currentNodeId == nodeId
+        case .lineYieldAtLeastOnNode(let nodeId, let target):
+            return state.fab.currentNodeId == nodeId && derived.lineYield >= target
         }
     }
 
@@ -1092,8 +1273,11 @@ extension Engine {
             target > 0 ? min(max(current / target, 0), 1) : 1
         }
         switch spec.condition {
-        case .firstInvestment, .subsidyReceived, .nonDefaultProduct:
+        case .firstInvestment, .subsidyReceived, .nonDefaultProduct, .currentNodeIs:
             return milestoneAchieved(spec, state: state, derived: derived) ? 1 : 0
+        case .lineYieldAtLeastOnNode(let nodeId, let target):
+            // 対象ノードにいないときの歩留まりは別ノードの値なので進捗に数えない
+            return state.fab.currentNodeId == nodeId ? ratio(derived.lineYield, target) : 0
         case .lineWPHAtLeast(let target):
             return ratio(derived.lineWPH, target)
         case .lineYieldAtLeast(let target):
@@ -1136,6 +1320,13 @@ extension Engine {
             return ("\(state.fab.expansionCount)回", "\(target)回")
         case .maxLevelAtLeast(let target):
             return ("Lv\(maxOwnedLevel(state: state))", "Lv\(target)")
+        case .currentNodeIs(let nodeId):
+            let name = Catalog.node(id: nodeId)?.displayName ?? nodeId
+            return (achieved ? "達成" : "未達成", "\(name)へ移行する")
+        case .lineYieldAtLeastOnNode(let nodeId, let target):
+            let name = Catalog.node(id: nodeId)?.displayName ?? nodeId
+            let current = state.fab.currentNodeId == nodeId ? MoneyFormat.percent(derived.lineYield) : "未移行"
+            return (current, "\(name)で\(MoneyFormat.percent(target))")
         }
     }
 }
@@ -1212,6 +1403,10 @@ extension Engine {
         // 1. ライン停止
         if derived.lineWPH <= 0 {
             let stopped = ProcessType.allCases.first { derived.units($0) == 0 } ?? derived.bottleneck
+            if let stopped, standbyCount(state: state, process: stopped) > 0 {
+                let nodeName = currentNode(state: state).displayName
+                return "ラインが止まっています。\(stopped.displayName)の装置が\(nodeName)では稼働しません（待機中）。\(nodeName)対応の装置を購入するか、ノードを戻しましょう。"
+            }
             var message = "ラインが止まっています。\(stopped?.displayName ?? "いずれかの工程")の装置がありません。装置タブで最安の装置を設置しましょう。"
             if emergencyGrantYen(state: state) != nil {
                 message += " 統計タブの緊急補助金で立て直せます。"

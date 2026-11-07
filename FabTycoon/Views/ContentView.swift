@@ -90,7 +90,10 @@ struct HeaderView: View {
                 BadgeView(text: "市況 \(condition.label)", systemImage: condition.symbolName, color: condition.color)
                 Spacer()
                 if let next = Catalog.nextNode(after: node.id) {
-                    BadgeView(text: "\(next.displayName) 🔒", systemImage: nil, color: .gray)
+                    let canSwitch = Engine.canSwitchNode(state: state, toNodeId: next.id)
+                    BadgeView(text: canSwitch ? next.displayName : "\(next.displayName) 🔒",
+                              systemImage: canSwitch ? "arrow.up.forward" : nil,
+                              color: canSwitch ? .blue : .gray)
                 }
             }
         }

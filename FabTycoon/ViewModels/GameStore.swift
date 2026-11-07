@@ -199,6 +199,13 @@ final class GameStore: ObservableObject {
     }
 
     @discardableResult
+    func switchNode(_ nodeId: String) -> Bool {
+        let ok = Engine.switchNode(state: &state, toNodeId: nodeId)
+        refresh()
+        return ok
+    }
+
+    @discardableResult
     func applySubsidy() -> Bool {
         let ok = Engine.applySubsidy(state: &state)
         refresh()

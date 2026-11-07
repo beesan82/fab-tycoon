@@ -84,6 +84,10 @@ struct NodeSpec: Identifiable, Equatable {
     let waferCostYen: Double
     let passes: [ProcessType: Int]
     let lithoPassOverrides: [LithoClass: Int]
+    /// ダイ単価へのノード倍率（製品のダイ単価に乗算）
+    let priceMultiplier: Double
+    /// 製品の売上原価率への加算（微細化で工程数・材料費が増える分）
+    let cogsAddition: Double
 }
 
 // MARK: - 装置モデル
@@ -173,50 +177,57 @@ struct ProductSpec: Identifiable, Equatable {
 enum Catalog {
     static let startingNodeId = "n28"
     /// 現在稼働できるノード
-    static let playableNodeIds: Set<String> = ["n28"]
+    static let playableNodeIds: Set<String> = ["n28", "n14"]
 
+    // priceMultiplier / cogsAddition は n7 以降は将来用のデータ
     static let nodes: [NodeSpec] = [
         NodeSpec(
             id: "n28", displayName: "28nm", diesPerWafer: 100,
             yieldInit: 0.70, yieldMax: 0.95, learnWafers: 6_000,
             chipBasePriceYen: 120_000, waferCostYen: 500_000,
             passes: passTable([15, 20, 20, 8, 5, 3, 1]),
-            lithoPassOverrides: [:]
+            lithoPassOverrides: [:],
+            priceMultiplier: 1.0, cogsAddition: 0.0
         ),
         NodeSpec(
             id: "n14", displayName: "14nm", diesPerWafer: 120,
-            yieldInit: 0.55, yieldMax: 0.92, learnWafers: 1_000,
+            yieldInit: 0.55, yieldMax: 0.92, learnWafers: 2_000,
             chipBasePriceYen: 400_000, waferCostYen: 1_000_000,
             passes: passTable([45, 55, 55, 18, 14, 8, 1]),
-            lithoPassOverrides: [:]
+            lithoPassOverrides: [:],
+            priceMultiplier: 3.5, cogsAddition: 0.03
         ),
         NodeSpec(
             id: "n7", displayName: "7nm", diesPerWafer: 150,
             yieldInit: 0.40, yieldMax: 0.90, learnWafers: 2_000,
             chipBasePriceYen: 1_200_000, waferCostYen: 2_500_000,
             passes: passTable([70, 80, 80, 20, 18, 10, 1]),
-            lithoPassOverrides: [.euv: 35]
+            lithoPassOverrides: [.euv: 35],
+            priceMultiplier: 10.0, cogsAddition: 0.06
         ),
         NodeSpec(
             id: "n5", displayName: "5nm", diesPerWafer: 170,
             yieldInit: 0.32, yieldMax: 0.88, learnWafers: 3_000,
             chipBasePriceYen: 2_500_000, waferCostYen: 4_000_000,
             passes: passTable([40, 90, 90, 22, 20, 12, 1]),
-            lithoPassOverrides: [:]
+            lithoPassOverrides: [:],
+            priceMultiplier: 20.0, cogsAddition: 0.08
         ),
         NodeSpec(
             id: "n3", displayName: "3nm", diesPerWafer: 200,
             yieldInit: 0.25, yieldMax: 0.85, learnWafers: 4_000,
             chipBasePriceYen: 5_000_000, waferCostYen: 6_000_000,
             passes: passTable([45, 100, 100, 25, 22, 14, 1]),
-            lithoPassOverrides: [:]
+            lithoPassOverrides: [:],
+            priceMultiplier: 35.0, cogsAddition: 0.10
         ),
         NodeSpec(
             id: "n2", displayName: "2nm", diesPerWafer: 220,
             yieldInit: 0.20, yieldMax: 0.80, learnWafers: 6_000,
             chipBasePriceYen: 10_000_000, waferCostYen: 9_000_000,
             passes: passTable([60, 110, 110, 28, 25, 16, 1]),
-            lithoPassOverrides: [.highNA: 40]
+            lithoPassOverrides: [.highNA: 40],
+            priceMultiplier: 55.0, cogsAddition: 0.12
         ),
     ]
 
@@ -735,6 +746,10 @@ enum MilestoneCondition: Equatable {
     case subsidyReceived
     /// currentProductId != Catalog.defaultProductId
     case nonDefaultProduct
+    /// fab.currentNodeId が指定ノード
+    case currentNodeIs(String)
+    /// 指定ノードで稼働中かつライン歩留まりが target 以上
+    case lineYieldAtLeastOnNode(nodeId: String, target: Double)
 }
 
 struct MilestoneSpec: Identifiable, Equatable {
@@ -795,6 +810,14 @@ extension Catalog {
         MilestoneSpec(
             id: "yield_90", title: "ライン歩留まり90%", condition: .lineYieldAtLeast(0.90),
             learningNote: "歩留まり90%は量産ラインとして一流の水準。ここからは欠陥密度の低減と学習の積み重ねがものを言う領域になる。"
+        ),
+        MilestoneSpec(
+            id: "node_14", title: "14nm到達", condition: .currentNodeIs("n14"),
+            learningNote: "14nmではトランジスタが平面型から立体的なFinFETに変わる。液浸露光に加えて1層を複数回に分けて描く多重露光が必要になり、工程数は28nmの2〜3倍に膨らむ。"
+        ),
+        MilestoneSpec(
+            id: "yield_80_n14", title: "14nm歩留まり80%", condition: .lineYieldAtLeastOnNode(nodeId: "n14", target: 0.80),
+            learningNote: "新しいノードの歩留まりは、旧ノードで積み上げた学習がそのまま使えず、低い値からランプし直しになる。量産を流しながら欠陥の原因を一つずつ潰していくことで、ようやく旧ノード並みの水準に追いつく。"
         ),
     ]
 
