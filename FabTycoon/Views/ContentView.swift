@@ -7,6 +7,11 @@ struct ContentView: View {
         VStack(spacing: 0) {
             HeaderView(state: store.state, derived: store.derived)
             Divider()
+            if store.shouldShowScaleNotice {
+                ScaleNoticeBanner {
+                    store.dismissScaleNotice()
+                }
+            }
             TabView(selection: $store.selectedTab) {
                 LineView()
                     .tabItem { Label("フロア", systemImage: "square.grid.3x3.fill") }
@@ -36,6 +41,8 @@ struct HeaderView: View {
     let state: GameState
     let derived: DerivedState
 
+    @State private var showingSettings = false
+
     var body: some View {
         let node = Engine.currentNode(state: state)
         let product = Catalog.product(id: state.currentProductId) ?? Catalog.defaultProduct
@@ -60,6 +67,14 @@ struct HeaderView: View {
                         .monospacedDigit()
                         .foregroundStyle(derived.incomePerMinuteYen >= 0 ? Color.green : Color.red)
                 }
+                Button {
+                    showingSettings = true
+                } label: {
+                    Image(systemName: "gearshape")
+                        .font(.title3)
+                }
+                .accessibilityLabel("設定")
+                .padding(.leading, 8)
             }
             HStack(spacing: 8) {
                 BadgeView(text: node.displayName, systemImage: "cpu", color: .blue)
@@ -74,6 +89,100 @@ struct HeaderView: View {
         .padding(.horizontal)
         .padding(.vertical, 10)
         .background(.bar)
+        .sheet(isPresented: $showingSettings) {
+            SettingsView()
+        }
+    }
+}
+
+// MARK: - 旧セーブ告知バナー
+
+struct ScaleNoticeBanner: View {
+    let onClose: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "info.circle.fill")
+                .foregroundStyle(.blue)
+            Text("アップデートで数字のバランスが変わりました。以前のセーブはそのまま使えます。新しいバランスで始める場合は、設定（歯車アイコン）から新規開始できます。")
+                .font(.footnote)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button(action: onClose) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityLabel("閉じる")
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 10)
+        .background(Color.blue.opacity(0.1))
+    }
+}
+
+// MARK: - 設定
+
+struct SettingsView: View {
+    @EnvironmentObject private var store: GameStore
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var showingFirstConfirm = false
+    @State private var showingSecondConfirm = false
+
+    private var versionText: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "-"
+        let build = info?["CFBundleVersion"] as? String ?? "-"
+        return "バージョン \(version) (\(build))"
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Text(versionText)
+                        .monospacedDigit()
+                }
+
+                Section {
+                    Button(role: .destructive) {
+                        showingFirstConfirm = true
+                    } label: {
+                        Text("新規開始")
+                            .foregroundStyle(.red)
+                    }
+                } footer: {
+                    Text("セーブは自動で保存されます。新規開始すると、現在のセーブは削除されて初期状態から始まります。")
+                }
+            }
+            .navigationTitle("設定")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("閉じる") { dismiss() }
+                }
+            }
+            .alert("新規開始しますか？", isPresented: $showingFirstConfirm) {
+                Button("新規開始", role: .destructive) {
+                    // 1つ目のアラートが閉じてから2つ目を出す
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        showingSecondConfirm = true
+                    }
+                }
+                Button("キャンセル", role: .cancel) {}
+            } message: {
+                Text("現在の資金・装置・記録はすべて消えます。")
+            }
+            .alert("本当に新規開始しますか？", isPresented: $showingSecondConfirm) {
+                Button("新規開始する", role: .destructive) {
+                    store.resetGame()
+                    dismiss()
+                }
+                Button("キャンセル", role: .cancel) {}
+            } message: {
+                Text("この操作は取り消せません。")
+            }
+        }
     }
 }
 
@@ -121,6 +230,13 @@ struct OfflineReportSheet: View {
     let report: OfflineReport
     let onClose: () -> Void
 
+    /// 例：「効率50%・上限4時間」（Engine の定数から組み立てる）
+    private var conditionText: String {
+        let efficiency = Int(Engine.offlineEfficiency * 100)
+        let capHours = Int(Engine.offlineCapSeconds / 3_600)
+        return "効率\(efficiency)%・上限\(capHours)時間"
+    }
+
     var body: some View {
         VStack(spacing: 20) {
             Image(systemName: "moon.stars.fill")
@@ -128,7 +244,7 @@ struct OfflineReportSheet: View {
                 .foregroundStyle(.indigo)
             Text("おかえりなさい")
                 .font(.title2.bold())
-            Text("不在の \(MoneyFormat.duration(report.elapsedSeconds)) の間もファブは稼働していました（効率50%）")
+            Text("不在の \(MoneyFormat.duration(report.elapsedSeconds)) の間もファブは稼働していました（\(conditionText)）")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

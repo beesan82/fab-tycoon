@@ -125,10 +125,6 @@ struct LineView: View {
             Label("停止中：装置ゼロの工程あり", systemImage: "exclamationmark.triangle.fill")
                 .font(.caption.bold())
                 .foregroundStyle(.red)
-        } else if !state.fab.running {
-            Label("停止中：材料費不足", systemImage: "exclamationmark.triangle.fill")
-                .font(.caption.bold())
-                .foregroundStyle(.red)
         } else {
             Label("稼働中", systemImage: "circle.fill")
                 .font(.caption.bold())
@@ -257,9 +253,9 @@ struct LineView: View {
                 .font(.title2)
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(next.displayName)はスライス2で解放")
+                Text("\(next.displayName)は研究で解放（準備中）")
                     .font(.subheadline.bold())
-                Text("研究ツリーとノード移行は次のスライスで実装予定です")
+                Text("研究を進めると次のノードへ移行できます（準備中）")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

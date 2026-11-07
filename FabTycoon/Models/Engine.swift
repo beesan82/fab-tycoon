@@ -94,7 +94,7 @@ struct OfflineReport: Identifiable, Equatable {
 
 enum BuyBlockReason: Equatable {
     case unknownModel
-    /// 対応ノード外・研究が必要など（スライス1では購入不可）
+    /// 対応ノード外・研究が必要など（現状は購入不可）
     case locked([String])
     case noFreeSlot
     case insufficientCash(shortfallYen: Double)
@@ -113,14 +113,16 @@ enum Engine {
     static let uptime = 0.85
     /// 実1秒 = ゲーム内10分（×600）。生産単位は WPH（ゲーム内1時間あたり枚数）
     static let gameMinutesPerRealSecond = 10.0
-    static let inventoryCap = 10_000.0
+    static let inventoryCap = 200_000.0
     static let offlineCapSeconds = 4.0 * 3_600
     static let offlineEfficiency = 0.5
     static let offlineStepSeconds = 60.0
-    /// 市況サイクル周期（ゲーム内分 = 1週間）
-    static let marketCycleMinutes = 10_080.0
+    /// 市況サイクル周期（ゲーム内分。実2.5時間）
+    static let marketCycleMinutes = 90_000.0
     static let marketCycleAmplitude = 0.3
-    static let walkStep = 0.05
+    static let walkStep = 0.02
+    /// ランダムウォークの間隔（ゲーム内分 = 6ゲーム時間）
+    static let walkIntervalMinutes = 360.0
     static let walkRange = 0.6...1.5
     static let maxWalkStepsPerTick = 500
     static let maxLevel = 5
@@ -335,12 +337,12 @@ enum Engine {
         guard dtRealSeconds > 0, dtRealSeconds.isFinite else { return .zero }
         let gameMinutes = dtRealSeconds * gameMinutesPerRealSecond
 
-        // 市場時間とランダムウォーク（ゲーム内1時間境界ごと）
+        // 市場時間とランダムウォーク（6ゲーム時間ごとの境界で1歩）
         let before = state.market.gameTimeMinutes
         let after = before + gameMinutes
         state.market.gameTimeMinutes = after
         if frozenPriceYen == nil {
-            let crossings = Int(floor(after / 60)) - Int(floor(before / 60))
+            let crossings = Int(floor(after / walkIntervalMinutes)) - Int(floor(before / walkIntervalMinutes))
             let steps = min(max(crossings, 0), maxWalkStepsPerTick)
             for _ in 0..<steps {
                 let factor = state.market.walkFactor * (1 + Double.random(in: -walkStep...walkStep))
@@ -434,8 +436,10 @@ enum Engine {
         let capped = min(max(elapsedRealSeconds, 0), offlineCapSeconds)
         let effective = capped * offlineEfficiency
         let frozenPrice = state.market.recentAvgPriceYen
-        // オフライン中はゲーム内時計を進めない（tick が加算した分をループ後に戻す）
+        // オフライン中はゲーム内時計・市況位相・プレイ時間を進めない（tick が加算した分をループ後に戻す）
         let savedGameHours = state.gameHoursElapsed
+        let savedMarketMinutes = state.market.gameTimeMinutes
+        let savedPlaySeconds = state.stats.playSeconds
 
         var remaining = effective
         var produced = 0.0
@@ -450,6 +454,8 @@ enum Engine {
             remaining -= step
         }
         state.gameHoursElapsed = savedGameHours
+        state.market.gameTimeMinutes = savedMarketMinutes
+        state.stats.playSeconds = savedPlaySeconds
 
         return OfflineReport(
             elapsedSeconds: capped,
@@ -472,7 +478,7 @@ enum Engine {
         return model.priceYen * sellRefundRate
     }
 
-    /// スライス1で購入できない理由（対応ノード外・研究が必要）
+    /// 購入できない理由（対応ノード外・研究が必要）
     static func lockReasons(model: EquipmentModel, nodeId: String) -> [String] {
         var reasons: [String] = []
         if !isActive(model, nodeId: nodeId) {
@@ -480,7 +486,7 @@ enum Engine {
             reasons.append("対応ノード外（\(nodeName)非対応）")
         }
         if let note = model.unlockNote {
-            reasons.append("\(note)が必要（スライス2以降）")
+            reasons.append("\(note)が必要（研究で解放・準備中）")
         }
         return reasons
     }

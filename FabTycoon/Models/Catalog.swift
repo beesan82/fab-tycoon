@@ -68,7 +68,7 @@ enum LithoClass: String, Codable, CaseIterable, Comparable {
 
 // MARK: - ノード
 
-// diesPerWafer / chipBasePriceYen / waferCostYen はスライス1では不使用（データとして保持）。
+// diesPerWafer / chipBasePriceYen / waferCostYen は現状では不使用（データとして保持）。
 // 単価・ダイ数は製品側（ProductSpec）、ランニングコストは製品別のCOGS率に統合している。
 struct NodeSpec: Identifiable, Equatable {
     let id: String
@@ -168,13 +168,13 @@ struct ProductSpec: Identifiable, Equatable {
 
 enum Catalog {
     static let startingNodeId = "n28"
-    /// スライス1で稼働できるノード
+    /// 現在稼働できるノード
     static let playableNodeIds: Set<String> = ["n28"]
 
     static let nodes: [NodeSpec] = [
         NodeSpec(
             id: "n28", displayName: "28nm", diesPerWafer: 100,
-            yieldInit: 0.70, yieldMax: 0.95, learnWafers: 500,
+            yieldInit: 0.70, yieldMax: 0.95, learnWafers: 6_000,
             chipBasePriceYen: 120_000, waferCostYen: 500_000,
             passes: passTable([15, 20, 20, 8, 5, 3, 1]),
             lithoPassOverrides: [:]
@@ -299,8 +299,8 @@ enum Catalog {
         ProductSpec(
             id: "power", name: "パワー／アナログ系", shortName: "パワー・アナログ",
             description: "電源制御やセンサー向けの成熟製品。微細化の限界を攻めない設計なので欠陥が出にくく、歩留まりが高い。その代わりダイが大きく取れる数が少なく、ウェハ1枚あたりの売上は控えめ。",
-            diesPerWafer: 250, diePriceYen: 1_500, cogsRate: 0.50,
-            yieldMultiplier: 1.10, marketPenaltyMultiplier: 1.0,
+            diesPerWafer: 250, diePriceYen: 2_000, cogsRate: 0.42,
+            yieldMultiplier: 1.25, marketPenaltyMultiplier: 1.0,
             requirements: []
         ),
         ProductSpec(

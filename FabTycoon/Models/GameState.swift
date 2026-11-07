@@ -1,7 +1,7 @@
 import Foundation
 
 struct GameState: Codable, Equatable {
-    static let currentSchemaVersion = 1
+    static let currentSchemaVersion = 2
 
     var schemaVersion: Int
     var cashYen: Double
@@ -18,6 +18,8 @@ struct GameState: Codable, Equatable {
     var currentProductId: String = Catalog.defaultProductId
     /// 国庫補助金の申請・受給状況
     var subsidy: SubsidyState = SubsidyState()
+    /// 数値バランス変更の告知を表示済みか（旧セーブ向け）
+    var didShowScaleChangeNotice: Bool = false
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion
@@ -31,6 +33,7 @@ struct GameState: Codable, Equatable {
         case gameHoursElapsed
         case currentProductId
         case subsidy
+        case didShowScaleChangeNotice
     }
 
     /// 設置済み装置の購入価格合計（改良費は含まない）
@@ -71,7 +74,8 @@ struct GameState: Codable, Equatable {
             createdAt: now,
             gameHoursElapsed: 0,
             currentProductId: Catalog.defaultProductId,
-            subsidy: SubsidyState(totalInvestedYen: equipmentPurchaseTotalYen(equipment))
+            // 初期装置は累計設備投資に含めない
+            subsidy: SubsidyState()
         )
     }
 }
@@ -81,7 +85,7 @@ struct GameState: Codable, Equatable {
 extension GameState {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
         cashYen = try container.decode(Double.self, forKey: .cashYen)
         fab = try container.decode(Fab.self, forKey: .fab)
         market = try container.decode(MarketState.self, forKey: .market)
@@ -94,6 +98,7 @@ extension GameState {
         // 補助金導入前のセーブは、設置済み装置の購入価格合計を累計設備投資とみなす
         subsidy = try container.decodeIfPresent(SubsidyState.self, forKey: .subsidy)
             ?? SubsidyState(totalInvestedYen: GameState.equipmentPurchaseTotalYen(fab.equipment))
+        didShowScaleChangeNotice = try container.decodeIfPresent(Bool.self, forKey: .didShowScaleChangeNotice) ?? false
     }
 }
 

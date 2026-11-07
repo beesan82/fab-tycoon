@@ -22,17 +22,23 @@ final class GameStore: ObservableObject {
     static let autosaveInterval: TimeInterval = 5
     static let offlineThreshold: TimeInterval = 60
 
-    private let saveManager: SaveManager
+    /// 起動時に読み込んだセーブの元の schemaVersion（新規開始・読み込み失敗時は nil）
+    private(set) var loadedOriginalVersion: Int?
+
+    private var saveManager: SaveManager
     private var timer: Timer?
     private var lastTick: Date
     private var lastSave: Date
 
     init(saveManager: SaveManager = SaveManager()) {
-        self.saveManager = saveManager
+        var manager = saveManager
         let now = Date()
         var loaded: GameState
         var report: OfflineReport?
-        if let saved = saveManager.load() {
+        let saved = manager.load()
+        self.saveManager = manager
+        loadedOriginalVersion = manager.lastLoadedOriginalVersion
+        if let saved {
             loaded = saved
             let elapsed = now.timeIntervalSince(saved.lastSavedAt)
             if elapsed > Self.offlineThreshold {
@@ -204,5 +210,35 @@ final class GameStore: ObservableObject {
 
     func dismissOfflineReport() {
         offlineReport = nil
+    }
+
+    // MARK: 旧セーブ告知・新規開始
+
+    /// 旧バージョンのセーブを読み込み、バランス変更の告知をまだ閉じていない
+    var shouldShowScaleNotice: Bool {
+        (loadedOriginalVersion ?? GameState.currentSchemaVersion) < GameState.currentSchemaVersion
+            && !state.didShowScaleChangeNotice
+    }
+
+    func dismissScaleNotice() {
+        state.didShowScaleChangeNotice = true
+        save()
+    }
+
+    /// 初期状態からやり直す（セーブとバックアップを削除して保存し直す）
+    func resetGame() {
+        let now = Date()
+        state = GameState.initial(now: now)
+        refresh()
+        offlineReport = nil
+        loadedOriginalVersion = nil
+        do {
+            try saveManager.deleteSave()
+        } catch {
+            print("[GameStore] delete save failed: \(error)")
+        }
+        lastTick = now
+        lastSave = now
+        save()
     }
 }
