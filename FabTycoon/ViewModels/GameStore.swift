@@ -220,6 +220,20 @@ final class GameStore: ObservableObject {
     }
 
     @discardableResult
+    func revealExcursionHint() -> Bool {
+        let ok = Engine.revealExcursionHint(state: &state)
+        refresh()
+        return ok
+    }
+
+    @discardableResult
+    func applyExcursionCountermeasure(_ process: ProcessType) -> ExcursionCountermeasureResult {
+        let result = Engine.applyExcursionCountermeasure(state: &state, process: process)
+        refresh()
+        return result
+    }
+
+    @discardableResult
     func startResearch(_ researchId: String) -> Bool {
         let ok = Engine.startResearch(state: &state, researchId: researchId, now: Date())
         refresh()

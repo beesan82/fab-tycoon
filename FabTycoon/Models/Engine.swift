@@ -50,6 +50,10 @@ struct DerivedState: Equatable {
     var learningDefectScale: Double
     /// 製品倍率を掛ける前のライン歩留まり
     var rawLineYield: Double
+    /// 発生中の歩留まり異常の原因工程（異常が無ければ nil）
+    var excursionProcess: ProcessType?
+    /// 歩留まり異常によるライン歩留まりの低下分（比率。異常が無ければ 0）
+    var excursionYieldLoss: Double
 
     func wph(_ process: ProcessType) -> Double { processWPH[process] ?? 0 }
     func units(_ process: ProcessType) -> Int { activeUnits[process] ?? 0 }
@@ -121,6 +125,14 @@ enum BuyBlockReason: Equatable {
     }
 }
 
+/// 歩留まり異常の対策を実行した結果
+enum ExcursionCountermeasureResult: Equatable {
+    case resolved
+    case wrongProcess
+    case insufficientCash
+    case noActiveExcursion
+}
+
 // MARK: - エンジン
 
 enum Engine {
@@ -169,6 +181,16 @@ enum Engine {
     static let expansionPriceGrowth = 1.6
     /// 増床1回で増えるスロット数
     static let expansionSlotCount = 4
+    /// 歩留まり異常：新規開始から発生しない期間（ゲーム内時間。実24分相当）
+    static let excursionGraceGameHours = 240.0
+    /// 歩留まり異常：発生間隔の期待値（ゲーム内時間。実2.5時間相当）
+    static let excursionMeanIntervalGameHours = 1_500.0
+    /// 歩留まり異常：解決後、次が発生するまでの最短間隔（ゲーム内時間。実1.5時間相当）
+    static let excursionCooldownGameHours = 900.0
+    /// 歩留まり異常：対策費用の下限
+    static let excursionMinimumCostYen = 5_000_000.0
+    /// 歩留まり異常の発生抽選用の乱数源（0以上1未満）。テストで差し替え可能
+    static var excursionRandomUnit: () -> Double = { Double.random(in: 0..<1) }
 
     // MARK: 製品倍率
 
@@ -312,9 +334,26 @@ enum Engine {
         let learnedYield = node.yieldMax - (node.yieldMax - node.yieldInit) * exp(-learned / (node.learnWafers * fx.learnWafersMultiplier))
         let learningDefectScale = node.yieldInit < 1 ? (1 - learnedYield) / (1 - node.yieldInit) : 0
         let processProduct = ProcessType.allCases.reduce(1.0) { $0 * (processYields[$1] ?? 0) }
-        let rawLineYield = 1 - (1 - processProduct) * learningDefectScale
+        // 歩留まり異常：原因工程の欠陥は学習では縮まない独立の欠陥として、
+        // 工程歩留まりの積から差し引く形で加算する（工程歩留まりの表示も悪化させる）
+        var excursionProcess: ProcessType? = nil
+        var excursionDefectAdd = 0.0
+        if let excursion = state.activeExcursion, let spec = Catalog.excursion(id: excursion.specId) {
+            excursionProcess = spec.causeProcess
+            let causeYield = processYields[spec.causeProcess] ?? 0
+            if (units[spec.causeProcess] ?? 0) > 0, causeYield > 0 {
+                let degraded = max(0, 1 - (1 - causeYield) * spec.defectMultiplier)
+                excursionDefectAdd = processProduct * (1 - degraded / causeYield)
+                processYields[spec.causeProcess] = degraded
+            }
+        }
+        let rawLineYield = 1 - ((1 - processProduct) * learningDefectScale + excursionDefectAdd)
         // 製品倍率は欠陥側に効く（倍率 >1 で欠陥が 1/倍率 に縮み、<1 で増える）
         let lineYield = min(max(1 - (1 - rawLineYield) / productYieldMultiplier(state: state), 0), 0.99)
+        // 異常が無かった場合との差（「なぜ？」内訳の表示用）
+        let rawLineYieldWithoutExcursion = 1 - (1 - processProduct) * learningDefectScale
+        let lineYieldWithoutExcursion = min(max(1 - (1 - rawLineYieldWithoutExcursion) / productYieldMultiplier(state: state), 0), 0.99)
+        let excursionYieldLoss = max(0, lineYieldWithoutExcursion - lineYield)
 
         // 検査スクリーニング：基礎検出率＋検査能力の余裕度
         let inspectionWPH = wph[.inspection] ?? 0
@@ -369,7 +408,9 @@ enum Engine {
             detectionHeadroomBonus: headroomBonus,
             processYieldProduct: processProduct,
             learningDefectScale: learningDefectScale,
-            rawLineYield: rawLineYield
+            rawLineYield: rawLineYield,
+            excursionProcess: excursionProcess,
+            excursionYieldLoss: excursionYieldLoss
         )
     }
 
@@ -426,6 +467,10 @@ enum Engine {
             return .zero
         }
         state.fab.running = true
+        // 歩留まり異常の発生抽選はプレイ中のみ（オフライン進行の frozenPrice 経路では発生しない）
+        if frozenPriceYen == nil {
+            maybeStartExcursion(state: &state, dtGameHours: gameMinutes / 60, derived: d)
+        }
 
         state.learningWafers[node.id, default: 0] += flow
         state.stats.totalWafersInput += flow
@@ -1118,6 +1163,128 @@ enum Engine {
         return id
     }
 
+    // MARK: 歩留まり異常
+
+    /// 発生中の異常のスペック（なければ nil）
+    static func excursionSpec(state: GameState) -> ExcursionSpec? {
+        guard let excursion = state.activeExcursion else { return nil }
+        return Catalog.excursion(id: excursion.specId)
+    }
+
+    /// 稼働中の検査装置の最良グレード（Q1=1、Q2=2、Q3=3、検査なし=0）
+    static func bestInspectionGrade(state: GameState) -> Int {
+        let nodeId = state.fab.currentNodeId
+        let best = state.fab.equipment
+            .compactMap { Catalog.model(id: $0.modelId) }
+            .filter { $0.process == .inspection && isActive($0, nodeId: nodeId) }
+            .map { $0.detectionBase }
+            .max() ?? 0
+        if best >= 0.80 { return 3 }
+        if best >= 0.65 { return 2 }
+        if best > 0 { return 1 }
+        return 0
+    }
+
+    /// 対策の候補工程（order 昇順）。ヒントの段階と検査グレードで絞り込まれる
+    static func excursionCandidates(state: GameState) -> [ProcessType] {
+        guard let excursion = state.activeExcursion, let spec = Catalog.excursion(id: excursion.specId) else { return [] }
+        let cause = spec.causeProcess
+        let d = derived(state: state)
+        // 稼働中装置のある工程。原因工程は装置を売っていても候補から外さない
+        var pool = ProcessType.allCases.filter { d.units($0) > 0 }
+        if !pool.contains(cause) { pool.append(cause) }
+
+        let gradeCount: Int
+        switch bestInspectionGrade(state: state) {
+        case 3: gradeCount = 1
+        case 2: gradeCount = 2
+        default: gradeCount = 3
+        }
+        let count: Int
+        switch excursion.hintsRevealed {
+        case ...0: count = pool.count
+        case 1: count = gradeCount
+        case 2: count = max(1, gradeCount - 1)
+        default: count = 1
+        }
+
+        // 原因工程に近い工程から順に残す（同点は上流側を優先）
+        let ranked = pool.sorted { a, b in
+            let da = abs(a.order - cause.order)
+            let db = abs(b.order - cause.order)
+            return da != db ? da < db : a.order < b.order
+        }
+        return ranked.prefix(count).sorted { $0.order < $1.order }
+    }
+
+    /// 対策費用
+    static func excursionCountermeasureCostYen(state: GameState) -> Double {
+        // 純益1日分（ゲーム内1日 = 実2.4分）の25%。構造的に純益1日分を超えない
+        let dailyNet = max(derived(state: state).incomePerMinuteYen, 0) * 24 * realSecondsPerGameHour / 60
+        guard dailyNet > 0 else { return excursionMinimumCostYen }
+        return min(max(dailyNet * 0.25, excursionMinimumCostYen), dailyNet)
+    }
+
+    /// 追加分析（ヒント1段階）の費用 = 対策費用の20%
+    static func excursionHintCostYen(state: GameState) -> Double {
+        excursionCountermeasureCostYen(state: state) * 0.2
+    }
+
+    /// 費用を払ってヒントを1段階開示する
+    @discardableResult
+    static func revealExcursionHint(state: inout GameState) -> Bool {
+        guard let excursion = state.activeExcursion, excursion.hintsRevealed < 3 else { return false }
+        let cost = excursionHintCostYen(state: state)
+        guard state.cashYen >= cost else { return false }
+        state.cashYen -= cost
+        state.activeExcursion?.hintsRevealed += 1
+        return true
+    }
+
+    /// 費用を払って指定工程に対策を実行する。原因工程なら異常が解消する
+    @discardableResult
+    static func applyExcursionCountermeasure(state: inout GameState, process: ProcessType) -> ExcursionCountermeasureResult {
+        guard let spec = excursionSpec(state: state) else { return .noActiveExcursion }
+        let cost = excursionCountermeasureCostYen(state: state)
+        guard state.cashYen >= cost else { return .insufficientCash }
+        state.cashYen -= cost
+        if process == spec.causeProcess {
+            state.activeExcursion = nil
+            state.stats.excursionsResolved += 1
+            state.nextExcursionEarliestGameHours = state.gameHoursElapsed + excursionCooldownGameHours
+            return .resolved
+        }
+        state.activeExcursion?.wrongGuesses += 1
+        return .wrongProcess
+    }
+
+    /// テスト・検証用の強制発生（猶予・クールダウンは無視する）
+    @discardableResult
+    static func forceStartExcursion(state: inout GameState, causeProcess: ProcessType) -> Bool {
+        guard state.activeExcursion == nil,
+              let spec = Catalog.excursion(for: causeProcess),
+              derived(state: state).units(causeProcess) > 0
+        else { return false }
+        state.activeExcursion = ActiveExcursion(specId: spec.id, startedAtGameHours: state.gameHoursElapsed)
+        return true
+    }
+
+    /// 発生抽選。発生間隔の期待値どおりになるよう、経過時間に比例した確率で発生させる
+    private static func maybeStartExcursion(state: inout GameState, dtGameHours: Double, derived: DerivedState) {
+        guard state.activeExcursion == nil,
+              state.gameHoursElapsed >= state.nextExcursionEarliestGameHours,
+              derived.lineWPH > 0
+        else { return }
+        let p = min(dtGameHours / excursionMeanIntervalGameHours, 1)
+        guard excursionRandomUnit() < p else { return }
+        // 原因工程は稼働中装置のある工程から一様に選ぶ
+        let candidates = ProcessType.allCases.filter { derived.units($0) > 0 }
+        guard !candidates.isEmpty else { return }
+        let index = min(max(Int(excursionRandomUnit() * Double(candidates.count)), 0), candidates.count - 1)
+        guard let spec = Catalog.excursion(for: candidates[index]) else { return }
+        state.activeExcursion = ActiveExcursion(specId: spec.id, startedAtGameHours: state.gameHoursElapsed)
+    }
+
     // MARK: プレビュー
 
     private static func stateAfterAdding(_ state: GameState, modelId: String) -> GameState {
@@ -1414,17 +1581,22 @@ extension Engine {
             return message
         }
 
-        // 2. 補助金を申請できる
+        // 2. 歩留まり異常が発生中
+        if state.activeExcursion != nil {
+            return "歩留まり異常が発生しています。フロアの検査ベイから欠陥分析を開いて、原因工程を特定しましょう。"
+        }
+
+        // 3. 補助金を申請できる
         if canApplySubsidy(state: state) {
             return "国庫補助金を申請できます（交付予定 \(MoneyFormat.yen(subsidyCapYen(state: state)))）。統計タブから申請しましょう。"
         }
 
-        // 3. 在庫が上限間近
+        // 4. 在庫が上限間近
         if !state.fab.autoSellEnabled && state.fab.inventoryChips > inventoryCap * 0.9 {
             return "在庫が上限に近づいています（\(MoneyFormat.percent(state.fab.inventoryChips / inventoryCap, digits: 0))）。一括売却か自動販売への切り替えがおすすめです。"
         }
 
-        // 4. ボトルネックに最安の購入可能機を足す
+        // 5. ボトルネックに最安の購入可能機を足す
         if let process = derived.bottleneck,
            let model = Catalog.models(for: process)
                .filter({ lockReasons(model: $0, state: state).isEmpty })
@@ -1444,12 +1616,12 @@ extension Engine {
             }
         }
 
-        // 5. 検出率が低い
+        // 6. 検出率が低い
         if derived.detectionRate < 0.80 && derived.units(.inspection) != 0 {
             return "検出率が\(MoneyFormat.percent(derived.detectionRate))です。検査工程を増強すると、市場不良のペナルティを減らせます。"
         }
 
-        // 6. 次の目標
+        // 7. 次の目標
         if let spec = nextMilestone(state: state) {
             let progress = milestoneProgress(state: state, derived: derived, spec: spec)
             return "次の目標は『\(spec.title)』です（進捗 \(MoneyFormat.percent(progress, digits: 0))）。"

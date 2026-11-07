@@ -17,6 +17,7 @@ struct LineView: View {
     @State private var selection: FloorSelection = .process(.lithography)
     @State private var didInitSelection = false
     @State private var nodeSwitchTarget: NodeSwitchTarget?
+    @State private var showsDefectAnalysis = false
 
     var body: some View {
         let state = store.state
@@ -62,6 +63,10 @@ struct LineView: View {
         }
         .sheet(item: $nodeSwitchTarget) { target in
             NodeSwitchSheet(targetNodeId: target.id)
+                .environmentObject(store)
+        }
+        .sheet(isPresented: $showsDefectAnalysis) {
+            DefectAnalysisSheet()
                 .environmentObject(store)
         }
     }
@@ -227,6 +232,20 @@ struct LineView: View {
                     .font(.subheadline)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
+                if state.activeExcursion != nil {
+                    Label("歩留まり異常が発生しています（ライン歩留まり −\(MoneyFormat.decimal(derived.excursionYieldLoss * 100, digits: 1))pt）", systemImage: "exclamationmark.triangle.fill")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button {
+                        showsDefectAnalysis = true
+                    } label: {
+                        Text("欠陥分析を開く")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                }
             }
             if derived.bottleneck == process {
                 Label("このラインの速度はここで決まっています", systemImage: "exclamationmark.triangle.fill")
@@ -508,6 +527,200 @@ struct NodeSwitchSheet: View {
     }
 }
 
+// MARK: - 欠陥分析シート
+
+struct DefectAnalysisSheet: View {
+    @EnvironmentObject private var store: GameStore
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var selectedProcess: ProcessType?
+    /// 解決直後に表示する異常（解決すると activeExcursion が消えるので保持しておく）
+    @State private var resolvedSpec: ExcursionSpec?
+    @State private var wrongMessage: String?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let resolvedSpec {
+                    resolvedSection(resolvedSpec)
+                } else if let excursion = store.state.activeExcursion,
+                          let spec = Catalog.excursion(id: excursion.specId) {
+                    overviewSection(excursion: excursion, spec: spec)
+                    hintSection(excursion: excursion, spec: spec)
+                    countermeasureSection(spec: spec)
+                } else {
+                    Text("現在、歩留まり異常は発生していません。")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("欠陥分析")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("閉じる") { dismiss() }
+                }
+            }
+        }
+    }
+
+    // MARK: 解決
+
+    private func resolvedSection(_ spec: ExcursionSpec) -> some View {
+        Section("解決しました") {
+            Label("歩留まり異常は解消しました", systemImage: "checkmark.seal.fill")
+                .font(.headline)
+                .foregroundStyle(.green)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("原因")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(spec.causeName)
+                    .font(.subheadline.bold())
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("実施した対策")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(spec.countermeasureTitle)
+                    .font(.subheadline.bold())
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("学習ノート")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(spec.learningNote)
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    // MARK: 概要
+
+    private func overviewSection(excursion: ActiveExcursion, spec: ExcursionSpec) -> some View {
+        Section("異常の概要") {
+            row("発生", "Day \(Int(excursion.startedAtGameHours / 24) + 1)")
+            Text(spec.symptom)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+            row("ライン歩留まりへの影響", "−\(MoneyFormat.decimal(store.derived.excursionYieldLoss * 100, digits: 1))pt")
+            if excursion.wrongGuesses > 0 {
+                row("外した対策", "\(excursion.wrongGuesses) 回")
+            }
+        }
+    }
+
+    // MARK: ヒント
+
+    private func hintSection(excursion: ActiveExcursion, spec: ExcursionSpec) -> some View {
+        let hints = [spec.stage1Hint, spec.stage2Hint, spec.stage3Hint]
+        let revealed = min(max(excursion.hintsRevealed, 0), hints.count)
+        let hintCost = Engine.excursionHintCostYen(state: store.state)
+        let gradeText: String
+        switch Engine.bestInspectionGrade(state: store.state) {
+        case 1: gradeText = "Q1（光学）"
+        case 2: gradeText = "Q2（電子ビーム）"
+        case 3: gradeText = "Q3（AI分類）"
+        default: gradeText = "なし"
+        }
+        return Section("ヒント") {
+            ForEach(0..<revealed, id: \.self) { index in
+                Label(hints[index], systemImage: "\(index + 1).circle.fill")
+                    .font(.subheadline)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if excursion.hintsRevealed >= 1 {
+                row("候補工程", Engine.excursionCandidates(state: store.state).map { $0.displayName }.joined(separator: "・"))
+            }
+            if excursion.hintsRevealed < 3 {
+                Button {
+                    store.revealExcursionHint()
+                } label: {
+                    Text("さらに分析する（\(MoneyFormat.yen(hintCost))）")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(store.state.cashYen < hintCost)
+            }
+            Text("検査グレードが高いほど、ヒントで候補を絞り込めます（現在：\(gradeText)）")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: 対策
+
+    private func countermeasureSection(spec: ExcursionSpec) -> some View {
+        let candidates = Engine.excursionCandidates(state: store.state)
+        let cost = Engine.excursionCountermeasureCostYen(state: store.state)
+        return Section("対策") {
+            ForEach(candidates) { process in
+                Button {
+                    selectedProcess = process
+                } label: {
+                    HStack {
+                        Text(process.displayName)
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        if selectedProcess == process {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            Text("原因と思われる工程を1つ選んで対策を実行します。当たれば異常は解消し、外せば費用だけ失われて異常は続きます")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button {
+                guard let selected = selectedProcess else { return }
+                switch store.applyExcursionCountermeasure(selected) {
+                case .resolved:
+                    wrongMessage = nil
+                    resolvedSpec = spec
+                case .wrongProcess:
+                    wrongMessage = "\(selected.displayName)を点検しましたが、異常は解消しませんでした"
+                case .insufficientCash:
+                    wrongMessage = "資金が不足しています"
+                case .noActiveExcursion:
+                    break
+                }
+            } label: {
+                Text("対策を実行する（\(MoneyFormat.yen(cost))）")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            // ヒントで候補から外れた工程の選択は無効扱いにする
+            .disabled(selectedProcess.map { !candidates.contains($0) } ?? true || store.state.cashYen < cost)
+            if let wrongMessage {
+                Text(wrongMessage)
+                    .font(.subheadline)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func row(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title)
+            Spacer()
+            Text(value)
+                .monospacedDigit()
+                .bold()
+                .multilineTextAlignment(.trailing)
+        }
+        .font(.subheadline)
+    }
+}
+
 // MARK: - フロア平面図
 
 /// 4列×2行の蛇行配置。slot 0...6 が工程順、slot 7 が出荷・倉庫。
@@ -598,7 +811,8 @@ struct FabFloorView: View {
                 isBottleneck: derived.bottleneck == process,
                 isSecond: derived.secondBottleneck == process,
                 isSelected: selection == .process(process),
-                size: rect.size
+                size: rect.size,
+                showsExcursionBadge: process == .inspection && state.activeExcursion != nil
             )
         }
         .buttonStyle(.plain)
@@ -728,6 +942,8 @@ struct FloorBayView: View {
     let isSecond: Bool
     let isSelected: Bool
     let size: CGSize
+    /// 歩留まり異常が発生中（検査ベイにだけ出す）
+    var showsExcursionBadge: Bool = false
 
     private let headerHeight: CGFloat = 26
     private let footerHeight: CGFloat = 14
@@ -802,6 +1018,15 @@ struct FloorBayView: View {
 
     private var footer: some View {
         HStack(spacing: 2) {
+            if showsExcursionBadge {
+                Text("異常")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.red))
+                    .fixedSize()
+            }
             if models.count > 4 {
                 Text("+\(models.count - 4)")
                     .font(.system(size: 8, weight: .bold))

@@ -33,6 +33,9 @@ func describe(_ d: DerivedState) {
     print("  収入/分: \(num(d.incomePerMinuteYen, 0))円")
 }
 
+// 0.6.0: 歩留まり異常の発生抽選は乱数依存のため、既存チェックの決定性を保つよう既定では当たらない値に固定する（0.6.0 セクションで差し替える）
+Engine.excursionRandomUnit = { 0.999_999 }
+
 // 1. 初期状態
 print("== 1. 初期状態 ==")
 var state = GameState.initial()
@@ -639,6 +642,153 @@ let v3Loaded = v3Manager.load()
 check(v3Loaded != nil, "v3 セーブを読み込める")
 check(v3Loaded?.schemaVersion == 3, "v3 セーブの schemaVersion は 3 のまま")
 check(v3Loaded?.fab.currentNodeId == "n28", "v3 セーブの現在ノードは n28")
+
+// 0.6.0: 歩留まり異常の原因究明
+print("== 0.6.0. カタログ ==")
+check(Catalog.excursions.count == 7, "異常の原因は7工程分")
+check(Set(Catalog.excursions.map { $0.causeProcess }) == Set(ProcessType.allCases), "原因は全工程をカバー")
+check(Catalog.excursions.allSatisfy { !$0.causeName.isEmpty && !$0.symptom.isEmpty && !$0.stage1Hint.isEmpty && !$0.stage2Hint.isEmpty && !$0.stage3Hint.isEmpty && !$0.countermeasureTitle.isEmpty && !$0.learningNote.isEmpty }, "各原因に原因名・兆候・ヒント3段階・対策・学習ノートがある")
+
+print("== 0.6.0. 初期状態では異常なし ==")
+var excState = GameState.initial()
+check(excState.activeExcursion == nil, "新規開始直後は異常なし")
+check(excState.nextExcursionEarliestGameHours == Engine.excursionGraceGameHours, "発生可能時刻の初期値はグレース期間")
+let excD0 = Engine.derived(state: excState)
+check(excD0.excursionProcess == nil && excD0.excursionYieldLoss == 0, "異常なしでは派生値に影響しない")
+
+print("== 0.6.0. 強制発生（成膜） ==")
+let yieldBeforeExc = excD0.lineYield
+let wphBeforeExc = excD0.lineWPH
+check(Engine.forceStartExcursion(state: &excState, causeProcess: .deposition), "成膜に異常を強制発生できた")
+check(!Engine.forceStartExcursion(state: &excState, causeProcess: .cmp), "発生中は二重に発生しない")
+let excD1 = Engine.derived(state: excState)
+let dropPt = (yieldBeforeExc - excD1.lineYield) * 100
+print("  ライン歩留まり: \(num(yieldBeforeExc * 100, 2))% → \(num(excD1.lineYield * 100, 2))%（−\(num(dropPt, 2))pt）")
+check(excD1.lineYield < yieldBeforeExc, "異常でライン歩留まりが下がった")
+check(dropPt >= 3 && dropPt <= 10, "低下幅は 3〜10pt 級")
+check(abs(excD1.excursionYieldLoss - (yieldBeforeExc - excD1.lineYield)) < 1e-9, "内訳の悪化分が実際の低下と一致")
+check(excD1.excursionProcess == .deposition, "派生値の原因工程は成膜")
+check(abs(excD1.lineWPH - wphBeforeExc) < 1e-9, "異常はラインWPHに影響しない")
+for process in ProcessType.allCases where process != .deposition {
+    check(abs((excD1.processYields[process] ?? 0) - (excD0.processYields[process] ?? 0)) < 1e-12, "他の工程（\(process.displayName)）の歩留まりは不変")
+}
+guard let depSpec = Catalog.excursion(for: .deposition) else { fail("成膜の異常スペックが無い") }
+let expectedDegraded = 1 - (1 - (excD0.processYields[.deposition] ?? 0)) * depSpec.defectMultiplier
+check(abs((excD1.processYields[.deposition] ?? 0) - expectedDegraded) < 1e-9, "成膜の工程歩留まりが欠陥倍率どおりに悪化")
+
+print("== 0.6.0. ヒントと候補（Q1のみ） ==")
+check(Engine.bestInspectionGrade(state: excState) == 1, "初期状態の検査グレードは Q1（1）")
+check(Engine.excursionCandidates(state: excState).count == 7, "ヒント未開示では候補は全工程（7）")
+let hintCost1 = Engine.excursionHintCostYen(state: excState)
+let cashBeforeHint = excState.cashYen
+check(Engine.revealExcursionHint(state: &excState), "ヒント1段階目を開示できた")
+check(abs(cashBeforeHint - excState.cashYen - hintCost1) < 1e-6, "ヒント費用が引かれた")
+let cand1 = Engine.excursionCandidates(state: excState)
+print("  候補（Q1・1段階）: \(cand1.map { $0.displayName }.joined(separator: "・"))")
+check(cand1.count == 3, "Q1のみ・ヒント1段階で候補は3工程")
+check(cand1.contains(.deposition), "候補に原因工程（成膜）が含まれる")
+check(Engine.revealExcursionHint(state: &excState), "ヒント2段階目を開示できた")
+check(Engine.excursionCandidates(state: excState).count == 2, "ヒント2段階で候補は2工程")
+check(Engine.revealExcursionHint(state: &excState), "ヒント3段階目を開示できた")
+check(Engine.excursionCandidates(state: excState) == [.deposition], "ヒント3段階で原因工程を特定できる")
+check(!Engine.revealExcursionHint(state: &excState), "ヒントは3段階まで")
+
+print("== 0.6.0. 対策（外し→正解） ==")
+let counterCost = Engine.excursionCountermeasureCostYen(state: excState)
+let dailyNet = excD1.incomePerMinuteYen * 24 * Engine.realSecondsPerGameHour / 60
+print("  対策費用: \(num(counterCost, 0))円 ／ 純益1日分: \(num(dailyNet, 0))円（収入/分 \(num(excD1.incomePerMinuteYen, 0))円）")
+check(counterCost > 0, "対策費用は正の値")
+check(counterCost <= dailyNet, "対策費用は純益1日分以下")
+let cashBeforeWrong = excState.cashYen
+check(Engine.applyExcursionCountermeasure(state: &excState, process: .cmp) == .wrongProcess, "違う工程（CMP）の対策は外れる")
+check(abs(cashBeforeWrong - excState.cashYen - counterCost) < 1e-6, "外しても費用だけ引かれる")
+check(excState.activeExcursion != nil, "外しても異常は続く")
+check(excState.activeExcursion?.wrongGuesses == 1, "外した回数が記録される")
+check(abs(Engine.derived(state: excState).lineYield - excD1.lineYield) < 1e-9, "外した後は歩留まりは低下したまま")
+let cashBeforeRight = excState.cashYen
+check(Engine.applyExcursionCountermeasure(state: &excState, process: .deposition) == .resolved, "原因工程（成膜）の対策で解決")
+check(abs(cashBeforeRight - excState.cashYen - counterCost) < 1e-6, "正解でも費用は引かれる")
+check(excState.activeExcursion == nil, "解決すると異常が消える")
+check(abs(Engine.derived(state: excState).lineYield - yieldBeforeExc) < 1e-9, "解決すると歩留まりが元に戻る")
+check(excState.stats.excursionsResolved == 1, "解決数が記録される")
+check(excState.nextExcursionEarliestGameHours > excState.gameHoursElapsed, "解決後はクールダウンに入る")
+check(Engine.applyExcursionCountermeasure(state: &excState, process: .deposition) == .noActiveExcursion, "異常が無いときの対策は noActiveExcursion")
+
+print("== 0.6.0. 検査グレード（Q2） ==")
+var q2State = readyFor14nm()
+completeResearch(&q2State, "unlock_eb", startAt: t0)
+check(Engine.switchNode(state: &q2State, toNodeId: "n14"), "14nm へ移行できた")
+check(Engine.buy(state: &q2State, modelId: "Q2"), "Q2 を購入できた")
+check(Engine.bestInspectionGrade(state: q2State) == 2, "Q2 稼働でグレードは 2")
+check(Engine.forceStartExcursion(state: &q2State, causeProcess: .deposition), "成膜に異常を発生できた")
+check(Engine.revealExcursionHint(state: &q2State), "ヒントを開示できた")
+let q2Cand = Engine.excursionCandidates(state: q2State)
+print("  候補（Q2・1段階）: \(q2Cand.map { $0.displayName }.joined(separator: "・"))")
+check(q2Cand.count == 2 && q2Cand.contains(.deposition), "Q2あり・ヒント1段階で候補は2工程（原因を含む）")
+
+print("== 0.6.0. 検査グレード（Q3） ==")
+var q3State = GameState.initial()
+q3State.fab.currentNodeId = "n5"
+q3State.fab.equipment = [
+    EquipmentInstance(modelId: "D3", level: 1, purchasedAt: t0),
+    EquipmentInstance(modelId: "Q3", level: 1, purchasedAt: t0),
+]
+check(Engine.bestInspectionGrade(state: q3State) == 3, "Q3 稼働でグレードは 3")
+check(Engine.forceStartExcursion(state: &q3State, causeProcess: .deposition), "成膜に異常を発生できた（n5）")
+check(Engine.revealExcursionHint(state: &q3State), "ヒントを開示できた")
+check(Engine.excursionCandidates(state: q3State) == [.deposition], "Q3あり・ヒント1段階で原因工程を特定できる")
+
+print("== 0.6.0. オフラインでは発生・進行しない ==")
+var offState = GameState.initial()
+check(Engine.forceStartExcursion(state: &offState, causeProcess: .etching), "エッチングに異常を発生できた")
+let excursionBeforeOffline = offState.activeExcursion
+_ = Engine.offlineProgress(state: &offState, elapsedRealSeconds: 3_600)
+check(offState.activeExcursion == excursionBeforeOffline, "オフライン進行の前後で異常の状態は変わらない")
+var offState2 = GameState.initial()
+offState2.gameHoursElapsed = 1_000
+Engine.excursionRandomUnit = { 0 }
+_ = Engine.offlineProgress(state: &offState2, elapsedRealSeconds: 3_600)
+check(offState2.activeExcursion == nil, "抽選が当たる乱数でもオフラインでは発生しない")
+Engine.tick(state: &offState2, dtRealSeconds: 0.25, frozenPriceYen: 1_200)
+check(offState2.activeExcursion == nil, "frozenPrice の tick では発生しない")
+Engine.tick(state: &offState2, dtRealSeconds: 0.25)
+check(offState2.activeExcursion != nil, "プレイ中の tick では発生する（乱数を当たる値に固定）")
+Engine.excursionRandomUnit = { 0.999_999 }
+
+print("== 0.6.0. 猶予期間 ==")
+var graceState = GameState.initial()
+Engine.excursionRandomUnit = { 0 }
+for _ in 0..<400 { Engine.tick(state: &graceState, dtRealSeconds: 0.25) }
+check(graceState.activeExcursion == nil, "新規開始直後（猶予期間内）は発生しない")
+Engine.excursionRandomUnit = { 0.999_999 }
+
+print("== 0.6.0. セーブ往復・旧セーブ互換 ==")
+var saveExcState = GameState.initial()
+check(Engine.forceStartExcursion(state: &saveExcState, causeProcess: .packaging), "パッケージングに異常を発生できた")
+check(Engine.revealExcursionHint(state: &saveExcState), "ヒントを開示できた")
+check(Engine.applyExcursionCountermeasure(state: &saveExcState, process: .lithography) == .wrongProcess, "外しを1回記録")
+let excDir = makeDirectory("excursion")
+var excManager = SaveManager(directory: excDir)
+do { try excManager.save(saveExcState) } catch { fail("異常ありセーブを保存できない: \(error)") }
+let excLoaded = excManager.load()
+check(excLoaded?.activeExcursion == saveExcState.activeExcursion, "異常の状態がセーブ往復で保持される")
+check(excLoaded?.activeExcursion?.hintsRevealed == 1, "ヒント段階が保持される")
+check(excLoaded?.activeExcursion?.wrongGuesses == 1, "外した回数が保持される")
+var v3ExcObject = encodedObject(GameState.initial())
+v3ExcObject.removeValue(forKey: "activeExcursion")
+v3ExcObject.removeValue(forKey: "nextExcursionEarliestGameHours")
+if var statsObject = v3ExcObject["stats"] as? [String: Any] {
+    statsObject.removeValue(forKey: "excursionsResolved")
+    v3ExcObject["stats"] = statsObject
+}
+let v3ExcDir = makeDirectory("v3-excursion")
+writeObject(v3ExcObject, to: v3ExcDir.appendingPathComponent(SaveManager.fileName))
+var v3ExcManager = SaveManager(directory: v3ExcDir)
+let v3ExcLoaded = v3ExcManager.load()
+check(v3ExcLoaded != nil, "0.5.0 形式のセーブ（異常フィールドなし）を読み込める")
+check(v3ExcLoaded?.activeExcursion == nil, "旧セーブでは異常なし")
+check(v3ExcLoaded?.stats.excursionsResolved == 0, "旧セーブの解決数は 0")
+check(v3ExcLoaded?.schemaVersion == 3, "schemaVersion は 3 のまま（異常は decodeIfPresent で互換）")
 
 try? fileManager.removeItem(at: tempRoot)
 

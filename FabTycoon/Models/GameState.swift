@@ -22,6 +22,10 @@ struct GameState: Codable, Equatable {
     var didShowScaleChangeNotice: Bool = false
     /// 研究の進行状況
     var research: ResearchState = ResearchState()
+    /// 発生中の歩留まり異常（なければ nil）
+    var activeExcursion: ActiveExcursion? = nil
+    /// 次に異常が発生しうる最も早い gameHoursElapsed（新規開始の猶予と解決後のクールダウンを兼ねる）
+    var nextExcursionEarliestGameHours: Double = 240
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion
@@ -37,6 +41,8 @@ struct GameState: Codable, Equatable {
         case subsidy
         case didShowScaleChangeNotice
         case research
+        case activeExcursion
+        case nextExcursionEarliestGameHours
     }
 
     /// 設置済み装置の購入価格合計（改良費は含まない）
@@ -103,6 +109,39 @@ extension GameState {
             ?? SubsidyState(totalInvestedYen: GameState.equipmentPurchaseTotalYen(fab.equipment))
         didShowScaleChangeNotice = try container.decodeIfPresent(Bool.self, forKey: .didShowScaleChangeNotice) ?? false
         research = try container.decodeIfPresent(ResearchState.self, forKey: .research) ?? ResearchState()
+        activeExcursion = try container.decodeIfPresent(ActiveExcursion.self, forKey: .activeExcursion) ?? nil
+        nextExcursionEarliestGameHours = try container.decodeIfPresent(Double.self, forKey: .nextExcursionEarliestGameHours) ?? 240
+    }
+}
+
+/// 発生中の歩留まり異常（エクスカーション）
+struct ActiveExcursion: Codable, Equatable {
+    /// Catalog.excursions の id（兆候・原因はここから引く）
+    var specId: String
+    /// 発生時の gameHoursElapsed
+    var startedAtGameHours: Double
+    /// 開示済みヒント段階（0 = 兆候のみ、最大3）
+    var hintsRevealed: Int = 0
+    /// 対策を外した回数
+    var wrongGuesses: Int = 0
+
+    enum CodingKeys: String, CodingKey {
+        case specId
+        case startedAtGameHours
+        case hintsRevealed
+        case wrongGuesses
+    }
+}
+
+// 旧セーブ互換：全フィールドを欠けていてもデフォルト値で読む。
+// extension に置くことで memberwise init を残す。
+extension ActiveExcursion {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        specId = try container.decodeIfPresent(String.self, forKey: .specId) ?? ""
+        startedAtGameHours = try container.decodeIfPresent(Double.self, forKey: .startedAtGameHours) ?? 0
+        hintsRevealed = try container.decodeIfPresent(Int.self, forKey: .hintsRevealed) ?? 0
+        wrongGuesses = try container.decodeIfPresent(Int.self, forKey: .wrongGuesses) ?? 0
     }
 }
 
@@ -274,6 +313,8 @@ struct Stats: Codable, Equatable {
     var achievedMilestones: [String: Double] = [:]
     /// 図鑑で閲覧済みのエントリid
     var readGlossaryIds: Set<String> = []
+    /// 解決した歩留まり異常の件数
+    var excursionsResolved: Int = 0
 
     enum CodingKeys: String, CodingKey {
         case totalRevenueYen
@@ -289,6 +330,7 @@ struct Stats: Codable, Equatable {
         case totalCogsYen
         case achievedMilestones
         case readGlossaryIds
+        case excursionsResolved
     }
 }
 
@@ -310,5 +352,6 @@ extension Stats {
         totalCogsYen = try container.decodeIfPresent(Double.self, forKey: .totalCogsYen) ?? defaults.totalCogsYen
         achievedMilestones = try container.decodeIfPresent([String: Double].self, forKey: .achievedMilestones) ?? defaults.achievedMilestones
         readGlossaryIds = try container.decodeIfPresent(Set<String>.self, forKey: .readGlossaryIds) ?? defaults.readGlossaryIds
+        excursionsResolved = try container.decodeIfPresent(Int.self, forKey: .excursionsResolved) ?? defaults.excursionsResolved
     }
 }

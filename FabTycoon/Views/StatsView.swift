@@ -28,10 +28,17 @@ struct StatsView: View {
                 row("出荷チップ", "\(MoneyFormat.count(stats.totalShippedChips)) 個")
                 row("市場不良チップ", "\(MoneyFormat.count(stats.totalMarketDefectChips)) 個")
                 row("市場不良ペナルティ", MoneyFormat.yen(stats.totalMarketPenaltyYen))
+                row("解決した歩留まり異常", "\(stats.excursionsResolved) 件")
                 row("総稼働", "\(MoneyFormat.decimal(store.state.gameHoursElapsed / 24, digits: 0))日（ゲーム内）")
                 row("プレイ時間", MoneyFormat.duration(stats.playSeconds))
             }
             Section("歩留まり") {
+                if store.state.activeExcursion != nil, let excursionProcess = derived.excursionProcess {
+                    Label("歩留まり異常が発生中です（原因工程：\(excursionProcess.displayName)）。フロアの検査ベイから欠陥分析を開けます。", systemImage: "exclamationmark.triangle.fill")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 ForEach(ProcessType.allCases) { process in
                     row(process.displayName, MoneyFormat.percent(derived.processYields[process] ?? 0))
                 }
@@ -40,6 +47,9 @@ struct StatsView: View {
                 breakdownRow("工程歩留まりの積", MoneyFormat.percent(derived.processYieldProduct))
                 breakdownRow("学習による欠陥縮小", "欠陥の残存率 \(MoneyFormat.percent(derived.learningDefectScale))")
                 breakdownRow("製品の歩留まり倍率", multiplierText(currentProduct.yieldMultiplier))
+                if store.state.activeExcursion != nil {
+                    breakdownRow("歩留まり異常による悪化", "−\(MoneyFormat.decimal(derived.excursionYieldLoss * 100, digits: 1))pt")
+                }
                 row("＝ ライン歩留まり（検査前）", MoneyFormat.percent(derived.lineYield))
                 // 検出率の内訳 = 基礎検出率 ＋ 余裕度ボーナス（上限あり）
                 breakdownHeader("検査検出率の内訳")

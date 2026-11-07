@@ -1027,3 +1027,119 @@ extension Catalog {
 
     static func glossaryTerm(id: String) -> GlossaryTerm? { glossaryTermIndex[id] }
 }
+
+// MARK: - 歩留まり異常（エクスカーション）
+
+/// 歩留まり異常の原因カタログ（工程ごとに1件）
+struct ExcursionSpec: Identifiable, Equatable {
+    let id: String
+    let causeProcess: ProcessType
+    /// 原因の名前（解決時に開示）
+    let causeName: String
+    /// 兆候テキスト（発生直後から見える）
+    let symptom: String
+    /// 原因工程の欠陥寄与（1 − 工程歩留まり）への倍率
+    let defectMultiplier: Double
+    /// ヒント1段階目：欠陥の種類
+    let stage1Hint: String
+    /// ヒント2段階目：分布・偏り
+    let stage2Hint: String
+    /// ヒント3段階目：ほぼ特定できる示唆
+    let stage3Hint: String
+    /// 対策の名前（解決時に表示）
+    let countermeasureTitle: String
+    /// 学習ノート（解決時に読める）
+    let learningNote: String
+}
+
+extension Catalog {
+    /// 歩留まり異常の原因。並びは工程順
+    static let excursions: [ExcursionSpec] = [
+        ExcursionSpec(
+            id: "exc.lithography", causeProcess: .lithography,
+            causeName: "フォーカスドリフト（焦点位置のずれ）",
+            symptom: "ウェハ外周部のショットだけ線幅が太く、中心部は正常。輪帯状（ドーナツ状）に歩留まりが落ちている",
+            defectMultiplier: 3.0,
+            stage1Hint: "欠陥は『パターンの寸法ずれ』が中心です。ゴミや傷のような物理的な欠陥は増えていません",
+            stage2Hint: "線幅の太り方はウェハの外周ほど大きく、中心ほど小さい『同心円状』の分布です",
+            stage3Hint: "外周でだけピントが合っていない状態です。ステージの高さ方向のずれが疑われます",
+            countermeasureTitle: "ステージ高さの再校正とフォーカスマップの再測定",
+            learningNote: "露光の焦点深度（ピントが合う範囲）は数十nmしかない。ウェハの反りやステージのわずかな傾きで、外周部だけピントが外れて線幅が太ることがある。そのため露光機はレベリングセンサーでウェハ全面の高さを測り、ショットごとに傾きと高さを補正しながら焼いている。この補正の基準がずれると、中心は正常なのに外周だけ輪帯状に歩留まりが落ちる、という特徴的な出方をする。"
+        ),
+        ExcursionSpec(
+            id: "exc.deposition", causeProcess: .deposition,
+            causeName: "シャワーヘッドの部分的な目詰まり",
+            symptom: "膜厚を測るとウェハ中心部だけ薄い。同心円状に歩留まりが悪化している",
+            defectMultiplier: 3.0,
+            stage1Hint: "欠陥は『膜の性質・厚さの異常』が中心です。パターンの形の崩れは目立ちません",
+            stage2Hint: "膜厚の薄い領域はウェハ中心に集まっています。ガスの流れの中心側に問題がありそうです",
+            stage3Hint: "中心にガスを供給する経路の詰まりが疑われます",
+            countermeasureTitle: "シャワーヘッドの洗浄・交換と流量の再校正",
+            learningNote: "PECVDでは、無数の小さな穴が開いたシャワーヘッドから原料ガスをウェハへ均一に吹き付けて成膜する。穴の一部が反応生成物で詰まると、その部分だけガスが届かず膜が薄くなる。膜厚はトランジスタの特性や後工程のエッチング量に直結するため、中心だけ薄い・外周だけ厚いといった分布の崩れは、そのまま歩留まりの同心円状の悪化として現れる。"
+        ),
+        ExcursionSpec(
+            id: "exc.etching", causeProcess: .etching,
+            causeName: "チャンバー壁への反応生成物の付着（ポリマー堆積）",
+            symptom: "エッチング後のパターン寸法が全体的に少しずつ細っている。処理枚数が増えるほど悪化する",
+            defectMultiplier: 2.8,
+            stage1Hint: "欠陥は『パターンの寸法ずれ』が中心で、時間とともに少しずつ進行しています",
+            stage2Hint: "寸法のずれは全ロット共通で、特定の場所に偏っていません。装置内部の状態変化が疑われます",
+            stage3Hint: "チャンバー内の壁に反応生成物が積もり、プラズマの状態が変わってきている可能性が高いです",
+            countermeasureTitle: "チャンバーのウェット洗浄とシーズニング（慣らし運転）のやり直し",
+            learningNote: "ドライエッチングでは、削られた膜や反応ガスから生じるポリマー状の生成物がチャンバー壁に少しずつ積もる。壁の状態が変わるとプラズマ中の成分バランスがずれ、エッチング速度や寸法がゆっくりドリフトしていく。そのため定期的にチャンバーを開けて洗浄し、洗浄後はダミーウェハを流すシーズニングで壁の状態を整えてから量産に戻すのが現場の基本動作になっている。"
+        ),
+        ExcursionSpec(
+            id: "exc.implant", causeProcess: .implant,
+            causeName: "ビーム電流のドリフト（注入量のずれ）",
+            symptom: "外観の欠陥はほとんど増えていないのに、電気特性（しきい値電圧）だけがばらついて歩留まりが落ちている",
+            defectMultiplier: 2.6,
+            stage1Hint: "欠陥は『電気的な不良』が中心です。光学検査では異常がほとんど見つかりません",
+            stage2Hint: "しきい値電圧が全体的に一方向へ寄っています。注入された不純物の量がずれている疑いがあります",
+            stage3Hint: "ビーム電流の実測値と設定値に開きが出ています。電流計のドリフトが疑われます",
+            countermeasureTitle: "ビーム電流の再校正と線量モニタの点検",
+            learningNote: "イオン注入の量（ドーズ）は、ビーム電流×照射時間で決まる。電流を測る計器がドリフトすると、設定どおり流したつもりでも実際の注入量がずれ、トランジスタのしきい値電圧が全体的に動いてしまう。外観ではまったく分からず、電気特性の測定で初めて気づくタイプの異常で、だからこそ工程内モニタと定期的な校正が欠かせない。"
+        ),
+        ExcursionSpec(
+            id: "exc.cmp", causeProcess: .cmp,
+            causeName: "研磨パッドの目詰まり（グレージング）",
+            symptom: "ウェハに同心円状の浅いスクラッチ（傷）と研磨残りが混在して増えている",
+            defectMultiplier: 3.2,
+            stage1Hint: "欠陥は『傷と研磨ムラ』が中心です。円弧状の傷が目立ちます",
+            stage2Hint: "傷はウェハ全面に同心円状に出ています。回転する部材との接触が関係していそうです",
+            stage3Hint: "研磨パッドの表面が目詰まりして、砥粒の効きが落ちている状態が疑われます",
+            countermeasureTitle: "研磨パッドの交換とドレッサー（コンディショナー）の点検",
+            learningNote: "CMPの研磨パッドは、使い込むと表面の微細な凹凸に研磨くずが詰まってツルツルになる（グレージング）。すると研磨レートが落ちるだけでなく、傷も増えて歩留まりが悪化する。これを防ぐため、ダイヤモンド粒子を植えたドレッサーでパッド表面を常に『起こし』続けるコンディショニングが研磨と並行して行われている。パッドとドレッサーはCMPの代表的な消耗品管理の対象。"
+        ),
+        ExcursionSpec(
+            id: "exc.inspection", causeProcess: .inspection,
+            causeName: "検査レシピのしきい値ずれ（感度ドリフト）",
+            symptom: "不良判定されるダイが急に増えたが、再検査すると判定が変わるダイが多い。本当の欠陥は増えていなさそうだ",
+            defectMultiplier: 2.5,
+            stage1Hint: "『欠陥』とされたものの多くは、再測定で正常と判定されます。ものづくり側より『測る側』の異常が疑われます",
+            stage2Hint: "判定のブレはスキャン方向に沿った縞状に出ています。センサー感度のばらつきが疑われます",
+            stage3Hint: "基準ウェハでの感度が規格から外れています。検査側の校正ずれでほぼ間違いありません",
+            countermeasureTitle: "標準ウェハによる感度校正とレシピしきい値の見直し",
+            learningNote: "検査装置自体の感度がずれると、良品を不良と弾く『見かけの歩留まり低下』が起きる。本当に工程が悪いのか、測る側が悪いのかを切り分けるのが原因究明の第一歩で、標準試料（基準ウェハ）を測って装置が正しく測れているかを確認するのが測定系管理の基本。同じウェハを2回測って結果が変わらないか（再現性）の確認もよく行われる。"
+        ),
+        ExcursionSpec(
+            id: "exc.packaging", causeProcess: .packaging,
+            causeName: "ダイシングブレードの欠け",
+            symptom: "チップの端に欠け（チッピング）が多発している。ダイの外周部から歩留まりが落ちている",
+            defectMultiplier: 2.8,
+            stage1Hint: "欠陥は『チップ端部の欠け』が中心です。前工程のパターン異常は見られません",
+            stage2Hint: "欠けは切り分けライン（スクライブライン）に沿って出ています。切断の工程に問題がありそうです",
+            stage3Hint: "ブレード（刃）の先端に欠けがあり、切断時にダイ端部を傷めている可能性が高いです",
+            countermeasureTitle: "ダイシングブレードの交換と切り込み条件の再設定",
+            learningNote: "ダイシングブレードはダイヤモンド砥粒を固めた消耗品で、摩耗や欠けが生じると切断時にチップ端部を欠けさせる（チッピング）。欠けた部分からクラックが広がると製品の信頼性にも影響するため、ブレードの寿命管理と、送り速度・切り込み量といった条件の管理が後工程の歩留まりを左右する。切断幅（カーフ）を狭くして取れるチップ数を増やすほど、この管理はシビアになる。"
+        ),
+    ]
+
+    private static let excursionIndex: [String: ExcursionSpec] =
+        Dictionary(uniqueKeysWithValues: excursions.map { ($0.id, $0) })
+
+    static func excursion(id: String) -> ExcursionSpec? { excursionIndex[id] }
+
+    static func excursion(for process: ProcessType) -> ExcursionSpec? {
+        excursions.first { $0.causeProcess == process }
+    }
+}
