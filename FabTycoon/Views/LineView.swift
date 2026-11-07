@@ -21,6 +21,9 @@ struct LineView: View {
                 summary(state: state, derived: derived, node: node)
                     .padding(.horizontal)
 
+                nextGoalCard(state: state, derived: derived)
+                    .padding(.horizontal)
+
                 FabFloorView(selection: $selection)
                     .padding(.horizontal)
 
@@ -105,8 +108,47 @@ struct LineView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Divider()
+            // 次の一手アドバイザー
+            Label(Engine.advisorMessage(state: state, derived: derived), systemImage: "lightbulb")
+                .font(.footnote)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding()
+        .background(RoundedRectangle(cornerRadius: 14).fill(Color(.secondarySystemGroupedBackground)))
+    }
+
+    // MARK: 次の目標
+
+    private func nextGoalCard(state: GameState, derived: DerivedState) -> some View {
+        Group {
+            if let spec = Engine.nextMilestone(state: state) {
+                let texts = Engine.milestoneProgressTexts(state: state, derived: derived, spec: spec)
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("次の目標", systemImage: "flag.fill")
+                        .font(.caption.bold())
+                        .foregroundStyle(.orange)
+                    Text(spec.title)
+                        .font(.headline)
+                    ProgressView(value: Engine.milestoneProgress(state: state, derived: derived, spec: spec))
+                        .tint(.orange)
+                    Text("現在 \(texts.current) ／ 目標 \(texts.target)")
+                        .font(.subheadline)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                    Text(spec.learningNote)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else {
+                Label("全ての目標を達成しました", systemImage: "flag.checkered")
+                    .font(.headline)
+                    .foregroundStyle(.green)
+            }
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 14).fill(Color(.secondarySystemGroupedBackground)))
     }
 

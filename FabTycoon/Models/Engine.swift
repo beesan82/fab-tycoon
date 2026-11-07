@@ -37,6 +37,20 @@ struct DerivedState: Equatable {
     /// 実時間1分あたりの純収入（円）
     var incomePerMinuteYen: Double
 
+    // 「なぜ？」内訳（derived の計算途中の値をそのまま保持する）
+    /// 検出率の基礎値（稼働中の検査装置の最大値。検査装置が無い場合は 0）
+    var detectionBase: Double
+    /// 検査能力の余裕度 = 検査WPH ÷ ラインWPH。検査装置が無い・ライン停止時は 0
+    var detectionHeadroom: Double
+    /// 余裕度による上乗せ幅（上限適用前）= detectionHeadroomBonus定数 × (1 − 1/余裕度)。検査装置が無い場合は 0
+    var detectionHeadroomBonus: Double
+    /// 工程歩留まりの積
+    var processYieldProduct: Double
+    /// 学習による欠陥縮小率（1.0 で学習前）
+    var learningDefectScale: Double
+    /// 製品倍率を掛ける前のライン歩留まり
+    var rawLineYield: Double
+
     func wph(_ process: ProcessType) -> Double { processWPH[process] ?? 0 }
     func units(_ process: ProcessType) -> Int { activeUnits[process] ?? 0 }
 
@@ -273,9 +287,12 @@ enum Engine {
         // 検査スクリーニング：基礎検出率＋検査能力の余裕度
         let inspectionWPH = wph[.inspection] ?? 0
         var detectionRate = 0.0
+        var headroom = 0.0
+        var headroomBonus = 0.0
         if (units[.inspection] ?? 0) > 0, inspectionWPH > 0 {
-            let headroom = inspectionWPH / max(lineWPH, 1e-9)
-            detectionRate = min(maxDetectionRate, max(0, detectionBase + detectionHeadroomBonus * (1 - 1 / headroom)))
+            headroom = inspectionWPH / max(lineWPH, 1e-9)
+            headroomBonus = detectionHeadroomBonus * (1 - 1 / headroom)
+            detectionRate = min(maxDetectionRate, max(0, detectionBase + headroomBonus))
         }
         let shippedDefectFraction = (1 - lineYield) * (1 - detectionRate)
         let shippedTotal = lineYield + shippedDefectFraction
@@ -313,7 +330,14 @@ enum Engine {
             walkFactor: state.market.walkFactor,
             currentPriceYen: price,
             // lineWPH はゲーム内1時間あたり → 実1分 = ゲーム内 gameMinutesPerRealSecond 時間
-            incomePerMinuteYen: lineWPH * marginPerWafer * gameMinutesPerRealSecond
+            incomePerMinuteYen: lineWPH * marginPerWafer * gameMinutesPerRealSecond,
+            detectionBase: detectionBase,
+            // ライン停止時は余裕度が意味を持たないので 0 として表示する
+            detectionHeadroom: lineWPH > 0 ? headroom : 0,
+            detectionHeadroomBonus: headroomBonus,
+            processYieldProduct: processProduct,
+            learningDefectScale: learningDefectScale,
+            rawLineYield: rawLineYield
         )
     }
 
@@ -357,6 +381,7 @@ enum Engine {
         if frozenPriceYen == nil {
             settleSubsidyIfDue(state: &state)
         }
+        evaluateMilestones(state: &state)
 
         let d = derived(state: state)
         let node = currentNode(state: state)
@@ -412,6 +437,8 @@ enum Engine {
             state.stats.totalMarketPenaltyYen += sale.penaltyYen
             recordSale(state: &state, revenueYen: netYen, priceYen: price)
         }
+        // 生産・販売で累計値が動いた分を評価する
+        evaluateMilestones(state: &state)
 
         return TickResult(
             producedWafers: flow,
@@ -456,6 +483,10 @@ enum Engine {
         state.gameHoursElapsed = savedGameHours
         state.market.gameTimeMinutes = savedMarketMinutes
         state.stats.playSeconds = savedPlaySeconds
+        // 不在中に達成した目標は、戻した時計の「今」に達成したものとして記録する
+        for (id, hours) in state.stats.achievedMilestones where hours > savedGameHours {
+            state.stats.achievedMilestones[id] = savedGameHours
+        }
 
         return OfflineReport(
             elapsedSeconds: capped,
@@ -841,5 +872,234 @@ enum Engine {
 
     static func detectionRateAfterSelling(state: GameState, instanceId: UUID) -> Double {
         derived(state: stateAfterSelling(state, instanceId: instanceId)).detectionRate
+    }
+}
+
+// MARK: - マイルストーン
+
+extension Engine {
+    /// 設置中＋倉庫の全装置の最大レベル（装置が無ければ 0）
+    static func maxOwnedLevel(state: GameState) -> Int {
+        (state.fab.equipment + state.fab.storedEquipment).map { $0.level }.max() ?? 0
+    }
+
+    static func milestoneAchieved(_ spec: MilestoneSpec, state: GameState, derived: DerivedState) -> Bool {
+        switch spec.condition {
+        case .firstInvestment:
+            return state.subsidy.totalInvestedYen > 0
+        case .lineWPHAtLeast(let target):
+            return derived.lineWPH >= target
+        case .lineYieldAtLeast(let target):
+            return derived.lineYield >= target
+        case .detectionRateAtLeast(let target):
+            return derived.detectionRate >= target
+        case .cumulativeWafersAtLeast(let target):
+            return state.stats.totalWafersInput >= target
+        case .cumulativeGrossSalesAtLeast(let target):
+            return state.stats.totalGrossSalesYen >= target
+        case .expansionCountAtLeast(let target):
+            return state.fab.expansionCount >= target
+        case .maxLevelAtLeast(let target):
+            return maxOwnedLevel(state: state) >= target
+        case .subsidyReceived:
+            return state.subsidy.totalReceivedYen > 0
+        case .nonDefaultProduct:
+            return state.currentProductId != Catalog.defaultProductId
+        }
+    }
+
+    /// 未達成のマイルストーンを評価し、達成したものを記録する。今回達成した id を返す
+    @discardableResult
+    static func evaluateMilestones(state: inout GameState) -> [String] {
+        let pending = Catalog.milestones.filter { state.stats.achievedMilestones[$0.id] == nil }
+        guard !pending.isEmpty else { return [] }
+        let d = derived(state: state)
+        var achieved: [String] = []
+        for spec in pending where milestoneAchieved(spec, state: state, derived: d) {
+            state.stats.achievedMilestones[spec.id] = state.gameHoursElapsed
+            achieved.append(spec.id)
+        }
+        return achieved
+    }
+
+    /// Catalog 順で最初の未達成マイルストーン（全達成なら nil）
+    static func nextMilestone(state: GameState) -> MilestoneSpec? {
+        Catalog.milestones.first { state.stats.achievedMilestones[$0.id] == nil }
+    }
+
+    /// 達成までの進捗（0...1）
+    static func milestoneProgress(state: GameState, derived: DerivedState, spec: MilestoneSpec) -> Double {
+        func ratio(_ current: Double, _ target: Double) -> Double {
+            target > 0 ? min(max(current / target, 0), 1) : 1
+        }
+        switch spec.condition {
+        case .firstInvestment, .subsidyReceived, .nonDefaultProduct:
+            return milestoneAchieved(spec, state: state, derived: derived) ? 1 : 0
+        case .lineWPHAtLeast(let target):
+            return ratio(derived.lineWPH, target)
+        case .lineYieldAtLeast(let target):
+            return ratio(derived.lineYield, target)
+        case .detectionRateAtLeast(let target):
+            return ratio(derived.detectionRate, target)
+        case .cumulativeWafersAtLeast(let target):
+            return ratio(state.stats.totalWafersInput, target)
+        case .cumulativeGrossSalesAtLeast(let target):
+            return ratio(state.stats.totalGrossSalesYen, target)
+        case .expansionCountAtLeast(let target):
+            return ratio(Double(state.fab.expansionCount), Double(target))
+        case .maxLevelAtLeast(let target):
+            return ratio(Double(maxOwnedLevel(state: state)), Double(target))
+        }
+    }
+
+    /// 進捗の表示用テキスト（現在値・目標値）
+    static func milestoneProgressTexts(state: GameState, derived: DerivedState, spec: MilestoneSpec)
+        -> (current: String, target: String) {
+        let achieved = milestoneAchieved(spec, state: state, derived: derived)
+        switch spec.condition {
+        case .firstInvestment:
+            return (achieved ? "達成" : "未達成", "設備投資を行う")
+        case .subsidyReceived:
+            return (achieved ? "達成" : "未達成", "補助金を受け取る")
+        case .nonDefaultProduct:
+            return (achieved ? "達成" : "未達成", "他製品を製造する")
+        case .lineWPHAtLeast(let target):
+            return (MoneyFormat.decimal(derived.lineWPH, digits: 2), MoneyFormat.decimal(target, digits: 2))
+        case .lineYieldAtLeast(let target):
+            return (MoneyFormat.percent(derived.lineYield), MoneyFormat.percent(target))
+        case .detectionRateAtLeast(let target):
+            return (MoneyFormat.percent(derived.detectionRate), MoneyFormat.percent(target))
+        case .cumulativeWafersAtLeast(let target):
+            return (MoneyFormat.count(state.stats.totalWafersInput) + "枚", MoneyFormat.count(target) + "枚")
+        case .cumulativeGrossSalesAtLeast(let target):
+            return (MoneyFormat.yen(state.stats.totalGrossSalesYen), MoneyFormat.yen(target))
+        case .expansionCountAtLeast(let target):
+            return ("\(state.fab.expansionCount)回", "\(target)回")
+        case .maxLevelAtLeast(let target):
+            return ("Lv\(maxOwnedLevel(state: state))", "Lv\(target)")
+        }
+    }
+}
+
+// MARK: - 図鑑
+
+/// 図鑑の1エントリ（表示用）
+struct GlossaryEntryInfo: Identifiable, Equatable {
+    enum Kind: Equatable {
+        case equipment
+        case process
+        case term
+    }
+
+    let id: String
+    let kind: Kind
+    /// 装置=モデル名、工程=displayName、用語=term
+    let title: String
+    let unlocked: Bool
+    /// stats.readGlossaryIds に含まれる
+    let isRead: Bool
+}
+
+extension Engine {
+    static func isGlossaryUnlocked(_ unlock: GlossaryUnlock, state: GameState) -> Bool {
+        switch unlock {
+        case .always:
+            return true
+        case .ownModel(let modelId):
+            return ownedCount(state: state, modelIds: [modelId]) > 0
+        case .milestone(let id):
+            return state.stats.achievedMilestones[id] != nil
+        case .grossSalesAtLeast(let yen):
+            return state.stats.totalGrossSalesYen >= yen
+        case .defectDetected:
+            return state.stats.totalDefectChips > 0
+        case .marketDefectOccurred:
+            return state.stats.totalMarketDefectChips > 0
+        }
+    }
+
+    /// 装置（Catalog.equipment 順）→工程（allCases 順）→用語（Catalog.glossaryTerms 順）の全エントリ
+    static func glossaryEntries(state: GameState) -> [GlossaryEntryInfo] {
+        let read = state.stats.readGlossaryIds
+        let equipment = Catalog.equipment.map { model -> GlossaryEntryInfo in
+            let id = Catalog.equipmentGlossaryId(model.id)
+            return GlossaryEntryInfo(id: id, kind: .equipment, title: model.name,
+                                     unlocked: isGlossaryUnlocked(.ownModel(model.id), state: state),
+                                     isRead: read.contains(id))
+        }
+        let processes = ProcessType.allCases.map { process -> GlossaryEntryInfo in
+            let id = Catalog.processGlossaryId(process)
+            return GlossaryEntryInfo(id: id, kind: .process, title: process.displayName,
+                                     unlocked: true, isRead: read.contains(id))
+        }
+        let terms = Catalog.glossaryTerms.map { term in
+            GlossaryEntryInfo(id: term.id, kind: .term, title: term.term,
+                              unlocked: isGlossaryUnlocked(term.unlock, state: state),
+                              isRead: read.contains(term.id))
+        }
+        return equipment + processes + terms
+    }
+
+    static func glossaryUnlockedCount(state: GameState) -> Int {
+        glossaryEntries(state: state).filter { $0.unlocked }.count
+    }
+}
+
+// MARK: - 次の一手アドバイザー
+
+extension Engine {
+    /// 今いちばん効く次の一手を1行で返す（優先順位の高いルールから順に判定）
+    static func advisorMessage(state: GameState, derived: DerivedState) -> String {
+        // 1. ライン停止
+        if derived.lineWPH <= 0 {
+            let stopped = ProcessType.allCases.first { derived.units($0) == 0 } ?? derived.bottleneck
+            var message = "ラインが止まっています。\(stopped?.displayName ?? "いずれかの工程")の装置がありません。装置タブで最安の装置を設置しましょう。"
+            if emergencyGrantYen(state: state) != nil {
+                message += " 統計タブの緊急補助金で立て直せます。"
+            }
+            return message
+        }
+
+        // 2. 補助金を申請できる
+        if canApplySubsidy(state: state) {
+            return "国庫補助金を申請できます（交付予定 \(MoneyFormat.yen(subsidyCapYen(state: state)))）。統計タブから申請しましょう。"
+        }
+
+        // 3. 在庫が上限間近
+        if !state.fab.autoSellEnabled && state.fab.inventoryChips > inventoryCap * 0.9 {
+            return "在庫が上限に近づいています（\(MoneyFormat.percent(state.fab.inventoryChips / inventoryCap, digits: 0))）。一括売却か自動販売への切り替えがおすすめです。"
+        }
+
+        // 4. ボトルネックに最安の購入可能機を足す
+        if let process = derived.bottleneck,
+           let model = Catalog.models(for: process)
+               .filter({ lockReasons(model: $0, nodeId: state.fab.currentNodeId).isEmpty })
+               .min(by: { $0.priceYen < $1.priceYen }) {
+            let after = lineWPHAfterAdding(state: state, modelId: model.id)
+            if after > derived.lineWPH + 1e-9 {
+                if state.fab.freeSlots <= 0 {
+                    if canExpandFab(state: state) {
+                        return "設置スロットが満杯です。増床（\(MoneyFormat.yen(expansionCostYen(state: state)))）すると、ボトルネックの\(process.displayName)に装置を足せるようになります。"
+                    }
+                    return "設置スロットが満杯です。余裕のある工程の装置を倉庫へ外して\(process.displayName)に付け替えるか、増床の資金を貯めましょう。"
+                }
+                if state.cashYen >= model.priceYen {
+                    return "ボトルネックの\(process.displayName)に\(model.name)（\(MoneyFormat.yen(model.priceYen))）を足すと、ラインWPH \(MoneyFormat.decimal(derived.lineWPH, digits: 2)) → \(MoneyFormat.decimal(after, digits: 2)) になります。"
+                }
+                return "次の一手は\(process.displayName)の\(model.name)（\(MoneyFormat.yen(model.priceYen))）です。あと\(MoneyFormat.yen(model.priceYen - state.cashYen))で購入できます。"
+            }
+        }
+
+        // 5. 検出率が低い
+        if derived.detectionRate < 0.80 && derived.units(.inspection) != 0 {
+            return "検出率が\(MoneyFormat.percent(derived.detectionRate))です。検査工程を増強すると、市場不良のペナルティを減らせます。"
+        }
+
+        // 6. 次の目標
+        if let spec = nextMilestone(state: state) {
+            let progress = milestoneProgress(state: state, derived: derived, spec: spec)
+            return "次の目標は『\(spec.title)』です（進捗 \(MoneyFormat.percent(progress, digits: 0))）。"
+        }
+        return "全ての目標を達成しました。ラインは順調に稼働しています。"
     }
 }

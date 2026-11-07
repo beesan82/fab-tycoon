@@ -5,6 +5,7 @@ enum AppTab: Hashable {
     case line
     case shop
     case products
+    case glossary
     case stats
 }
 
@@ -210,6 +211,12 @@ final class GameStore: ObservableObject {
 
     func dismissOfflineReport() {
         offlineReport = nil
+    }
+
+    /// 図鑑エントリを既読にする（保存は通常のオートセーブに任せる）
+    func markGlossaryRead(_ id: String) {
+        guard !state.stats.readGlossaryIds.contains(id) else { return }
+        state.stats.readGlossaryIds.insert(id)
     }
 
     // MARK: 旧セーブ告知・新規開始

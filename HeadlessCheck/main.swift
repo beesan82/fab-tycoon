@@ -1,8 +1,8 @@
 import Foundation
 
-// Models/Catalog.swift・GameState.swift・Engine.swift・Persistence/SaveManager.swift と一緒にコンパイルして実行する。
+// Models/Catalog.swift・GameState.swift・Engine.swift・MoneyFormat.swift・Persistence/SaveManager.swift と一緒にコンパイルして実行する。
 // 例: swiftc FabTycoon/Models/Catalog.swift FabTycoon/Models/GameState.swift \
-//       FabTycoon/Models/Engine.swift FabTycoon/Persistence/SaveManager.swift \
+//       FabTycoon/Models/Engine.swift FabTycoon/Models/MoneyFormat.swift FabTycoon/Persistence/SaveManager.swift \
 //       HeadlessCheck/main.swift -o /tmp/fab-headless && /tmp/fab-headless
 
 func fail(_ message: String) -> Never {
@@ -238,5 +238,92 @@ check(!bakManager.hasSave && !fileManager.fileExists(atPath: bakDir.appendingPat
 check(fileManager.fileExists(atPath: futureDir.appendingPathComponent(SaveManager.unreadableFileName).path), "deleteSave しても退避ファイルは残る")
 
 try? fileManager.removeItem(at: tempRoot)
+
+// 0.3.0: 目標と図鑑
+print("== 0.3.0. カタログ件数・図鑑の解放 ==")
+let glossaryInitial = GameState.initial()
+check(Catalog.milestones.count == 12, "マイルストーンは12本")
+check(Catalog.glossaryTerms.count == 30, "用語は30本")
+check(Engine.glossaryEntries(state: glossaryInitial).count == 57, "図鑑の全エントリは57件")
+check(Engine.glossaryUnlockedCount(state: glossaryInitial) == 26, "初期状態の図鑑の解放数は26（装置7＋工程7＋用語12）")
+
+// 0.3.0: 「なぜ？」内訳（初期状態）
+print("== 0.3.0. 内訳の整合 ==")
+let breakdown = Engine.derived(state: glossaryInitial)
+print("  検出率: 基礎 \(num(breakdown.detectionBase, 3)) ＋ 余裕度 ×\(num(breakdown.detectionHeadroom, 3)) による上乗せ \(num(breakdown.detectionHeadroomBonus, 3)) = \(num(breakdown.detectionRate, 3))")
+print("  歩留まり: 工程積 \(num(breakdown.processYieldProduct, 4)) 欠陥残存率 \(num(breakdown.learningDefectScale, 4)) 倍率前 \(num(breakdown.rawLineYield, 4)) → \(num(breakdown.lineYield, 4))")
+check(breakdown.detectionBase == 0.55, "初期の基礎検出率は 0.55（Q1）")
+check(abs(breakdown.detectionHeadroom - 4.0) < 1e-9, "初期の検査余裕度は 4.0（34 ÷ 8.5）")
+check(abs(breakdown.detectionHeadroomBonus - 0.225) < 1e-9, "初期の余裕度ボーナスは 0.225")
+check(abs(breakdown.detectionRate - 0.775) < 1e-9, "初期の検出率は 0.775")
+let rebuiltRawYield = 1 - (1 - breakdown.processYieldProduct) * breakdown.learningDefectScale
+let rebuiltLineYield = min(max(1 - (1 - rebuiltRawYield) / Engine.productYieldMultiplier(state: glossaryInitial), 0), 0.99)
+check(abs(rebuiltLineYield - breakdown.lineYield) < 1e-12, "内訳から再構成したライン歩留まりが lineYield と一致")
+
+// 0.3.0: アドバイザー
+print("== 0.3.0. アドバイザー ==")
+let advisorInitial = Engine.advisorMessage(state: glossaryInitial, derived: breakdown)
+print("  初期: \(advisorInitial)")
+check(advisorInitial.contains("成膜") && advisorInitial.contains("PECVD"), "初期状態ではボトルネックの成膜に PECVD を勧める")
+var noDepositionState = GameState.initial()
+noDepositionState.fab.equipment.removeAll { Catalog.model(id: $0.modelId)?.process == .deposition }
+let advisorStopped = Engine.advisorMessage(state: noDepositionState, derived: Engine.derived(state: noDepositionState))
+print("  成膜なし: \(advisorStopped)")
+check(advisorStopped.contains("止まって"), "成膜装置が無いとライン停止を知らせる")
+var subsidyReadyState = GameState.initial()
+subsidyReadyState.subsidy.totalInvestedYen = 300_000_000
+let advisorSubsidy = Engine.advisorMessage(state: subsidyReadyState, derived: Engine.derived(state: subsidyReadyState))
+print("  投資3億円: \(advisorSubsidy)")
+check(advisorSubsidy.contains("補助金"), "補助金を申請できるときは申請を勧める")
+var fullAffordState = GameState.initial()
+fullAffordState.fab.slots = fullAffordState.fab.equipment.count
+fullAffordState.cashYen = 10_000_000_000
+let advisorFullAfford = Engine.advisorMessage(state: fullAffordState, derived: Engine.derived(state: fullAffordState))
+print("  スロット満杯・資金あり: \(advisorFullAfford)")
+check(advisorFullAfford.contains("増床") && !advisorFullAfford.contains("を足すと"), "スロット満杯で増床資金があれば増床を勧める")
+var fullPoorState = GameState.initial()
+fullPoorState.fab.slots = fullPoorState.fab.equipment.count
+fullPoorState.cashYen = 0
+let advisorFullPoor = Engine.advisorMessage(state: fullPoorState, derived: Engine.derived(state: fullPoorState))
+print("  スロット満杯・資金不足: \(advisorFullPoor)")
+check(advisorFullPoor.contains("倉庫") && !advisorFullPoor.contains("を足すと"), "スロット満杯で資金不足なら倉庫への付け替えを勧める")
+
+// 0.3.0: マイルストーンのシミュレーション
+print("== 0.3.0. マイルストーン（D1購入→パワーへ切替→実10分） ==")
+var milestoneState = GameState.initial()
+check(Engine.buy(state: &milestoneState, modelId: "D1"), "D1 を購入できた")
+check(Engine.switchProduct(state: &milestoneState, productId: "power"), "パワー／アナログ系に切り替えられた")
+for _ in 0..<2_400 {
+    Engine.tick(state: &milestoneState, dtRealSeconds: 0.25)
+}
+let achievedIds = Catalog.milestones.map { $0.id }.filter { milestoneState.stats.achievedMilestones[$0] != nil }
+print("  達成: \(achievedIds.joined(separator: ", "))")
+check(["first_investment", "wph_10", "product_switch"].allSatisfy { milestoneState.stats.achievedMilestones[$0] != nil },
+      "first_investment・wph_10・product_switch を達成")
+check(achievedIds.count >= 3, "達成数が 3 以上")
+
+// 0.3.0: 旧セーブ互換（Stats に新フィールドが無い）
+print("== 0.3.0. 旧セーブ互換・往復 ==")
+let checkDecoder = JSONDecoder()
+checkDecoder.dateDecodingStrategy = .iso8601
+var legacyObject = encodedObject(GameState.initial())
+guard var legacyStats = legacyObject["stats"] as? [String: Any] else { fail("stats を辞書として取り出せない") }
+legacyStats.removeValue(forKey: "achievedMilestones")
+legacyStats.removeValue(forKey: "readGlossaryIds")
+legacyObject["stats"] = legacyStats
+let legacyData = try? JSONSerialization.data(withJSONObject: legacyObject)
+let legacyState = legacyData.flatMap { try? checkDecoder.decode(GameState.self, from: $0) }
+check(legacyState != nil, "achievedMilestones・readGlossaryIds の無いセーブを読み込める")
+check(legacyState?.stats.achievedMilestones.isEmpty == true && legacyState?.stats.readGlossaryIds.isEmpty == true,
+      "欠けたフィールドは空で補われる")
+
+// 0.3.0: Stats の往復
+let checkEncoder = JSONEncoder()
+checkEncoder.dateEncodingStrategy = .iso8601
+var roundTripState = GameState.initial()
+roundTripState.stats.readGlossaryIds.insert("term.wafer")
+let roundTripData = try? checkEncoder.encode(roundTripState)
+let roundTripDecoded = roundTripData.flatMap { try? checkDecoder.decode(GameState.self, from: $0) }
+check(roundTripDecoded?.stats == roundTripState.stats, "readGlossaryIds を含む Stats がエンコード→デコードで一致")
 
 print("HEADLESS CHECK PASSED")

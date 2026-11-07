@@ -22,6 +22,9 @@ struct ContentView: View {
                 ProductsView()
                     .tabItem { Label("製品", systemImage: "shippingbox") }
                     .tag(AppTab.products)
+                GlossaryView()
+                    .tabItem { Label("図鑑", systemImage: "book") }
+                    .tag(AppTab.glossary)
                 StatsView()
                     .tabItem { Label("統計", systemImage: "chart.bar") }
                     .tag(AppTab.stats)
@@ -31,6 +34,7 @@ struct ContentView: View {
             OfflineReportSheet(report: report) {
                 store.dismissOfflineReport()
             }
+            .environmentObject(store)
         }
     }
 }
@@ -227,6 +231,8 @@ extension MarketCondition {
 // MARK: - おかえりシート（簡易版）
 
 struct OfflineReportSheet: View {
+    @EnvironmentObject private var store: GameStore
+
     let report: OfflineReport
     let onClose: () -> Void
 
@@ -257,6 +263,14 @@ struct OfflineReportSheet: View {
             .padding()
             .background(RoundedRectangle(cornerRadius: 12).fill(Color(.secondarySystemBackground)))
 
+            // 次の一手アドバイザー
+            Label(Engine.advisorMessage(state: store.state, derived: store.derived), systemImage: "lightbulb")
+                .font(.footnote)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.secondary.opacity(0.4)))
+
             Button(action: onClose) {
                 Text("受け取る")
                     .font(.headline)
@@ -266,7 +280,8 @@ struct OfflineReportSheet: View {
             .controlSize(.large)
         }
         .padding(24)
-        .presentationDetents([.medium])
+        // アドバイザー行の分だけ高さが伸びることがあるので、全画面へも広げられるようにする
+        .presentationDetents([.medium, .large])
     }
 
     private func reportRow(_ title: String, _ value: String) -> some View {

@@ -571,3 +571,294 @@ extension ProcessType {
         }
     }
 }
+
+// MARK: - マイルストーン
+
+/// マイルストーンの達成条件
+enum MilestoneCondition: Equatable {
+    /// subsidy.totalInvestedYen > 0
+    case firstInvestment
+    case lineWPHAtLeast(Double)
+    case lineYieldAtLeast(Double)
+    case detectionRateAtLeast(Double)
+    /// stats.totalWafersInput
+    case cumulativeWafersAtLeast(Double)
+    /// stats.totalGrossSalesYen
+    case cumulativeGrossSalesAtLeast(Double)
+    /// fab.expansionCount
+    case expansionCountAtLeast(Int)
+    /// 設置＋倉庫の全装置の最大レベル
+    case maxLevelAtLeast(Int)
+    /// subsidy.totalReceivedYen > 0
+    case subsidyReceived
+    /// currentProductId != Catalog.defaultProductId
+    case nonDefaultProduct
+}
+
+struct MilestoneSpec: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let condition: MilestoneCondition
+    /// 達成時に読む学習ノート
+    let learningNote: String
+}
+
+extension Catalog {
+    /// 経営目標。並びは達成想定順
+    static let milestones: [MilestoneSpec] = [
+        MilestoneSpec(
+            id: "first_investment", title: "初めての設備投資", condition: .firstInvestment,
+            learningNote: "装置を買う・改良するのがファブ経営の第一歩。現実のファブでは設備投資（CAPEX）が資金繰りの中心で、1台100億円を超える装置も珍しくない。"
+        ),
+        MilestoneSpec(
+            id: "wph_10", title: "ラインWPH 10到達", condition: .lineWPHAtLeast(10),
+            learningNote: "WPHは1時間に処理できるウェハの枚数。ライン全体の速度は一番遅い工程（ボトルネック）で決まるため、速い工程だけを増やしても全体は速くならない。"
+        ),
+        MilestoneSpec(
+            id: "product_switch", title: "製品を切り替える", condition: .nonDefaultProduct,
+            learningNote: "ファブが作るのは1種類の製品だけではない。需要や単価に合わせて製品ミックスを変えるのも、ファウンドリ経営の重要な判断になる。"
+        ),
+        MilestoneSpec(
+            id: "detection_80", title: "検出率80%", condition: .detectionRateAtLeast(0.80),
+            learningNote: "検出率は『検査装置の基礎性能』と『ラインに対する検査能力の余裕』で決まる。検査に余裕があるほど見逃しが減り、不良が客先に届く事故も減る。"
+        ),
+        MilestoneSpec(
+            id: "yield_80", title: "ライン歩留まり80%", condition: .lineYieldAtLeast(0.80),
+            learningNote: "歩留まりは工程ごとの良品率の掛け算。7工程すべて95%でも全体では約70%にしかならない。だから各工程の小さな改善が効いてくる。"
+        ),
+        MilestoneSpec(
+            id: "wafers_5000", title: "累計ウェハ5,000枚", condition: .cumulativeWafersAtLeast(5_000),
+            learningNote: "ウェハを流し続けることで現場の知恵が蓄積し、歩留まりが上がっていく（学習曲線）。量産の立ち上げは『ランプ』と呼ばれる。"
+        ),
+        MilestoneSpec(
+            id: "upgrade_lv5", title: "改良レベル5到達", condition: .maxLevelAtLeast(5),
+            learningNote: "装置の改良は買い替えより安く性能を伸ばす手段。ただし効果は少しずつ弱まるので、改良と新規購入のバランスが経営の腕の見せどころ。"
+        ),
+        MilestoneSpec(
+            id: "subsidy_received", title: "補助金の初受給", condition: .subsidyReceived,
+            learningNote: "半導体は国家戦略産業。各国が巨額の補助金でファブを誘致していて、日本でもTSMC熊本工場（JASM）やRapidusに国費が投じられている。"
+        ),
+        MilestoneSpec(
+            id: "first_expansion", title: "初の増床", condition: .expansionCountAtLeast(1),
+            learningNote: "クリーンルームの拡張はファブの大きな節目。床面積がそのまま生産能力の上限になるため、将来の需要を見越した投資判断が求められる。"
+        ),
+        MilestoneSpec(
+            id: "sales_100oku", title: "累計売上100億円", condition: .cumulativeGrossSalesAtLeast(10_000_000_000),
+            learningNote: "売上100億円は小規模ファブの年商規模。現実の大規模ファブは年商1兆円を超え、TSMC全体では10兆円規模になる。"
+        ),
+        MilestoneSpec(
+            id: "wph_17", title: "ラインWPH 17（露光均衡ライン）", condition: .lineWPHAtLeast(17),
+            learningNote: "露光機2台がフル稼働する均衡ライン。最も高価な露光機を遊ばせないよう他工程を揃えるのが、ライン設計の基本とされる。"
+        ),
+        MilestoneSpec(
+            id: "yield_90", title: "ライン歩留まり90%", condition: .lineYieldAtLeast(0.90),
+            learningNote: "歩留まり90%は量産ラインとして一流の水準。ここからは欠陥密度の低減と学習の積み重ねがものを言う領域になる。"
+        ),
+    ]
+
+    private static let milestoneIndex: [String: MilestoneSpec] =
+        Dictionary(uniqueKeysWithValues: milestones.map { ($0.id, $0) })
+
+    static func milestone(id: String) -> MilestoneSpec? { milestoneIndex[id] }
+}
+
+// MARK: - 図鑑（用語集）
+
+/// 図鑑エントリの解放条件
+enum GlossaryUnlock: Equatable {
+    case always
+    /// そのモデルを設置中または倉庫に所有
+    case ownModel(String)
+    /// マイルストーン達成
+    case milestone(String)
+    /// stats.totalGrossSalesYen
+    case grossSalesAtLeast(Double)
+    /// stats.totalDefectChips > 0
+    case defectDetected
+    /// stats.totalMarketDefectChips > 0
+    case marketDefectOccurred
+}
+
+struct GlossaryTerm: Identifiable, Equatable {
+    let id: String
+    let term: String
+    /// "基礎" / "製造" / "品質" / "経営"
+    let category: String
+    /// 2〜3文の平易な解説（ゲーム内の意味と現実の意味の両方に触れる）
+    let body: String
+    let unlock: GlossaryUnlock
+}
+
+extension Catalog {
+    /// 図鑑の装置エントリid（"eq." + modelId）
+    static func equipmentGlossaryId(_ modelId: String) -> String { "eq." + modelId }
+
+    /// 図鑑の工程エントリid（"proc." + rawValue）
+    static func processGlossaryId(_ process: ProcessType) -> String { "proc." + process.rawValue }
+
+    /// 図鑑の全エントリ数（装置＋工程＋用語）
+    static var glossaryEntryCount: Int {
+        equipment.count + ProcessType.allCases.count + glossaryTerms.count
+    }
+
+    static let glossaryTerms: [GlossaryTerm] = [
+        // 最初から読める用語
+        GlossaryTerm(
+            id: "term.wafer", term: "ウェハ", category: "基礎",
+            body: "半導体チップの土台になる、シリコンの円い薄板。現実の先端ファブでは直径300mmが標準で、1枚の上に数百〜数千個のチップを同時に作り込む。このゲームでは汎用ロジックなら1枚から600個のダイが取れる。",
+            unlock: .always
+        ),
+        GlossaryTerm(
+            id: "term.die", term: "ダイ", category: "基礎",
+            body: "ウェハ上に碁盤の目のように並ぶ、チップ1個分の区画。完成後にダイシングで切り分けられ、パッケージに収められて製品になる。ダイが大きいほど1枚から取れる数が減り欠陥も含みやすくなるため、このゲームの高性能チップは1枚45個・歩留まり倍率×0.85になっている。",
+            unlock: .always
+        ),
+        GlossaryTerm(
+            id: "term.node", term: "ノード", category: "基礎",
+            body: "28nm・14nm・7nmのように呼ばれる製造プロセスの世代で、数字が小さいほど微細で先端になる。現在の数字は実際の寸法とは一致しない「世代名」で、微細化するほど工程の繰り返し（パス数）が増えて製造は難しくなる。このゲームは28nmから始まり、ノードごとに歩留まりの初期値・上限と学習の速さが違う。",
+            unlock: .always
+        ),
+        GlossaryTerm(
+            id: "term.wph", term: "WPH", category: "基礎",
+            body: "Wafers Per Hour（1時間あたりの処理ウェハ枚数）の略で、装置やラインの速さを表す。このゲームでは装置の公称WPHをパス数で割り、稼働率85%を掛けたものが工程の実効WPHになる。例えば28nmで20パスの成膜に公称100WPHのPECVDを2台置くと、2×100÷20×0.85＝8.5WPH。",
+            unlock: .always
+        ),
+        GlossaryTerm(
+            id: "term.bottleneck", term: "ボトルネック／律速", category: "基礎",
+            body: "ラインの中で一番遅い工程のこと。ウェハは全工程を順に通るので、ライン全体のWPHはボトルネック工程のWPHで頭打ちになる（律速）。このゲームで装置を足すならまずボトルネックの工程に。それ以外の工程を増やしてもラインWPHは増えない。",
+            unlock: .always
+        ),
+        GlossaryTerm(
+            id: "term.yield", term: "歩留まり", category: "品質",
+            body: "作ったチップのうち良品になる割合。このゲームのライン歩留まりは、7工程の工程歩留まりの積に、学習による欠陥の縮小と製品の歩留まり倍率を反映して決まる。現実でも歩留まりはファブの利益を最も大きく左右する指標で、数%の違いが収益を大きく変える。",
+            unlock: .always
+        ),
+        GlossaryTerm(
+            id: "term.resist", term: "フォトレジスト", category: "製造",
+            body: "光が当たった部分だけ性質が変わる感光性の樹脂。ウェハに薄く塗って露光すると、回路パターンが化学的な「潜像」として焼き付く。JSR・東京応化工業・信越化学などが世界シェアの大半を握る、日本が強い材料分野。",
+            unlock: .always
+        ),
+        GlossaryTerm(
+            id: "term.develop", term: "現像", category: "製造",
+            body: "露光後のウェハに現像液をかけ、レジストの不要な部分を溶かしてパターンを浮かび上がらせる工程。残ったレジストがマスクになり、続くエッチングやイオン注入で「ここだけ加工する」範囲を決める。塗布と現像は露光機とつながったコータ／デベロッパが担い、このゲームでは露光工程に含めて扱っている。",
+            unlock: .always
+        ),
+        GlossaryTerm(
+            id: "term.dryetch", term: "ドライエッチング", category: "製造",
+            body: "プラズマ化したガスで膜を削る加工法。イオンを真下へ打ち込むため、液体で溶かすウェットエッチングと違って垂直にまっすぐ掘れる（異方性）。このゲームの28nmではエッチング工程を20回通り、成膜と並んで最もパス数の多い工程になっている。",
+            unlock: .always
+        ),
+        GlossaryTerm(
+            id: "term.cmp", term: "CMP", category: "製造",
+            body: "Chemical Mechanical Polishing（化学機械研磨）の略。スラリーと呼ぶ研磨液を流しながらウェハを磨き、表面を平らにする。表面が平らでないと次の露光でピントが合わないため層ごとに欠かせず、このゲームの28nmでは5回通る。",
+            unlock: .always
+        ),
+        GlossaryTerm(
+            id: "term.doping", term: "ドーピング", category: "製造",
+            body: "シリコンにホウ素やリンなどの不純物をわずかに加え、電気の流れやすさを変えること。加える元素によって電子が運ぶn型と正孔が運ぶp型の領域ができ、その組み合わせでトランジスタが働く。このゲームではイオン注入・熱処理工程がこれを担う。",
+            unlock: .always
+        ),
+        GlossaryTerm(
+            id: "term.thinfilm", term: "薄膜", category: "製造",
+            body: "ウェハ上に積む、厚さ数nm〜数μmの膜。絶縁膜・配線用の金属膜・半導体膜などを、CVD・ALD・スパッタなどで目的に応じて作り分ける。チップは膜を積んでは削るを何十回も繰り返してできており、このゲームでも成膜工程は28nmで20回通る。",
+            unlock: .always
+        ),
+        // 出来事で解放
+        GlossaryTerm(
+            id: "term.defect", term: "欠陥とパーティクル", category: "品質",
+            body: "パーティクル（微小なゴミ）、傷、パターンの欠けなど、チップを不良にする原因の総称。ナノメートル単位の回路では、目に見えない微粒子1個で配線が断線・短絡することがある。このゲームでは工程歩留まりの低さが欠陥として現れ、検査で見つかったものは廃棄されて「欠陥チップ」に数えられる。",
+            unlock: .defectDetected
+        ),
+        GlossaryTerm(
+            id: "term.market_defect", term: "市場不良", category: "品質",
+            body: "検査をすり抜けて客先に届いてしまった不良品。返品・交換・原因調査の費用に加え、信用の低下という目に見えないコストも生む。このゲームでは見逃した不良1個ごとに販売額の150%（車載チップは3倍の450%）がペナルティとして差し引かれる。",
+            unlock: .marketDefectOccurred
+        ),
+        GlossaryTerm(
+            id: "term.cogs", term: "原価率", category: "経営",
+            body: "売上のうち、材料・薬液・電力・人件費など製造にかかった費用（売上原価）の割合。このゲームでは汎用ロジックの原価率が45%で、売上から原価と市場不良ペナルティを引いた残りが粗利として資金に入る。現実のTSMCは売上総利益率（1−原価率）が50%台と、製造業としては際立って高い。",
+            unlock: .grossSalesAtLeast(10_000_000)
+        ),
+        GlossaryTerm(
+            id: "term.market", term: "市況", category: "経営",
+            body: "半導体の需要と価格の波のこと。半導体業界は数年周期で好況と不況を繰り返す「シリコンサイクル」で知られる。このゲームでも単価は周期的な波とランダムな揺れで上下するので、自動販売を止めて在庫をため、好況で売るという判断もできる。",
+            unlock: .grossSalesAtLeast(100_000_000)
+        ),
+        // マイルストーンで解放
+        GlossaryTerm(
+            id: "term.duv", term: "DUV", category: "製造",
+            body: "Deep Ultraviolet（深紫外線）の略で、波長248nmのKrFや193nmのArFのレーザー光を使う露光技術。このゲームの最初の露光機L1はArFドライ方式で、28nm世代の主力。レンズとウェハの間を水で満たす液浸（L2）と多重露光を組み合わせ、7nm世代まで使われてきた。",
+            unlock: .milestone("first_investment")
+        ),
+        GlossaryTerm(
+            id: "term.subsidy", term: "補助金", category: "経営",
+            body: "国や自治体が企業の投資の一部を負担する制度。半導体は経済安全保障の要とされ、日本・米国・欧州などが巨額の補助金でファブを誘致している。このゲームでは累計設備投資の1/3を上限に申請でき、審査にゲーム内5日、交付後は30日のクールダウンがある。",
+            unlock: .milestone("first_investment")
+        ),
+        GlossaryTerm(
+            id: "term.uptime", term: "稼働率とOEE", category: "基礎",
+            body: "稼働率は装置が実際に動いている時間の割合で、このゲームでは全装置一律85%としている。OEE（総合設備効率）は、稼働率に速度のロスと不良のロスまで掛け合わせた、設備の実力を表す指標。保守・段取り替え・故障があるため、現実の装置も100%は動けない。",
+            unlock: .milestone("wph_10")
+        ),
+        GlossaryTerm(
+            id: "term.power_device", term: "パワーデバイス", category: "製造",
+            body: "電力の変換や制御を担う半導体で、電気自動車・鉄道・家電の電源などに使われる。微細さより高い電圧や大電流に耐える構造が大切で、成熟したプロセスでも作れる。このゲームのパワー／アナログ系は欠陥が出にくく歩留まり倍率×1.25だが、1枚から取れるダイは250個と少ない。",
+            unlock: .milestone("product_switch")
+        ),
+        GlossaryTerm(
+            id: "term.automotive_grade", term: "車載グレード", category: "品質",
+            body: "自動車向けの半導体に求められる、高温や振動に耐える信頼性と極めて低い不良率の基準。AEC-Q100などの規格があり、不良率はppm（百万分の1）単位で管理され「ゼロ・ディフェクト」が目標とされる。このゲームの車載チップは市場不良のペナルティが3倍で、高度な検査装置が必須になっている。",
+            unlock: .milestone("product_switch")
+        ),
+        GlossaryTerm(
+            id: "term.defect_density", term: "欠陥密度", category: "品質",
+            body: "ウェハの単位面積あたりに含まれる、チップを不良にする欠陥の数（D0とも呼ぶ）。欠陥がランダムに散らばると考えると、歩留まりはおおよそ exp(−ダイ面積×欠陥密度) で決まり、ダイが大きいほど急に下がる。このゲームで高性能チップの歩留まりが低いのも、大きなダイほど欠陥を含みやすいから。",
+            unlock: .milestone("yield_80")
+        ),
+        GlossaryTerm(
+            id: "term.screening", term: "スクリーニング", category: "品質",
+            body: "検査やテストで不良品をふるい落とし、良品だけを出荷すること。不良を作らない（歩留まり）ことと、作った不良を外に出さない（スクリーニング）ことは品質管理の両輪。このゲームでは検出率の分だけ不良が廃棄され、残りは良品に混ざって出荷される。",
+            unlock: .milestone("detection_80")
+        ),
+        GlossaryTerm(
+            id: "term.die_compare", term: "ダイ比較", category: "品質",
+            body: "検査装置が欠陥を見つける代表的な方法。同じ回路パターンが並ぶ隣どうしのダイの画像を比べ、違う箇所を欠陥候補として拾う。このゲームの光学検査装置（Q1）もこの方式で、基礎検出率55%に検査能力の余裕による上乗せが加わる。",
+            unlock: .milestone("detection_80")
+        ),
+        GlossaryTerm(
+            id: "term.learning_curve", term: "学習曲線", category: "品質",
+            body: "生産量が増えるほど経験が蓄積し、品質やコストが改善していく現象。このゲームでは28nmで累計6,000枚を時定数として欠陥が指数関数的に減り、最終的に学習前の約1/6まで縮む。現実でも新工程の立ち上げ直後は歩留まりが低く、量産を重ねて改善していく。",
+            unlock: .milestone("wafers_5000")
+        ),
+        GlossaryTerm(
+            id: "term.pm", term: "予防保全", category: "経営",
+            body: "故障してから直す事後保全に対し、故障する前に計画的な部品交換や清掃を行って装置を安定させる考え方（PM: Preventive Maintenance）。半導体装置は1台止まるだけでライン全体の律速になることがあるため、計画停止で突発停止を減らすのが基本。このゲームの稼働率85%は、こうした保守の時間も見込んだ値として扱っている。",
+            unlock: .milestone("upgrade_lv5")
+        ),
+        GlossaryTerm(
+            id: "term.capex", term: "設備投資", category: "経営",
+            body: "CAPEX（Capital Expenditure）とも呼ばれ、装置や建屋などの長く使う資産に投じるお金。大手ファウンドリは年に数兆円規模を投じ、TSMCの年間設備投資は400億ドル前後に達する。このゲームでは装置の購入と改良が累計設備投資に数えられ、補助金の上限計算の基準になる。",
+            unlock: .milestone("subsidy_received")
+        ),
+        GlossaryTerm(
+            id: "term.cleanroom", term: "クリーンルーム", category: "製造",
+            body: "空気中の微粒子を極限まで取り除いた作業空間。先端ファブの清浄度はISOクラス3〜5程度で、1立方メートルあたりの微粒子が外気より何桁も少ない状態に保たれる。このゲームでは増床でクリーンルームを広げ、装置を置ける枠を4つずつ増やす。",
+            unlock: .milestone("first_expansion")
+        ),
+        GlossaryTerm(
+            id: "term.euv", term: "EUV", category: "製造",
+            body: "Extreme Ultraviolet（極端紫外線）の略で、波長13.5nmの光を使う露光技術。ArFの193nmより一桁以上短い波長で、多重露光に頼らず微細なパターンを描ける。装置は1台200億円を超えてASMLだけが供給しており、このゲームでは7nm以降で露光のパス数を大きく減らす装置として登場する。",
+            unlock: .milestone("wph_17")
+        ),
+        GlossaryTerm(
+            id: "term.ramp", term: "ランプ", category: "経営",
+            body: "新しいプロセスや工場の生産量と歩留まりを、量産水準まで引き上げていく立ち上げ期間のこと（ランプアップ）。この期間の速さが新世代の収益を左右するため、各社は立ち上げの速さを競っている。このゲームでも累計投入ウェハが増えるほど歩留まりが上がり、90%に届けば一流の量産ラインと言える。",
+            unlock: .milestone("yield_90")
+        ),
+    ]
+
+    private static let glossaryTermIndex: [String: GlossaryTerm] =
+        Dictionary(uniqueKeysWithValues: glossaryTerms.map { ($0.id, $0) })
+
+    static func glossaryTerm(id: String) -> GlossaryTerm? { glossaryTermIndex[id] }
+}

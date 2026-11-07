@@ -8,10 +8,16 @@ struct StatsView: View {
         let derived = store.derived
         let currentProduct = Engine.currentProduct(state: store.state)
         List {
+            Section("目標") {
+                ForEach(Catalog.milestones) { spec in
+                    milestoneRow(spec, derived: derived)
+                }
+            }
             Section("国庫補助金") {
                 subsidySection
             }
             Section("累計") {
+                row("図鑑の解放", "\(Engine.glossaryUnlockedCount(state: store.state))/\(Catalog.glossaryEntryCount)")
                 row("売上", MoneyFormat.yen(stats.totalGrossSalesYen))
                 row("売上原価", MoneyFormat.yen(stats.totalCogsYen))
                 row("粗利", MoneyFormat.yen(stats.totalRevenueYen))
@@ -29,8 +35,23 @@ struct StatsView: View {
                 ForEach(ProcessType.allCases) { process in
                     row(process.displayName, MoneyFormat.percent(derived.processYields[process] ?? 0))
                 }
-                row("ライン歩留まり（検査前）", MoneyFormat.percent(derived.lineYield))
-                row("検査検出率", MoneyFormat.percent(derived.detectionRate))
+                // ライン歩留まりの内訳 = 1 − (1 − 工程歩留まりの積) × 欠陥の残存率 → 製品倍率を欠陥側に適用
+                breakdownHeader("ライン歩留まりの内訳")
+                breakdownRow("工程歩留まりの積", MoneyFormat.percent(derived.processYieldProduct))
+                breakdownRow("学習による欠陥縮小", "欠陥の残存率 \(MoneyFormat.percent(derived.learningDefectScale))")
+                breakdownRow("製品の歩留まり倍率", multiplierText(currentProduct.yieldMultiplier))
+                row("＝ ライン歩留まり（検査前）", MoneyFormat.percent(derived.lineYield))
+                // 検出率の内訳 = 基礎検出率 ＋ 余裕度ボーナス（上限あり）
+                breakdownHeader("検査検出率の内訳")
+                breakdownRow("基礎検出率", MoneyFormat.percent(derived.detectionBase))
+                breakdownRow("検査能力の余裕度", "×" + MoneyFormat.decimal(derived.detectionHeadroom, digits: 1))
+                breakdownRow("余裕度ボーナス", "+" + MoneyFormat.percent(derived.detectionHeadroomBonus))
+                if derived.detectionBase + derived.detectionHeadroomBonus > Engine.maxDetectionRate {
+                    Text("上限\(MoneyFormat.percent(Engine.maxDetectionRate, digits: 0))で頭打ち")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                row("＝ 検査検出率", MoneyFormat.percent(derived.detectionRate))
                 row("出荷良品率", MoneyFormat.percent(derived.shippedYield))
                 row("市場不良率", MoneyFormat.percent(derived.marketDefectRate))
             }
@@ -52,6 +73,71 @@ struct StatsView: View {
             Text(value)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: 内訳
+
+    private func breakdownHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.caption.bold())
+            .foregroundStyle(.secondary)
+    }
+
+    /// 内訳の1行（字下げして小さく表示）
+    private func breakdownRow(_ title: String, _ value: String) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Text(value)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+        .font(.subheadline)
+        .padding(.leading, 12)
+    }
+
+    /// 倍率表示（例：×2.8、×1）。ProductsView と同じ形式
+    private func multiplierText(_ value: Double) -> String {
+        String(format: "×%g", value)
+    }
+
+    // MARK: 目標
+
+    @ViewBuilder
+    private func milestoneRow(_ spec: MilestoneSpec, derived: DerivedState) -> some View {
+        if let hours = store.state.stats.achievedMilestones[spec.id] {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Text(spec.title)
+                        .font(.subheadline.bold())
+                    Spacer()
+                    // 達成時の gameHoursElapsed をゲーム内時計と同じ「Day N」に換算する
+                    Text("Day \(Int(max(hours, 0) / 24) + 1) 達成")
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                Text(spec.learningNote)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.vertical, 2)
+        } else {
+            let texts = Engine.milestoneProgressTexts(state: store.state, derived: derived, spec: spec)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(spec.title)
+                    .font(.subheadline)
+                ProgressView(value: Engine.milestoneProgress(state: store.state, derived: derived, spec: spec))
+                Text("現在 \(texts.current) ／ 目標 \(texts.target)")
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 2)
         }
     }
 
@@ -237,5 +323,179 @@ struct ProductsView: View {
     /// 倍率表示（例：×2.8、×1）
     private func multiplierText(_ value: Double) -> String {
         String(format: "×%g", value)
+    }
+}
+
+// MARK: - 図鑑
+
+struct GlossaryView: View {
+    @EnvironmentObject private var store: GameStore
+
+    var body: some View {
+        let entries = Engine.glossaryEntries(state: store.state)
+        let unlockedCount = entries.filter { $0.unlocked }.count
+        NavigationStack {
+            List {
+                Section {
+                    HStack {
+                        Text("解放")
+                        Spacer()
+                        Text("\(unlockedCount)/\(entries.count)")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                } footer: {
+                    Text("装置は所有すると、用語は目標の達成や出来事で解放されます。")
+                }
+                entrySection("装置", entries.filter { $0.kind == .equipment })
+                entrySection("工程", entries.filter { $0.kind == .process })
+                entrySection("用語", entries.filter { $0.kind == .term })
+            }
+            .navigationTitle("図鑑")
+            .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(for: String.self) { entryId in
+                GlossaryDetailView(entryId: entryId)
+            }
+        }
+    }
+
+    private func entrySection(_ title: String, _ entries: [GlossaryEntryInfo]) -> some View {
+        Section(title) {
+            ForEach(entries) { entry in
+                entryRow(entry)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func entryRow(_ entry: GlossaryEntryInfo) -> some View {
+        if entry.unlocked {
+            NavigationLink(value: entry.id) {
+                HStack(spacing: 8) {
+                    Text(entry.title)
+                    if !entry.isRead {
+                        BadgeView(text: "NEW", systemImage: nil, color: .orange)
+                    }
+                    Spacer()
+                    if let term = Catalog.glossaryTerm(id: entry.id) {
+                        Text(term.category)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        } else {
+            // 未解放は本文を見せない（リンクにしない）
+            HStack(spacing: 8) {
+                Image(systemName: "lock.fill")
+                    .foregroundStyle(.secondary)
+                Text(entry.title)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("未解放")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+struct GlossaryDetailView: View {
+    @EnvironmentObject private var store: GameStore
+
+    let entryId: String
+
+    private var model: EquipmentModel? {
+        Catalog.equipment.first { Catalog.equipmentGlossaryId($0.id) == entryId }
+    }
+
+    private var process: ProcessType? {
+        ProcessType.allCases.first { Catalog.processGlossaryId($0) == entryId }
+    }
+
+    private var term: GlossaryTerm? {
+        Catalog.glossaryTerm(id: entryId)
+    }
+
+    private var title: String {
+        model?.name ?? process?.displayName ?? term?.term ?? "図鑑"
+    }
+
+    var body: some View {
+        List {
+            if let model {
+                equipmentContent(model)
+            } else if let process {
+                processContent(process)
+            } else if let term {
+                termContent(term)
+            }
+        }
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            store.markGlossaryRead(entryId)
+        }
+    }
+
+    @ViewBuilder
+    private func equipmentContent(_ model: EquipmentModel) -> some View {
+        Section("装置") {
+            row("モデル名", model.name)
+            row("価格", MoneyFormat.yen(model.priceYen))
+            row("公称WPH", "\(MoneyFormat.decimal(model.nominalWPH, digits: 0)) WPH")
+            row("対応工程", model.process.displayName)
+        }
+        if let education = Catalog.education(for: model.id) {
+            Section("概要") {
+                bodyText(education.summary)
+            }
+            Section("しくみ") {
+                bodyText(education.mechanism)
+            }
+            Section("豆知識") {
+                bodyText(education.trivia)
+            }
+            Section("主なメーカー") {
+                bodyText(education.makers.joined(separator: "、"))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func processContent(_ process: ProcessType) -> some View {
+        Section("工程について") {
+            bodyText(process.educationText)
+        }
+        Section("前後の工程とのつながり") {
+            bodyText(process.connectionNote)
+        }
+        Section("現実の所要時間") {
+            bodyText(process.realDurationText)
+        }
+    }
+
+    @ViewBuilder
+    private func termContent(_ term: GlossaryTerm) -> some View {
+        Section {
+            BadgeView(text: term.category, systemImage: "book", color: .blue)
+            bodyText(term.body)
+        }
+    }
+
+    private func bodyText(_ text: String) -> some View {
+        Text(text)
+            .font(.callout)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func row(_ title: String, _ value: String) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Text(value)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
     }
 }

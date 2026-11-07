@@ -230,6 +230,10 @@ struct Stats: Codable, Equatable {
     var totalGrossSalesYen: Double = 0
     /// 売上原価の累計
     var totalCogsYen: Double = 0
+    /// マイルストーンid → 達成時の gameHoursElapsed
+    var achievedMilestones: [String: Double] = [:]
+    /// 図鑑で閲覧済みのエントリid
+    var readGlossaryIds: Set<String> = []
 
     enum CodingKeys: String, CodingKey {
         case totalRevenueYen
@@ -243,6 +247,8 @@ struct Stats: Codable, Equatable {
         case totalMarketPenaltyYen
         case totalGrossSalesYen
         case totalCogsYen
+        case achievedMilestones
+        case readGlossaryIds
     }
 }
 
@@ -262,5 +268,7 @@ extension Stats {
         totalMarketPenaltyYen = try container.decodeIfPresent(Double.self, forKey: .totalMarketPenaltyYen) ?? defaults.totalMarketPenaltyYen
         totalGrossSalesYen = try container.decodeIfPresent(Double.self, forKey: .totalGrossSalesYen) ?? defaults.totalGrossSalesYen
         totalCogsYen = try container.decodeIfPresent(Double.self, forKey: .totalCogsYen) ?? defaults.totalCogsYen
+        achievedMilestones = try container.decodeIfPresent([String: Double].self, forKey: .achievedMilestones) ?? defaults.achievedMilestones
+        readGlossaryIds = try container.decodeIfPresent(Set<String>.self, forKey: .readGlossaryIds) ?? defaults.readGlossaryIds
     }
 }
