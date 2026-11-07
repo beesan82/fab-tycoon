@@ -102,6 +102,8 @@ struct EquipmentModel: Identifiable, Equatable {
     let detectionBase: Double
     /// 解放条件（nil なら最初から購入可能）
     let unlockNote: String?
+    /// 解放する研究のid（nil なら研究未実装。unlockNote があれば「準備中」扱い）
+    let unlockResearchId: String?
 
     init(
         id: String,
@@ -113,7 +115,8 @@ struct EquipmentModel: Identifiable, Equatable {
         lithoClass: LithoClass? = nil,
         yieldFactor: Double = 0.95,
         detectionBase: Double = 0,
-        unlockNote: String? = nil
+        unlockNote: String? = nil,
+        unlockResearchId: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -125,6 +128,7 @@ struct EquipmentModel: Identifiable, Equatable {
         self.yieldFactor = yieldFactor
         self.detectionBase = detectionBase
         self.unlockNote = unlockNote
+        self.unlockResearchId = unlockResearchId
     }
 
     func supports(nodeId: String) -> Bool {
@@ -223,7 +227,8 @@ enum Catalog {
                        lithoClass: .duvDry, yieldFactor: 0.950),
         EquipmentModel(id: "L2", name: "ArF液浸露光機", process: .lithography,
                        priceYen: 11_000_000_000, nominalWPH: 275, supportedNodeIds: ["n14", "n7"],
-                       lithoClass: .duvImm, yieldFactor: 0.955, unlockNote: "研究「液浸露光機」"),
+                       lithoClass: .duvImm, yieldFactor: 0.955, unlockNote: "研究「液浸露光機」",
+                       unlockResearchId: "unlock_immersion"),
         EquipmentModel(id: "L3", name: "EUV露光機", process: .lithography,
                        priceYen: 26_000_000_000, nominalWPH: 160, supportedNodeIds: ["n7", "n5", "n3", "n2"],
                        lithoClass: .euv, yieldFactor: 0.965, unlockNote: "研究「EUV露光」"),
@@ -270,7 +275,8 @@ enum Catalog {
                        yieldFactor: 0.950, detectionBase: 0.55),
         EquipmentModel(id: "Q2", name: "電子ビーム検査装置", process: .inspection,
                        priceYen: 4_000_000_000, nominalWPH: 15, supportedNodeIds: ["n14", "n7", "n5"],
-                       yieldFactor: 0.955, detectionBase: 0.70, unlockNote: "研究「EB検査装置」"),
+                       yieldFactor: 0.955, detectionBase: 0.70, unlockNote: "研究「EB検査装置」",
+                       unlockResearchId: "unlock_eb"),
         EquipmentModel(id: "Q3", name: "AI欠陥分類検査装置", process: .inspection,
                        priceYen: 6_000_000_000, nominalWPH: 100, supportedNodeIds: ["n5", "n3", "n2"],
                        yieldFactor: 0.960, detectionBase: 0.82),
@@ -572,6 +578,142 @@ extension ProcessType {
     }
 }
 
+// MARK: - 研究
+
+/// 研究の系統（研究タブのセグメント）
+enum ResearchBranch: String, CaseIterable, Identifiable {
+    case production, quality, operations, platform
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .production: return "生産"
+        case .quality: return "品質"
+        case .operations: return "運用"
+        case .platform: return "基盤"
+        }
+    }
+}
+
+/// 研究完了で得られる効果
+enum ResearchEffect: Equatable {
+    /// 全工程の実効WPHに乗算
+    case throughput(multiplier: Double)
+    /// 稼働率に加算
+    case uptime(addition: Double)
+    /// 各装置の欠陥寄与 (1 − yieldFactor) に乗算。1未満で改善
+    case yieldDefect(multiplier: Double)
+    /// 学習時定数に乗算。1未満で学習が速い
+    case learnWafers(multiplier: Double)
+    /// オフライン効率に加算
+    case offlineEfficiency(addition: Double)
+    /// オフライン上限に加算
+    case offlineCap(additionalSeconds: Double)
+    /// 解放キー（装置モデルID、または "node14"）
+    case unlock(String)
+}
+
+struct ResearchSpec: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let branch: ResearchBranch
+    let costYen: Double
+    /// 実時間（秒）
+    let durationSeconds: Double
+    let prerequisiteId: String?
+    let effect: ResearchEffect
+    /// 効果の表示文（例「全工程の処理速度 +5%」）
+    let effectText: String
+    /// 学習テキスト（2〜3文）
+    let learningText: String
+}
+
+extension Catalog {
+    /// 研究ツリー。並びは研究タブでの表示順
+    static let research: [ResearchSpec] = [
+        // 生産
+        ResearchSpec(
+            id: "throughput_1", name: "スループット改善Ⅰ", branch: .production,
+            costYen: 300_000_000, durationSeconds: 300, prerequisiteId: nil,
+            effect: .throughput(multiplier: 1.05),
+            effectText: "全工程の処理速度 +5%",
+            learningText: "装置の処理能力は、カタログ値だけでなく段取り替えやレシピの組み方で大きく変わる。品種切り替え時の待ち時間を減らし、処理条件を最適化して1枚あたりの時間を詰めるのが、現場のスループット改善の基本。"
+        ),
+        ResearchSpec(
+            id: "throughput_2", name: "スループット改善Ⅱ", branch: .production,
+            costYen: 1_800_000_000, durationSeconds: 1_500, prerequisiteId: "throughput_1",
+            effect: .throughput(multiplier: 1.05),
+            effectText: "全工程の処理速度 +5%",
+            learningText: "次の段階では、複数のウェハをまとめて流すバッチ構成や、チャンバーの並列処理を見直してレシピ自体を短縮する。工程ごとの待ち時間を数秒ずつ削る地道な積み重ねが、ライン全体の生産量を押し上げる。"
+        ),
+        ResearchSpec(
+            id: "uptime_1", name: "稼働率向上Ⅰ", branch: .production,
+            costYen: 800_000_000, durationSeconds: 720, prerequisiteId: nil,
+            effect: .uptime(addition: 0.02),
+            effectText: "稼働率 +2%",
+            learningText: "装置が止まる原因には、計画的な保守のほかに「チョコ停」と呼ばれる短時間の停止の積み重ねがある。部品の摩耗を見越した予防保全と、チョコ停の原因をひとつずつ潰す改善活動で、装置が実際に動いている時間を増やせる。"
+        ),
+        // 品質
+        ResearchSpec(
+            id: "cleanroom", name: "クリーン度向上", branch: .quality,
+            costYen: 1_200_000_000, durationSeconds: 1_080, prerequisiteId: nil,
+            effect: .yieldDefect(multiplier: 0.95),
+            effectText: "各装置の欠陥寄与 −5%",
+            learningText: "微細な回路では、目に見えないパーティクル1個が断線や短絡を起こしてチップを不良にする。空調フィルタや気流の設計、作業者の動線管理でパーティクルを減らすことが、そのまま歩留まりの向上につながる。"
+        ),
+        ResearchSpec(
+            id: "cleaning", name: "洗浄工程改善", branch: .quality,
+            costYen: 500_000_000, durationSeconds: 480, prerequisiteId: nil,
+            effect: .learnWafers(multiplier: 0.8),
+            effectText: "歩留まりの学習速度 +25%",
+            learningText: "ウェハ洗浄は全工程の2〜3割を占めるほど頻繁に行われ、薬液や純水で微粒子・金属汚染・有機物を取り除く。洗浄条件を見直すと欠陥の原因を早く断てるため、量産立ち上げ時の歩留まり改善が速くなる。"
+        ),
+        // 運用
+        ResearchSpec(
+            id: "transport", name: "搬送自動化", branch: .operations,
+            costYen: 1_500_000_000, durationSeconds: 1_200, prerequisiteId: nil,
+            effect: .offlineEfficiency(addition: 0.10),
+            effectText: "オフライン効率 +10%",
+            learningText: "先端ファブでは、ウェハを収めた容器（FOUP）を天井の走行レールで装置間に運ぶAMHS（自動搬送システム）が使われる。人手を介さずに搬送できるため、作業者が少ない時間帯でもラインを止めずに回せる。"
+        ),
+        ResearchSpec(
+            id: "offline_cap_1", name: "オフライン上限Ⅰ", branch: .operations,
+            costYen: 700_000_000, durationSeconds: 600, prerequisiteId: nil,
+            effect: .offlineCap(additionalSeconds: 7_200),
+            effectText: "オフライン上限 +2時間",
+            learningText: "装置の異常検知や搬送、ロット投入を自動化すると、夜間や休日も少人数でラインを回せる。人がいない時間にどれだけ安定して動かせるかが、無人運転の時間を延ばす鍵になる。"
+        ),
+        // 基盤
+        ResearchSpec(
+            id: "unlock_immersion", name: "液浸露光機", branch: .platform,
+            costYen: 2_000_000_000, durationSeconds: 1_800, prerequisiteId: nil,
+            effect: .unlock("L2"),
+            effectText: "ArF液浸露光機（L2）を解放",
+            learningText: "レンズとウェハの間を純水で満たすと、水の屈折率（約1.44）の分だけ開口数を大きくでき、同じ193nmの光でより細かいパターンを描ける。液浸と多重露光の組み合わせが、14nm〜7nm世代を支えた。"
+        ),
+        ResearchSpec(
+            id: "unlock_eb", name: "EB検査装置", branch: .platform,
+            costYen: 2_500_000_000, durationSeconds: 1_800, prerequisiteId: nil,
+            effect: .unlock("Q2"),
+            effectText: "電子ビーム検査装置（Q2）を解放",
+            learningText: "電子ビームは光より波長がはるかに短いため、光学検査では見えない数nm級の微小欠陥まで捉えられる。配線の断線や短絡を電位の明暗として浮かび上がらせることもでき、処理は遅いが見逃しが少ない。"
+        ),
+        ResearchSpec(
+            id: "unlock_14nm", name: "14nmプロセス", branch: .platform,
+            costYen: 4_000_000_000, durationSeconds: 3_600, prerequisiteId: "unlock_immersion",
+            effect: .unlock("node14"),
+            effectText: "14nmプロセスを解放",
+            learningText: "14nm世代では、平面トランジスタからチャネルを立体的なひれ状にしたFinFETへ移行した。ゲートがチャネルを三方から囲むため漏れ電流を抑えられる一方、工程数は大きく増え、製造の難度も一段上がる。"
+        ),
+    ]
+
+    private static let researchIndex: [String: ResearchSpec] =
+        Dictionary(uniqueKeysWithValues: research.map { ($0.id, $0) })
+
+    static func research(id: String) -> ResearchSpec? { researchIndex[id] }
+}
+
 // MARK: - マイルストーン
 
 /// マイルストーンの達成条件
@@ -792,7 +934,7 @@ extension Catalog {
         ),
         GlossaryTerm(
             id: "term.subsidy", term: "補助金", category: "経営",
-            body: "国や自治体が企業の投資の一部を負担する制度。半導体は経済安全保障の要とされ、日本・米国・欧州などが巨額の補助金でファブを誘致している。このゲームでは累計設備投資の1/3を上限に申請でき、審査にゲーム内5日、交付後は30日のクールダウンがある。",
+            body: "国や自治体が企業の投資の一部を負担する制度。半導体は経済安全保障の要とされ、日本・米国・欧州などが巨額の補助金でファブを誘致している。このゲームでは累計設備投資の1/3を上限に申請でき、審査に12分、交付後は72分のクールダウンがある。",
             unlock: .milestone("first_investment")
         ),
         GlossaryTerm(

@@ -128,8 +128,12 @@ enum Engine {
     /// 実1秒 = ゲーム内10分（×600）。生産単位は WPH（ゲーム内1時間あたり枚数）
     static let gameMinutesPerRealSecond = 10.0
     static let inventoryCap = 200_000.0
-    static let offlineCapSeconds = 4.0 * 3_600
-    static let offlineEfficiency = 0.5
+    /// 1ゲーム時間あたりの実秒数（= 6秒）
+    static let realSecondsPerGameHour = 60.0 / gameMinutesPerRealSecond
+    /// オフライン上限の基礎値（研究で加算される）
+    static let baseOfflineCapSeconds = 4.0 * 3_600
+    /// オフライン効率の基礎値（研究で加算される）
+    static let baseOfflineEfficiency = 0.5
     static let offlineStepSeconds = 60.0
     /// 市況サイクル周期（ゲーム内分。実2.5時間）
     static let marketCycleMinutes = 90_000.0
@@ -151,10 +155,10 @@ enum Engine {
     static let detectionHeadroomBonus = 0.30
     /// 市場不良1個あたりの返品・対応コスト（販売額に対する倍率）
     static let marketDefectPenaltyRate = 1.5
-    /// 補助金の審査期間（ゲーム内5日）
-    static let subsidyReviewHours = 120.0
-    /// 補助金のクールダウン（前回交付からゲーム内30日）
-    static let subsidyCooldownHours = 720.0
+    /// 補助金の審査期間（実12分）
+    static let subsidyReviewSeconds = 720.0
+    /// 補助金のクールダウン（前回交付から実72分）
+    static let subsidyCooldownSeconds = 4_320.0
     /// 交付上限は累計設備投資の1/3
     static let subsidyRate = 1.0 / 3.0
     /// 交付可能額が1000万円未満なら申請不可
@@ -228,17 +232,19 @@ enum Engine {
         return max(1, node.passes[process] ?? 1)
     }
 
-    /// 1台あたりの実効WPH（稼働率適用前）。現在ノード非対応なら 0
+    /// 1台あたりの実効WPH（稼働率適用前、研究のスループット倍率は適用済み）。現在ノード非対応なら 0
     static func unitWPH(model: EquipmentModel, level: Int, state: GameState) -> Double {
         let node = currentNode(state: state)
         guard isActive(model, nodeId: node.id) else { return 0 }
         let passes = passCount(for: model.process, node: node, topLitho: topLithoClass(state: state))
-        return model.nominalWPH * levelMultiplier(level) / Double(passes)
+        let throughput = researchEffects(state: state).throughputMultiplier
+        return model.nominalWPH * levelMultiplier(level) / Double(passes) * throughput
     }
 
     static func derived(state: GameState) -> DerivedState {
         let node = currentNode(state: state)
         let topLitho = topLithoClass(state: state)
+        let fx = researchEffects(state: state)
 
         var wph: [ProcessType: Double] = [:]
         var units: [ProcessType: Int] = [:]
@@ -252,11 +258,13 @@ enum Engine {
         var detectionBase = 0.0
         for instance in state.fab.equipment {
             guard let model = Catalog.model(id: instance.modelId), isActive(model, nodeId: node.id) else { continue }
-            let passes = passCount(for: model.process, node: node, topLitho: topLitho)
-            let unit = model.nominalWPH * levelMultiplier(instance.level) / Double(passes)
+            // スループット倍率は unitWPH 側に含まれる（ここで重ねて掛けない）
+            let unit = unitWPH(model: model, level: instance.level, state: state)
             wph[model.process, default: 0] += unit
             units[model.process, default: 0] += 1
-            weightedFactor[model.process, default: 0] += unit * effectiveYieldFactor(model, level: instance.level)
+            // 研究による欠陥寄与の縮小は装置ごとの (1 − 実効寄与) に掛ける
+            let factor = 1 - (1 - effectiveYieldFactor(model, level: instance.level)) * fx.yieldDefectMultiplier
+            weightedFactor[model.process, default: 0] += unit * factor
             if model.process == .inspection {
                 detectionBase = max(detectionBase, model.detectionBase)
             }
@@ -265,7 +273,7 @@ enum Engine {
         for process in ProcessType.allCases {
             let raw = wph[process] ?? 0
             processYields[process] = (units[process] ?? 0) > 0 && raw > 0 ? (weightedFactor[process] ?? 0) / raw : 0
-            wph[process] = raw * uptime
+            wph[process] = raw * min(uptime + fx.uptimeAddition, 0.99)
         }
 
         let lineWPH = ProcessType.allCases.map { wph[$0] ?? 0 }.min() ?? 0
@@ -277,7 +285,7 @@ enum Engine {
 
         // 学習曲線は「欠陥の縮小」として効く（開始時 1.0）
         let learned = state.learningWafers[node.id] ?? 0
-        let learnedYield = node.yieldMax - (node.yieldMax - node.yieldInit) * exp(-learned / node.learnWafers)
+        let learnedYield = node.yieldMax - (node.yieldMax - node.yieldInit) * exp(-learned / (node.learnWafers * fx.learnWafersMultiplier))
         let learningDefectScale = node.yieldInit < 1 ? (1 - learnedYield) / (1 - node.yieldInit) : 0
         let processProduct = ProcessType.allCases.reduce(1.0) { $0 * (processYields[$1] ?? 0) }
         let rawLineYield = 1 - (1 - processProduct) * learningDefectScale
@@ -376,8 +384,8 @@ enum Engine {
 
         state.stats.playSeconds += dtRealSeconds
         state.gameHoursElapsed += gameMinutes / 60
-        // 補助金の交付はオンライン中のみ進める。offlineProgress は frozenPriceYen を渡して
-        // tick を呼ぶので、frozenPriceYen が nil のときだけ精算する（オフラインでは審査が進まない）
+        // 補助金の審査は実時間で進む（オフライン中も時計は進むので、復帰直後の tick で交付される）。
+        // offlineProgress は frozenPriceYen を渡して tick を呼ぶので、そのシミュレーション中は精算しない
         if frozenPriceYen == nil {
             settleSubsidyIfDue(state: &state)
         }
@@ -459,9 +467,19 @@ enum Engine {
 
     // MARK: オフライン
 
+    /// オフライン上限（基礎値＋研究による加算）
+    static func offlineCapSeconds(state: GameState) -> Double {
+        baseOfflineCapSeconds + researchEffects(state: state).offlineCapAdditionalSeconds
+    }
+
+    /// オフライン効率（基礎値＋研究による加算）
+    static func offlineEfficiency(state: GameState) -> Double {
+        baseOfflineEfficiency + researchEffects(state: state).offlineEfficiencyAddition
+    }
+
     static func offlineProgress(state: inout GameState, elapsedRealSeconds: Double) -> OfflineReport {
-        let capped = min(max(elapsedRealSeconds, 0), offlineCapSeconds)
-        let effective = capped * offlineEfficiency
+        let capped = min(max(elapsedRealSeconds, 0), offlineCapSeconds(state: state))
+        let effective = capped * offlineEfficiency(state: state)
         let frozenPrice = state.market.recentAvgPriceYen
         // オフライン中はゲーム内時計・市況位相・プレイ時間を進めない（tick が加算した分をループ後に戻す）
         let savedGameHours = state.gameHoursElapsed
@@ -510,13 +528,27 @@ enum Engine {
     }
 
     /// 購入できない理由（対応ノード外・研究が必要）
-    static func lockReasons(model: EquipmentModel, nodeId: String) -> [String] {
+    static func lockReasons(model: EquipmentModel, state: GameState) -> [String] {
+        let nodeId = state.fab.currentNodeId
+        // 解放研究があり、完了済みか
+        let researchDone = model.unlockResearchId.map { state.research.completedIds.contains($0) } ?? false
         var reasons: [String] = []
         if !isActive(model, nodeId: nodeId) {
-            let nodeName = Catalog.node(id: nodeId)?.displayName ?? nodeId
-            reasons.append("対応ノード外（\(nodeName)非対応）")
+            if researchDone,
+               let firstNode = Catalog.nodes.first(where: { model.supportedNodeIds.contains($0.id) }) {
+                // 研究で解放済み：稼働できる最も若いノードを案内する
+                reasons.append("\(firstNode.displayName) で稼働")
+            } else {
+                let nodeName = Catalog.node(id: nodeId)?.displayName ?? nodeId
+                reasons.append("対応ノード外（\(nodeName)非対応）")
+            }
         }
-        if let note = model.unlockNote {
+        if model.unlockResearchId != nil {
+            if !researchDone {
+                reasons.append("\(model.unlockNote ?? "")が必要（研究で解放）")
+            }
+        } else if let note = model.unlockNote {
+            // 研究がまだ実装されていない装置
             reasons.append("\(note)が必要（研究で解放・準備中）")
         }
         return reasons
@@ -524,7 +556,7 @@ enum Engine {
 
     static func buyBlockReason(state: GameState, modelId: String) -> BuyBlockReason? {
         guard let model = Catalog.model(id: modelId) else { return .unknownModel }
-        let locks = lockReasons(model: model, nodeId: state.fab.currentNodeId)
+        let locks = lockReasons(model: model, state: state)
         if !locks.isEmpty { return .locked(locks) }
         if state.fab.freeSlots <= 0 { return .noFreeSlot }
         if state.cashYen < model.priceYen {
@@ -704,34 +736,67 @@ enum Engine {
     }
 
     /// 申請できない理由（nil なら申請可能）
-    static func subsidyBlockReason(state: GameState) -> String? {
-        if state.subsidy.pendingGrantAtHours != nil { return "審査中です" }
-        if let last = state.subsidy.lastGrantAtHours,
-           state.gameHoursElapsed - last < subsidyCooldownHours { return "クールダウン中です" }
+    static func subsidyBlockReason(state: GameState, now: Date = Date()) -> String? {
+        if state.subsidy.pendingGrantAt != nil { return "審査中です" }
+        if subsidyCooldownRemainingSeconds(state: state, now: now) != nil { return "クールダウン中です" }
         if subsidyCapYen(state: state) < subsidyMinimumGrantYen { return "交付可能額が1,000万円未満のため申請できません" }
         return nil
     }
 
-    static func canApplySubsidy(state: GameState) -> Bool { subsidyBlockReason(state: state) == nil }
+    static func canApplySubsidy(state: GameState, now: Date = Date()) -> Bool {
+        subsidyBlockReason(state: state, now: now) == nil
+    }
 
     @discardableResult
-    static func applySubsidy(state: inout GameState) -> Bool {
-        guard canApplySubsidy(state: state) else { return false }
+    static func applySubsidy(state: inout GameState, now: Date = Date()) -> Bool {
+        guard canApplySubsidy(state: state, now: now) else { return false }
         // 申請時点で額を確定する
         state.subsidy.pendingGrantYen = subsidyCapYen(state: state)
-        state.subsidy.pendingGrantAtHours = state.gameHoursElapsed + subsidyReviewHours
+        state.subsidy.pendingGrantAt = now.addingTimeInterval(subsidyReviewSeconds)
         return true
     }
 
-    /// 審査期間が明けていれば交付する
-    static func settleSubsidyIfDue(state: inout GameState) {
-        guard let due = state.subsidy.pendingGrantAtHours, state.gameHoursElapsed >= due else { return }
+    /// 審査期間が明けていれば交付する（実時間基準なので何度呼んでもよい）
+    static func settleSubsidyIfDue(state: inout GameState, now: Date = Date()) {
+        guard let due = state.subsidy.pendingGrantAt, due <= now else { return }
         let grant = state.subsidy.pendingGrantYen
         state.cashYen += grant
         state.subsidy.totalReceivedYen += grant
-        state.subsidy.lastGrantAtHours = state.gameHoursElapsed
+        state.subsidy.lastGrantAt = now
         state.subsidy.pendingGrantYen = 0
-        state.subsidy.pendingGrantAtHours = nil
+        state.subsidy.pendingGrantAt = nil
+    }
+
+    /// 審査の残り時間（実秒）。審査中でなければ nil
+    static func subsidyReviewRemainingSeconds(state: GameState, now: Date = Date()) -> Double? {
+        guard let due = state.subsidy.pendingGrantAt else { return nil }
+        return max(0, due.timeIntervalSince(now))
+    }
+
+    /// 次回申請までのクールダウン残り時間（実秒）。クールダウン中でなければ nil
+    static func subsidyCooldownRemainingSeconds(state: GameState, now: Date = Date()) -> Double? {
+        guard let last = state.subsidy.lastGrantAt else { return nil }
+        let remaining = subsidyCooldownSeconds - now.timeIntervalSince(last)
+        return remaining > 0 ? remaining : nil
+    }
+
+    /// v2以前のセーブの補助金時刻（gameHoursElapsed 基準）を実時刻へ移す。
+    /// 残り審査時間・残りクールダウンはプレイ中の換算（1ゲーム時間 = 実6秒）のまま引き継ぐ
+    static func migrateSubsidyTimeline(state: inout GameState, now: Date) {
+        if let hours = state.subsidy.pendingGrantAtHours {
+            if state.subsidy.pendingGrantAt == nil {
+                let remaining = (hours - state.gameHoursElapsed) * realSecondsPerGameHour
+                state.subsidy.pendingGrantAt = now.addingTimeInterval(remaining)
+            }
+            state.subsidy.pendingGrantAtHours = nil
+        }
+        if let hours = state.subsidy.lastGrantAtHours {
+            if state.subsidy.lastGrantAt == nil {
+                let elapsed = (state.gameHoursElapsed - hours) * realSecondsPerGameHour
+                state.subsidy.lastGrantAt = now.addingTimeInterval(-elapsed)
+            }
+            state.subsidy.lastGrantAtHours = nil
+        }
     }
 
     // 緊急救済枠：工程の装置がなくなりラインが止まり、買い戻す資金もない詰み状態からの救済
@@ -741,7 +806,7 @@ enum Engine {
     /// 指定工程で、現行ノードで購入可能な機種（lockReasons が空）の最安価格。該当機種がなければ nil
     static func cheapestModelPriceYen(state: GameState, process: ProcessType) -> Double? {
         Catalog.models(for: process)
-            .filter { lockReasons(model: $0, nodeId: state.fab.currentNodeId).isEmpty }
+            .filter { lockReasons(model: $0, state: state).isEmpty }
             .map { $0.priceYen }
             .min()
     }
@@ -771,15 +836,109 @@ enum Engine {
     }
 
     @discardableResult
-    static func applyEmergencySubsidy(state: inout GameState) -> Bool {
+    static func applyEmergencySubsidy(state: inout GameState, now: Date = Date()) -> Bool {
         guard let amount = emergencyGrantYen(state: state) else { return false }
         // 審査なしで即時交付。受給累計に数え、通常補助金のクールダウン起算点もここに置く
-        // （緊急交付を使うと通常申請も30日不可）。緊急枠自体はクールダウンで止めない
+        // （緊急交付を使うと通常申請も72分不可）。緊急枠自体はクールダウンで止めない
         // （複数工程が止まっている場合に繰り返し使って立て直すための救済措置のため）。
         state.cashYen += amount
         state.subsidy.totalReceivedYen += amount
-        state.subsidy.lastGrantAtHours = state.gameHoursElapsed
+        state.subsidy.lastGrantAt = now
         return true
+    }
+
+    // MARK: 研究
+
+    /// 完了済み研究の効果を集約したもの
+    struct ResearchEffects: Equatable {
+        var throughputMultiplier: Double = 1
+        var uptimeAddition: Double = 0
+        var yieldDefectMultiplier: Double = 1
+        var learnWafersMultiplier: Double = 1
+        var offlineEfficiencyAddition: Double = 0
+        var offlineCapAdditionalSeconds: Double = 0
+        var unlockedKeys: Set<String> = []
+    }
+
+    /// 完了済み研究の効果を畳み込む（倍率系は乗算、加算系は加算）
+    static func researchEffects(state: GameState) -> ResearchEffects {
+        var fx = ResearchEffects()
+        for spec in Catalog.research where state.research.completedIds.contains(spec.id) {
+            switch spec.effect {
+            case .throughput(let multiplier):
+                fx.throughputMultiplier *= multiplier
+            case .uptime(let addition):
+                fx.uptimeAddition += addition
+            case .yieldDefect(let multiplier):
+                fx.yieldDefectMultiplier *= multiplier
+            case .learnWafers(let multiplier):
+                fx.learnWafersMultiplier *= multiplier
+            case .offlineEfficiency(let addition):
+                fx.offlineEfficiencyAddition += addition
+            case .offlineCap(let additionalSeconds):
+                fx.offlineCapAdditionalSeconds += additionalSeconds
+            case .unlock(let key):
+                fx.unlockedKeys.insert(key)
+            }
+        }
+        return fx
+    }
+
+    static func isResearchUnlocked(state: GameState, key: String) -> Bool {
+        researchEffects(state: state).unlockedKeys.contains(key)
+    }
+
+    /// 研究を開始できない理由（nil なら開始可能）
+    static func researchBlockReason(state: GameState, researchId: String) -> String? {
+        guard let spec = Catalog.research(id: researchId) else { return "不明な研究です" }
+        if state.research.completedIds.contains(researchId) { return "完了済みです" }
+        if let current = state.research.inProgressId {
+            return current == researchId ? "研究中です" : "他の研究が進行中です"
+        }
+        if let prerequisite = spec.prerequisiteId, !state.research.completedIds.contains(prerequisite) {
+            return "前提の研究が未完了です"
+        }
+        if state.cashYen < spec.costYen { return "資金が不足しています" }
+        return nil
+    }
+
+    static func canStartResearch(state: GameState, researchId: String) -> Bool {
+        researchBlockReason(state: state, researchId: researchId) == nil
+    }
+
+    /// 費用を払って研究を開始する（同時に進められるのは1件）
+    @discardableResult
+    static func startResearch(state: inout GameState, researchId: String, now: Date) -> Bool {
+        guard canStartResearch(state: state, researchId: researchId),
+              let spec = Catalog.research(id: researchId)
+        else { return false }
+        state.cashYen -= spec.costYen
+        state.research.inProgressId = researchId
+        state.research.inProgressStartedAt = now
+        return true
+    }
+
+    /// 進行中の研究の残り時間（実秒）。進行中がなければ nil
+    static func researchRemainingSeconds(state: GameState, now: Date) -> Double? {
+        guard let id = state.research.inProgressId,
+              let spec = Catalog.research(id: id),
+              let startedAt = state.research.inProgressStartedAt
+        else { return nil }
+        return max(0, startedAt.addingTimeInterval(spec.durationSeconds).timeIntervalSince(now))
+    }
+
+    /// 研究は実時間で進む（オフライン中も進む）。期限が来ていれば完了させ、その id を返す
+    @discardableResult
+    static func settleResearchIfDue(state: inout GameState, now: Date) -> String? {
+        guard let id = state.research.inProgressId,
+              let remaining = researchRemainingSeconds(state: state, now: now),
+              remaining <= 0
+        else { return nil }
+        state.research.completedIds.insert(id)
+        state.research.inProgressId = nil
+        state.research.inProgressStartedAt = nil
+        state.research.hasUnseenCompletion = true
+        return id
     }
 
     // MARK: プレビュー
@@ -1073,7 +1232,7 @@ extension Engine {
         // 4. ボトルネックに最安の購入可能機を足す
         if let process = derived.bottleneck,
            let model = Catalog.models(for: process)
-               .filter({ lockReasons(model: $0, nodeId: state.fab.currentNodeId).isEmpty })
+               .filter({ lockReasons(model: $0, state: state).isEmpty })
                .min(by: { $0.priceYen < $1.priceYen }) {
             let after = lineWPHAfterAdding(state: state, modelId: model.id)
             if after > derived.lineWPH + 1e-9 {

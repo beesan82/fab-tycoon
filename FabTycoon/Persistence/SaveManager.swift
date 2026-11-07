@@ -89,6 +89,10 @@ struct SaveManager {
         lastLoadedOriginalVersion = originalVersion
         if state.schemaVersion < GameState.currentSchemaVersion {
             // v1 → v2：新フィールドはデコーダのデフォルトで補完済み
+            if originalVersion < 3 {
+                // v2 → v3：補助金の時刻をゲーム内時間基準から実時刻へ移す
+                Engine.migrateSubsidyTimeline(state: &state, now: Date())
+            }
             state.schemaVersion = GameState.currentSchemaVersion
         }
         return state

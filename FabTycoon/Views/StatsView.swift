@@ -163,7 +163,7 @@ struct StatsView: View {
                 Label("ラインが停止しています", systemImage: "exclamationmark.triangle.fill")
                     .font(.headline)
                     .foregroundStyle(.red)
-                Text("工程の装置がなくなりラインが止まると、この緊急枠で立て直しに必要な分だけ審査なしで即時交付されます。通常の補助金とクールダウンを共有します（緊急交付後は通常申請も30日不可）。")
+                Text("工程の装置がなくなりラインが止まると、この緊急枠で立て直しに必要な分だけ審査なしで即時交付されます。通常の補助金とクールダウンを共有します（緊急交付後は通常申請も72分不可）。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Button(role: .destructive) {
@@ -182,16 +182,17 @@ struct StatsView: View {
     @ViewBuilder
     private var subsidyStatus: some View {
         let subsidy = store.state.subsidy
-        if let due = subsidy.pendingGrantAtHours {
-            Label("審査中：交付予定 \(MoneyFormat.yen(subsidy.pendingGrantYen))（あと\(daysLeft(until: due))日）",
+        // body は store の更新（tick）ごとに再評価されるので、残り時間は Date() で求めてよい
+        let now = Date()
+        if let remaining = Engine.subsidyReviewRemainingSeconds(state: store.state, now: now) {
+            Label("審査中：交付予定 \(MoneyFormat.yen(subsidy.pendingGrantYen))（あと \(MoneyFormat.duration(remaining))）",
                   systemImage: "hourglass")
                 .foregroundStyle(.orange)
-        } else if let last = subsidy.lastGrantAtHours,
-                  store.state.gameHoursElapsed - last < Engine.subsidyCooldownHours {
-            Label("次回申請可能まで あと\(daysLeft(until: last + Engine.subsidyCooldownHours))日",
+        } else if let remaining = Engine.subsidyCooldownRemainingSeconds(state: store.state, now: now) {
+            Label("次回申請可能まで あと \(MoneyFormat.duration(remaining))",
                   systemImage: "clock")
                 .foregroundStyle(.secondary)
-        } else if let reason = Engine.subsidyBlockReason(state: store.state) {
+        } else if let reason = Engine.subsidyBlockReason(state: store.state, now: now) {
             Text(reason)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
@@ -204,11 +205,6 @@ struct StatsView: View {
             }
             .buttonStyle(.borderedProminent)
         }
-    }
-
-    /// 指定時刻（gameHoursElapsed 基準）までの残り日数（ゲーム内、切り上げ）
-    private func daysLeft(until hours: Double) -> Int {
-        max(0, Int(ceil((hours - store.state.gameHoursElapsed) / 24)))
     }
 }
 

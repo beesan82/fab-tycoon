@@ -5,6 +5,7 @@ enum AppTab: Hashable {
     case line
     case shop
     case products
+    case research
     case glossary
     case stats
 }
@@ -41,6 +42,9 @@ final class GameStore: ObservableObject {
         loadedOriginalVersion = manager.lastLoadedOriginalVersion
         if let saved {
             loaded = saved
+            // 研究・補助金の審査は実時間で進むので、不在中に期限が来た分を先に精算する
+            Engine.settleResearchIfDue(state: &loaded, now: now)
+            Engine.settleSubsidyIfDue(state: &loaded, now: now)
             let elapsed = now.timeIntervalSince(saved.lastSavedAt)
             if elapsed > Self.offlineThreshold {
                 report = Engine.offlineProgress(state: &loaded, elapsedRealSeconds: elapsed)
@@ -82,6 +86,7 @@ final class GameStore: ObservableObject {
         lastTick = now
         guard dt > 0 else { return }
         Engine.tick(state: &state, dtRealSeconds: dt)
+        Engine.settleResearchIfDue(state: &state, now: now)
         refresh()
         if now.timeIntervalSince(lastSave) >= Self.autosaveInterval {
             save()
@@ -93,6 +98,9 @@ final class GameStore: ObservableObject {
         case .active:
             let now = Date()
             let gap = now.timeIntervalSince(lastTick)
+            // 不在中に期限が来た研究・補助金を、オフライン進行より先に精算する
+            Engine.settleResearchIfDue(state: &state, now: now)
+            Engine.settleSubsidyIfDue(state: &state, now: now)
             if gap > Self.offlineThreshold {
                 offlineReport = Engine.offlineProgress(state: &state, elapsedRealSeconds: gap)
             } else if gap > 0 {
@@ -202,6 +210,19 @@ final class GameStore: ObservableObject {
         let ok = Engine.applyEmergencySubsidy(state: &state)
         refresh()
         return ok
+    }
+
+    @discardableResult
+    func startResearch(_ researchId: String) -> Bool {
+        let ok = Engine.startResearch(state: &state, researchId: researchId, now: Date())
+        refresh()
+        return ok
+    }
+
+    /// 研究タブを開いたら完了バッジを消す
+    func markResearchCompletionSeen() {
+        guard state.research.hasUnseenCompletion else { return }
+        state.research.hasUnseenCompletion = false
     }
 
     func openShop(for process: ProcessType?) {

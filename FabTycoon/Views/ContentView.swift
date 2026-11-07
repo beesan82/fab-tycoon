@@ -22,6 +22,10 @@ struct ContentView: View {
                 ProductsView()
                     .tabItem { Label("製品", systemImage: "shippingbox") }
                     .tag(AppTab.products)
+                ResearchView()
+                    .tabItem { Label("研究", systemImage: "flask") }
+                    .tag(AppTab.research)
+                    .badge(store.state.research.hasUnseenCompletion ? Text("!") : nil)
                 GlossaryView()
                     .tabItem { Label("図鑑", systemImage: "book") }
                     .tag(AppTab.glossary)
@@ -95,6 +99,117 @@ struct HeaderView: View {
         .background(.bar)
         .sheet(isPresented: $showingSettings) {
             SettingsView()
+        }
+    }
+}
+
+// MARK: - 研究
+
+struct ResearchView: View {
+    @EnvironmentObject private var store: GameStore
+
+    @State private var branch: ResearchBranch = .production
+
+    var body: some View {
+        // body は store の更新（tick）ごとに再評価されるので、残り時間は Date() で求めてよい
+        let now = Date()
+        List {
+            Section {
+                Picker("系統", selection: $branch) {
+                    ForEach(ResearchBranch.allCases) { branch in
+                        Text(branch.displayName).tag(branch)
+                    }
+                }
+                .pickerStyle(.segmented)
+            } footer: {
+                Text("研究は同時に1件まで。実時間で進み、アプリを閉じている間も進みます。")
+            }
+            Section {
+                ForEach(Catalog.research.filter { $0.branch == branch }) { spec in
+                    researchRow(spec, now: now)
+                }
+            }
+        }
+        .onAppear {
+            store.markResearchCompletionSeen()
+        }
+    }
+
+    private func researchRow(_ spec: ResearchSpec, now: Date) -> some View {
+        let research = store.state.research
+        let isCompleted = research.completedIds.contains(spec.id)
+        let isInProgress = research.inProgressId == spec.id
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(spec.name)
+                    .font(.headline)
+                Spacer()
+                statusLabel(isCompleted: isCompleted, isInProgress: isInProgress)
+            }
+            if isInProgress {
+                let remaining = Engine.researchRemainingSeconds(state: store.state, now: now) ?? 0
+                VStack(alignment: .leading, spacing: 4) {
+                    ProgressView(value: spec.durationSeconds > 0
+                                 ? min(max(1 - remaining / spec.durationSeconds, 0), 1) : 1)
+                    Text("あと \(MoneyFormat.duration(remaining))")
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.orange)
+                }
+            }
+            Text(spec.effectText)
+                .font(.subheadline.weight(.semibold))
+            if let prerequisiteId = spec.prerequisiteId {
+                Text("前提: \(Catalog.research(id: prerequisiteId)?.name ?? prerequisiteId)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Text("費用 \(MoneyFormat.yen(spec.costYen))・約 \(MoneyFormat.duration(spec.durationSeconds))")
+                .font(.caption)
+                .monospacedDigit()
+            Text(spec.learningText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if !isCompleted && !isInProgress {
+                startArea(spec)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    @ViewBuilder
+    private func statusLabel(isCompleted: Bool, isInProgress: Bool) -> some View {
+        if isCompleted {
+            Label("完了", systemImage: "checkmark.circle.fill")
+                .font(.caption.bold())
+                .foregroundStyle(.green)
+        } else if isInProgress {
+            Label("研究中", systemImage: "hourglass")
+                .font(.caption.bold())
+                .foregroundStyle(.orange)
+        } else {
+            Text("未着手")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func startArea(_ spec: ResearchSpec) -> some View {
+        let canStart = Engine.canStartResearch(state: store.state, researchId: spec.id)
+        Button {
+            _ = store.startResearch(spec.id)
+        } label: {
+            Text("研究を開始する")
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(!canStart)
+        if !canStart, let reason = Engine.researchBlockReason(state: store.state, researchId: spec.id) {
+            Text(reason)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 }
@@ -236,10 +351,10 @@ struct OfflineReportSheet: View {
     let report: OfflineReport
     let onClose: () -> Void
 
-    /// 例：「効率50%・上限4時間」（Engine の定数から組み立てる）
+    /// 例：「効率50%・上限4時間」（研究の効果を含めて Engine から組み立てる）
     private var conditionText: String {
-        let efficiency = Int(Engine.offlineEfficiency * 100)
-        let capHours = Int(Engine.offlineCapSeconds / 3_600)
+        let efficiency = Int((Engine.offlineEfficiency(state: store.state) * 100).rounded())
+        let capHours = Int(Engine.offlineCapSeconds(state: store.state) / 3_600)
         return "効率\(efficiency)%・上限\(capHours)時間"
     }
 

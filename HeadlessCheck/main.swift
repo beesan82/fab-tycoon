@@ -98,8 +98,8 @@ check(state.market.gameTimeMinutes == marketMinutesBeforeOffline, "オフライ�
 check(state.stats.playSeconds == playSecondsBeforeOffline, "オフライン前後でプレイ時間（stats.playSeconds）が変わらない")
 
 // 0.2.0: スキーマ・バランス定数
-print("== 0.2.0. スキーマ・バランス定数 ==")
-check(GameState.initial().schemaVersion == 2, "新規ゲームの schemaVersion は 2")
+print("== 0.2.0. スキーマ・バランス定数（schemaVersion は 0.4.0 で 3） ==")
+check(GameState.initial().schemaVersion == 3, "新規ゲームの schemaVersion は 3")
 check(Catalog.node(id: "n28")?.learnWafers == 6_000, "28nm の learnWafers は 6,000")
 check(Engine.marketCycleMinutes == 90_000, "市況周期は 90,000 ゲーム内分")
 check(Engine.walkStep == 0.02, "ランダムウォーク幅は ±2%")
@@ -184,7 +184,7 @@ writeObject(v1Object, to: v1Dir.appendingPathComponent(SaveManager.fileName))
 var v1Manager = SaveManager(directory: v1Dir)
 let v1Loaded = v1Manager.load()
 check(v1Loaded != nil, "v1 セーブを読み込める")
-check(v1Loaded?.schemaVersion == 2, "v1 セーブは schemaVersion 2 に移行される")
+check(v1Loaded?.schemaVersion == 3, "v1 セーブは schemaVersion 3 に移行される")
 check(v1Manager.lastLoadedOriginalVersion == 1, "v1 セーブの元バージョンは 1")
 
 // schemaVersion キー自体が無いセーブ
@@ -325,5 +325,190 @@ roundTripState.stats.readGlossaryIds.insert("term.wafer")
 let roundTripData = try? checkEncoder.encode(roundTripState)
 let roundTripDecoded = roundTripData.flatMap { try? checkDecoder.decode(GameState.self, from: $0) }
 check(roundTripDecoded?.stats == roundTripState.stats, "readGlossaryIds を含む Stats がエンコード→デコードで一致")
+
+// 0.4.0: 研究ツリー・補助金の実時間化
+let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+
+/// 研究を開始し、所要時間ちょうどで完了させる。完了時刻を返す
+@discardableResult
+func completeResearch(_ s: inout GameState, _ researchId: String, startAt start: Date) -> Date {
+    guard let spec = Catalog.research(id: researchId) else { fail("研究 \(researchId) がカタログに無い") }
+    check(Engine.startResearch(state: &s, researchId: researchId, now: start), "\(researchId) を開始できた")
+    let end = start.addingTimeInterval(spec.durationSeconds)
+    check(Engine.settleResearchIfDue(state: &s, now: end) == researchId, "\(researchId) が所要時間で完了")
+    return end
+}
+
+print("== 0.4.0. 研究カタログ ==")
+let unlockCount = Catalog.research.filter { if case .unlock = $0.effect { return true } else { return false } }.count
+check(Catalog.research.count == 10, "研究は10項目")
+check(Catalog.research.count - unlockCount == 7, "効果系の研究は7項目")
+check(unlockCount == 3, "解放系の研究は3項目")
+
+print("== 0.4.0. 研究の開始 ==")
+var researchState = GameState.initial()
+let cashBeforeResearch = researchState.cashYen
+check(Engine.startResearch(state: &researchState, researchId: "throughput_1", now: t0), "throughput_1 を開始できた")
+check(cashBeforeResearch - researchState.cashYen == 300_000_000, "研究費 3億円がちょうど引かれた")
+check(!Engine.startResearch(state: &researchState, researchId: "cleaning", now: t0), "研究中は他の研究（cleaning）を開始できない")
+check(Engine.researchBlockReason(state: researchState, researchId: "cleaning") == "他の研究が進行中です", "研究中の理由は「他の研究が進行中です」")
+check(!Engine.canStartResearch(state: researchState, researchId: "throughput_2"), "前提未完了の throughput_2 は開始できない")
+check(Engine.researchBlockReason(state: GameState.initial(), researchId: "throughput_2") == "前提の研究が未完了です",
+      "研究中でなくても、前提未完了の理由は「前提の研究が未完了です」")
+
+print("== 0.4.0. 研究の完了と効果 ==")
+check(Engine.settleResearchIfDue(state: &researchState, now: t0.addingTimeInterval(299)) == nil, "299秒後はまだ完了しない")
+check(Engine.settleResearchIfDue(state: &researchState, now: t0.addingTimeInterval(300)) == "throughput_1", "300秒後に throughput_1 が完了")
+check(researchState.research.completedIds.contains("throughput_1"), "completedIds に throughput_1 が入る")
+check(researchState.research.inProgressId == nil && researchState.research.hasUnseenCompletion, "完了後は進行中なし・未確認バッジあり")
+let throughputDerived = Engine.derived(state: researchState)
+print("  ラインWPH: \(num(throughputDerived.lineWPH, 4))")
+check(abs(throughputDerived.lineWPH - 8.925) < 1e-6, "スループット改善Ⅰでラインが 8.925 WPH（8.5 × 1.05）")
+
+print("== 0.4.0. オフライン中の研究進行 ==")
+let researchSaveDir = makeDirectory("research-offline")
+var researchSaveManager = SaveManager(directory: researchSaveDir)
+var offlineResearchState = GameState.initial()
+check(Engine.startResearch(state: &offlineResearchState, researchId: "throughput_1", now: t0), "throughput_1 を開始できた")
+do {
+    try researchSaveManager.save(offlineResearchState)
+} catch {
+    fail("セーブできない: \(error)")
+}
+let researchSaveURL = researchSaveDir.appendingPathComponent(SaveManager.fileName)
+guard let researchSavedData = try? Data(contentsOf: researchSaveURL),
+      var researchSavedObject = (try? JSONSerialization.jsonObject(with: researchSavedData)) as? [String: Any],
+      var researchSavedResearch = researchSavedObject["research"] as? [String: Any]
+else { fail("保存した research を辞書として取り出せない") }
+researchSavedResearch["inProgressStartedAt"] = ISO8601DateFormatter().string(from: t0.addingTimeInterval(-400))
+researchSavedObject["research"] = researchSavedResearch
+writeObject(researchSavedObject, to: researchSaveURL)
+guard var resumedState = researchSaveManager.load() else { fail("書き換えたセーブを読み込めない") }
+check(resumedState.research.inProgressId == "throughput_1", "読み込み後も throughput_1 が進行中")
+check(Engine.settleResearchIfDue(state: &resumedState, now: t0) == "throughput_1", "復帰時（開始から400秒後）に throughput_1 が完了")
+
+print("== 0.4.0. 稼働率向上 ==")
+var uptimeState = GameState.initial()
+completeResearch(&uptimeState, "uptime_1", startAt: t0)
+let uptimeDerived = Engine.derived(state: uptimeState)
+print("  ラインWPH: \(num(uptimeDerived.lineWPH, 4))")
+check(abs(uptimeDerived.lineWPH - 8.70) < 0.01, "稼働率向上Ⅰでラインが 8.70 WPH（10 × 0.87）")
+
+print("== 0.4.0. クリーン度向上 ==")
+var cleanroomState = GameState.initial()
+completeResearch(&cleanroomState, "cleanroom", startAt: t0)
+let cleanroomYield = Engine.derived(state: cleanroomState).processYields[.deposition] ?? 0
+print("  成膜の工程歩留まり: \(num(cleanroomYield, 6))")
+check(abs(cleanroomYield - 0.9525) < 1e-9, "クリーン度向上で成膜の工程歩留まりが 0.9525")
+
+print("== 0.4.0. オフライン効果 ==")
+var offlineFxState = GameState.initial()
+let transportDone = completeResearch(&offlineFxState, "transport", startAt: t0)
+completeResearch(&offlineFxState, "offline_cap_1", startAt: transportDone)
+print("  オフライン効率: \(num(Engine.offlineEfficiency(state: offlineFxState), 3))  上限: \(num(Engine.offlineCapSeconds(state: offlineFxState), 0))秒")
+check(Engine.offlineEfficiency(state: offlineFxState) == 0.6, "オフライン効率が 0.6")
+check(Engine.offlineCapSeconds(state: offlineFxState) == 21_600, "オフライン上限が 21,600秒")
+var offlineFxRun = offlineFxState
+let offlineFxReport = Engine.offlineProgress(state: &offlineFxRun, elapsedRealSeconds: 30_000)
+check(offlineFxReport.elapsedSeconds == 21_600, "30,000秒の不在は 21,600秒で頭打ち")
+
+print("== 0.4.0. 研究による装置の解放 ==")
+var unlockState = GameState.initial()
+guard let modelL2 = Catalog.model(id: "L2"), let modelL3 = Catalog.model(id: "L3") else { fail("L2/L3 がカタログに無い") }
+let l2LockedReasons = Engine.lockReasons(model: modelL2, state: unlockState)
+print("  L2（研究前）: \(l2LockedReasons.joined(separator: " / "))")
+check(l2LockedReasons.contains { $0.contains("研究") }, "研究前の L2 には研究の理由がある")
+completeResearch(&unlockState, "unlock_immersion", startAt: t0)
+let l2UnlockedReasons = Engine.lockReasons(model: modelL2, state: unlockState)
+print("  L2（研究後）: \(l2UnlockedReasons.joined(separator: " / "))")
+check(!l2UnlockedReasons.contains { $0.contains("研究") }, "研究後の L2 には研究の理由がない")
+check(l2UnlockedReasons.contains { $0.contains("14nm で稼働") }, "研究後の L2 は「14nm で稼働」と案内される")
+if case .locked? = Engine.buyBlockReason(state: unlockState, modelId: "L2") {
+    check(true, "研究後も 28nm では L2 を購入できない（.locked）")
+} else {
+    fail("研究後も 28nm では L2 を購入できない（.locked）")
+}
+check(Engine.isResearchUnlocked(state: unlockState, key: "L2"), "解放キー L2 が有効")
+let l3Reasons = Engine.lockReasons(model: modelL3, state: unlockState)
+print("  L3: \(l3Reasons.joined(separator: " / "))")
+check(l3Reasons.contains { $0.contains("準備中") }, "研究未実装の L3 は「準備中」のまま")
+
+print("== 0.4.0. 補助金の実時間化 ==")
+var realtimeSubsidy = GameState.initial()
+realtimeSubsidy.subsidy.totalInvestedYen = 300_000_000
+check(Engine.applySubsidy(state: &realtimeSubsidy, now: t0), "補助金を申請できた")
+check(realtimeSubsidy.subsidy.pendingGrantAt == t0.addingTimeInterval(720), "交付予定は申請の720秒後")
+let grantYen = realtimeSubsidy.subsidy.pendingGrantYen
+let cashBeforeGrant = realtimeSubsidy.cashYen
+Engine.settleSubsidyIfDue(state: &realtimeSubsidy, now: t0.addingTimeInterval(719))
+check(realtimeSubsidy.cashYen == cashBeforeGrant, "719秒後はまだ交付されない")
+Engine.settleSubsidyIfDue(state: &realtimeSubsidy, now: t0.addingTimeInterval(720))
+check(realtimeSubsidy.cashYen == cashBeforeGrant + grantYen && grantYen > 0, "720秒後に交付予定額が入金される")
+check(!Engine.canApplySubsidy(state: realtimeSubsidy, now: t0.addingTimeInterval(720)), "交付直後は申請できない（クールダウン）")
+realtimeSubsidy.subsidy.totalInvestedYen += 300_000_000
+check(Engine.canApplySubsidy(state: realtimeSubsidy, now: t0.addingTimeInterval(720 + 4_320)), "交付から4,320秒後は再申請できる")
+
+print("== 0.4.0. v2 セーブ移行（審査中） ==")
+let v2BaseState: GameState = {
+    var base = GameState.initial()
+    base.gameHoursElapsed = 1_000
+    return base
+}()
+
+/// v2 フィクスチャ（subsidy の書き換えは modify で行う）を一時ディレクトリに置いて読み込む
+func loadV2Fixture(_ name: String, removing keys: [String] = [], modifySubsidy: (inout [String: Any]) -> Void) -> GameState? {
+    let dir = makeDirectory(name)
+    var object = encodedObject(v2BaseState)
+    object["schemaVersion"] = 2
+    for key in keys {
+        object.removeValue(forKey: key)
+    }
+    guard var subsidyObject = object["subsidy"] as? [String: Any] else { fail("subsidy を辞書として取り出せない") }
+    modifySubsidy(&subsidyObject)
+    object["subsidy"] = subsidyObject
+    writeObject(object, to: dir.appendingPathComponent(SaveManager.fileName))
+    var manager = SaveManager(directory: dir)
+    return manager.load()
+}
+
+let beforeV2PendingLoad = Date()
+let v2Pending = loadV2Fixture("v2-pending") { subsidy in
+    subsidy["pendingGrantYen"] = 50_000_000.0
+    subsidy["pendingGrantAtHours"] = v2BaseState.gameHoursElapsed + 60
+    subsidy.removeValue(forKey: "pendingGrantAt")
+}
+guard let v2PendingState = v2Pending else { fail("審査中の v2 セーブを読み込めない") }
+check(v2PendingState.schemaVersion == 3, "v2 セーブは schemaVersion 3 に移行される")
+let v2PendingOffset = v2PendingState.subsidy.pendingGrantAt.map { $0.timeIntervalSince(beforeV2PendingLoad) }
+print("  交付予定: 読み込みの \(num(v2PendingOffset ?? -1, 1))秒後")
+check(v2PendingOffset.map { abs($0 - 360) <= 10 } == true, "残り60ゲーム時間は実360秒後の交付予定に移る")
+check(v2PendingState.subsidy.pendingGrantAtHours == nil, "移行後の pendingGrantAtHours は nil")
+guard let v2ReencodedData = try? checkEncoder.encode(v2PendingState),
+      let v2Reencoded = String(data: v2ReencodedData, encoding: .utf8)
+else { fail("移行後の state を再エンコードできない") }
+check(!v2Reencoded.contains("pendingGrantAtHours"), "再エンコードしたセーブに pendingGrantAtHours が含まれない")
+
+print("== 0.4.0. v2 セーブ移行（クールダウン） ==")
+let v2Cooldown = loadV2Fixture("v2-cooldown") { subsidy in
+    subsidy["lastGrantAtHours"] = v2BaseState.gameHoursElapsed - 360
+    subsidy["totalInvestedYen"] = 300_000_000.0
+    subsidy["totalReceivedYen"] = 100_000_000.0
+}
+guard let v2CooldownState = v2Cooldown else { fail("クールダウン中の v2 セーブを読み込めない") }
+let afterV2CooldownLoad = Date()
+check(!Engine.canApplySubsidy(state: v2CooldownState, now: afterV2CooldownLoad), "読み込み直後は申請できない")
+let v2CooldownRemaining = Engine.subsidyCooldownRemainingSeconds(state: v2CooldownState, now: afterV2CooldownLoad)
+print("  クールダウン残り: \(num(v2CooldownRemaining ?? -1, 1))秒")
+check(v2CooldownRemaining.map { abs($0 - 2_160) <= 10 } == true, "残りクールダウンは 2,160秒（720 − 360 ゲーム時間 = 360 × 6秒）")
+
+print("== 0.4.0. v2 セーブ互換（研究なし） ==")
+let v2NoResearch = loadV2Fixture("v2-noresearch", removing: ["research"]) { _ in }
+guard let v2NoResearchState = v2NoResearch else { fail("research の無い v2 セーブを読み込めない") }
+check(v2NoResearchState.research.completedIds.isEmpty, "研究なしのセーブは completedIds が空")
+let v2NoResearchDerived = Engine.derived(state: v2NoResearchState)
+check(abs(v2NoResearchDerived.lineWPH - 8.5) < 1e-6, "研究なしのラインWPH は 8.5")
+check(abs(v2NoResearchDerived.currentYield - 0.6983) < 0.005, "研究なしの歩留まりは 約69.8%")
+
+try? fileManager.removeItem(at: tempRoot)
 
 print("HEADLESS CHECK PASSED")

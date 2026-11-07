@@ -128,7 +128,7 @@ private struct ShopModelCard: View {
     var body: some View {
         let state = store.state
         let node = Engine.currentNode(state: state)
-        let lockReasons = Engine.lockReasons(model: model, nodeId: node.id)
+        let lockReasons = Engine.lockReasons(model: model, state: state)
         let isLocked = !lockReasons.isEmpty
         let block = Engine.buyBlockReason(state: state, modelId: model.id)
         // 所持台数は設置中＋倉庫

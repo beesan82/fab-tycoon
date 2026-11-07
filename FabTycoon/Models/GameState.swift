@@ -1,7 +1,7 @@
 import Foundation
 
 struct GameState: Codable, Equatable {
-    static let currentSchemaVersion = 2
+    static let currentSchemaVersion = 3
 
     var schemaVersion: Int
     var cashYen: Double
@@ -20,6 +20,8 @@ struct GameState: Codable, Equatable {
     var subsidy: SubsidyState = SubsidyState()
     /// 数値バランス変更の告知を表示済みか（旧セーブ向け）
     var didShowScaleChangeNotice: Bool = false
+    /// 研究の進行状況
+    var research: ResearchState = ResearchState()
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion
@@ -34,6 +36,7 @@ struct GameState: Codable, Equatable {
         case currentProductId
         case subsidy
         case didShowScaleChangeNotice
+        case research
     }
 
     /// 設置済み装置の購入価格合計（改良費は含まない）
@@ -99,6 +102,35 @@ extension GameState {
         subsidy = try container.decodeIfPresent(SubsidyState.self, forKey: .subsidy)
             ?? SubsidyState(totalInvestedYen: GameState.equipmentPurchaseTotalYen(fab.equipment))
         didShowScaleChangeNotice = try container.decodeIfPresent(Bool.self, forKey: .didShowScaleChangeNotice) ?? false
+        research = try container.decodeIfPresent(ResearchState.self, forKey: .research) ?? ResearchState()
+    }
+}
+
+/// 研究の進行状況
+struct ResearchState: Codable, Equatable {
+    var completedIds: Set<String> = []
+    var inProgressId: String? = nil
+    var inProgressStartedAt: Date? = nil
+    /// 完了したが研究タブでまだ確認していない（タブバッジ用）
+    var hasUnseenCompletion: Bool = false
+
+    enum CodingKeys: String, CodingKey {
+        case completedIds
+        case inProgressId
+        case inProgressStartedAt
+        case hasUnseenCompletion
+    }
+}
+
+// 旧セーブ互換：全フィールドを欠けていてもデフォルト値で読む
+extension ResearchState {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = ResearchState()
+        completedIds = try container.decodeIfPresent(Set<String>.self, forKey: .completedIds) ?? defaults.completedIds
+        inProgressId = try container.decodeIfPresent(String.self, forKey: .inProgressId) ?? defaults.inProgressId
+        inProgressStartedAt = try container.decodeIfPresent(Date.self, forKey: .inProgressStartedAt) ?? defaults.inProgressStartedAt
+        hasUnseenCompletion = try container.decodeIfPresent(Bool.self, forKey: .hasUnseenCompletion) ?? defaults.hasUnseenCompletion
     }
 }
 
@@ -106,20 +138,26 @@ extension GameState {
 struct SubsidyState: Codable, Equatable {
     /// 審査中の交付予定額（0なら申請なし）
     var pendingGrantYen: Double = 0
-    /// 交付予定時刻（gameHoursElapsed 基準）。nil なら申請なし
-    var pendingGrantAtHours: Double? = nil
+    /// 交付予定時刻（実時間）。nil なら申請なし
+    var pendingGrantAt: Date? = nil
     /// 累計設備投資額（購入＋改良）
     var totalInvestedYen: Double = 0
     /// 累計受給額
     var totalReceivedYen: Double = 0
-    /// 最終交付時刻（gameHoursElapsed 基準）
+    /// 最終交付時刻（実時間）
+    var lastGrantAt: Date? = nil
+    /// 移行専用。v2以前のセーブの交付予定時刻（gameHoursElapsed 基準）。新規の書き込みでは常に nil
+    var pendingGrantAtHours: Double? = nil
+    /// 移行専用。v2以前のセーブの最終交付時刻（gameHoursElapsed 基準）。新規の書き込みでは常に nil
     var lastGrantAtHours: Double? = nil
 
     enum CodingKeys: String, CodingKey {
         case pendingGrantYen
-        case pendingGrantAtHours
+        case pendingGrantAt
         case totalInvestedYen
         case totalReceivedYen
+        case lastGrantAt
+        case pendingGrantAtHours
         case lastGrantAtHours
     }
 }
@@ -130,9 +168,11 @@ extension SubsidyState {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = SubsidyState()
         pendingGrantYen = try container.decodeIfPresent(Double.self, forKey: .pendingGrantYen) ?? defaults.pendingGrantYen
-        pendingGrantAtHours = try container.decodeIfPresent(Double.self, forKey: .pendingGrantAtHours) ?? defaults.pendingGrantAtHours
+        pendingGrantAt = try container.decodeIfPresent(Date.self, forKey: .pendingGrantAt) ?? defaults.pendingGrantAt
         totalInvestedYen = try container.decodeIfPresent(Double.self, forKey: .totalInvestedYen) ?? defaults.totalInvestedYen
         totalReceivedYen = try container.decodeIfPresent(Double.self, forKey: .totalReceivedYen) ?? defaults.totalReceivedYen
+        lastGrantAt = try container.decodeIfPresent(Date.self, forKey: .lastGrantAt) ?? defaults.lastGrantAt
+        pendingGrantAtHours = try container.decodeIfPresent(Double.self, forKey: .pendingGrantAtHours) ?? defaults.pendingGrantAtHours
         lastGrantAtHours = try container.decodeIfPresent(Double.self, forKey: .lastGrantAtHours) ?? defaults.lastGrantAtHours
     }
 }
