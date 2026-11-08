@@ -792,4 +792,127 @@ check(v3ExcLoaded?.schemaVersion == 3, "schemaVersion は 3 のまま（異常�
 
 try? fileManager.removeItem(at: tempRoot)
 
+// MARK: - 1.0 P0: 仕様固定の試算（RouteBuilder の総ステップ数・T_pass）
+
+let p0Combos: [(String, LithoClass?)] = [("標準", nil), ("ArF液浸", .duvImm), ("EUV", .euv), ("High-NA", .highNA)]
+for node in Catalog.nodes {
+    for (comboName, cls) in p0Combos {
+        let steps = RouteBuilder.routeSteps(node: node, lithoClass: cls)
+        let passes = RouteBuilder.effectivePasses(node: node, lithoClass: cls)
+        check(steps.count == passes.values.reduce(0, +),
+              "P0: \(node.displayName)（\(comboName)）ルート総ステップ \(steps.count) がパス合計と一致")
+        var counted: [ProcessType: Int] = [:]
+        for s in steps { counted[s, default: 0] += 1 }
+        check(ProcessType.allCases.allSatisfy { (counted[$0] ?? 0) == (passes[$0] ?? 0) },
+              "P0: \(node.displayName)（\(comboName)）工程別の出現回数がパス表と一致")
+    }
+}
+func p0RouteTotal(_ nodeId: String, _ cls: LithoClass?) -> Int {
+    RouteBuilder.routeSteps(node: Catalog.node(id: nodeId)!, lithoClass: cls).count
+}
+check(p0RouteTotal("n28", nil) == 72, "P0: 28nm ルートは 72 ステップ")
+check(p0RouteTotal("n14", nil) == 196, "P0: 14nm ルートは 196 ステップ")
+check(p0RouteTotal("n7", nil) == 279, "P0: 7nm ルートは 279 ステップ")
+check(p0RouteTotal("n7", .euv) == 244, "P0: 7nm EUV ルートは 244 ステップ")
+check(p0RouteTotal("n5", nil) == 275, "P0: 5nm ルートは 275 ステップ")
+check(p0RouteTotal("n3", nil) == 307, "P0: 3nm ルートは 307 ステップ")
+check(p0RouteTotal("n2", nil) == 350, "P0: 2nm ルートは 350 ステップ")
+check(p0RouteTotal("n2", .highNA) == 330, "P0: 2nm High-NA ルートは 330 ステップ")
+let p0Route28 = RouteBuilder.routeSteps(node: Catalog.node(id: "n28")!, lithoClass: nil)
+check(p0Route28.first == .deposition && p0Route28.last == .packaging, "P0: 28nm ルートは成膜で始まり PKG で終わる")
+
+let p0TPass: [(String, Double)] = [
+    ("L1", 11.8), ("L2", 6.4), ("L3", 11.0), ("L4", 9.8),
+    ("D1", 17.6), ("D2", 11.8), ("D3", 14.7),
+    ("E1", 22.1), ("E2", 14.7), ("E3", 44.1),
+    ("I1", 17.6), ("I2", 11.8),
+    ("C1", 29.4), ("C2", 19.6),
+    ("Q1", 14.7), ("Q2", 117.6), ("Q3", 17.6),
+    ("P1", 29.4), ("P2", 17.6), ("P3", 44.1),
+]
+for (modelId, expected) in p0TPass {
+    let t = SimCore.tPass(model: Catalog.model(id: modelId)!, level: 1, throughputMultiplier: 1, uptimeAddition: 0)
+    check(abs(t - expected) < 0.15, "P0: T_pass \(modelId) = \(String(format: "%.2f", t)) 分（表値 \(expected)）")
+}
+
+// MARK: - 1.0 P1: SimCore（ロット離散シミュレーション）
+
+let probeLot = Lot(id: SimCore.lotId(serial: 999), nodeId: "n28", productId: "logic", lithoClass: .duvDry,
+                   location: .entry, releasedAtGameMin: 0, learningWafersAtRelease: 0)
+check((try? JSONDecoder().decode(Lot.self, from: JSONEncoder().encode(probeLot))) == probeLot,
+      "P1: Lot の Codable ラウンドトリップ")
+let probeTool = ToolInstance(instance: GameState.initial().fab.equipment[0])
+check((try? JSONDecoder().decode(ToolInstance.self, from: JSONEncoder().encode(probeTool))) == probeTool,
+      "P1: ToolInstance の Codable ラウンドトリップ")
+let probeCell = RailCell(point: GridPoint(x: 3, y: 4), direction: .east, kind: .corner)
+check((try? JSONDecoder().decode(RailCell.self, from: JSONEncoder().encode(probeCell))) == probeCell,
+      "P1: RailCell の Codable ラウンドトリップ")
+let probeStocker = Stocker(origin: GridPoint(x: 1, y: 1), capacity: 40, lotIds: [probeLot.id], handlingGameMin: 10)
+check((try? JSONDecoder().decode(Stocker.self, from: JSONEncoder().encode(probeStocker))) == probeStocker,
+      "P1: Stocker の Codable ラウンドトリップ")
+
+func p1Run(hours: Double) -> SimCore {
+    var sim = SimCore(state: GameState.initial())
+    for _ in 0..<Int(hours * 60) { sim.step() }
+    return sim
+}
+let detRunA = p1Run(hours: 120)
+let detRunB = p1Run(hours: 120)
+check(detRunA.stats.completedWafers == detRunB.stats.completedWafers && detRunA.stats.sumNetYen == detRunB.stats.sumNetYen,
+      "P1: SimCore は決定的（同一の初期状態から同一の結果）")
+
+var p1Sim = SimCore(state: GameState.initial())
+// 定常測定の運転点: 設計の WIP 上限 200 では、P1 の仮想搬送（24分/移動）のもとで WIP が
+// 自己制限域（約75〜115）を振動し、投入レートが測定窓に依存する。§8 の定常等価性の検証では
+// 上限を 100 に効かせて WIP を固定し（CONWIP）、投入＝完了に揃えた状態で測る。
+p1Sim.wipCap = 100
+for _ in 0..<(900 * 60) { p1Sim.step() }   // ウォームアップ 900 ゲーム時間
+let p1Snap = p1Sim.stats
+for _ in 0..<(1200 * 60) { p1Sim.step() }   // 計測 1200 ゲーム時間
+let p1Throughput = (p1Sim.stats.completedWafers - p1Snap.completedWafers) / 1200
+check(abs(p1Throughput - 8.5) <= 8.5 * 0.03,
+      "P1: 定常スループット \(String(format: "%.3f", p1Throughput)) WPH（現行 8.5 の ±3% 以内）")
+let p1ReleaseRate = (p1Sim.stats.releasedWafers - p1Snap.releasedWafers) / 1200
+check(abs(p1ReleaseRate - 8.5) <= 8.5 * 0.03,
+      "P1: 学習 W の加算 \(String(format: "%.3f", p1ReleaseRate)) 枚/時（現行フロー 8.5 と一致）")
+let p1WindowLots = p1Sim.stats.completedLots - p1Snap.completedLots
+let p1MeanDetection = p1WindowLots > 0
+    ? (p1Sim.stats.sumDetectionRate - p1Snap.sumDetectionRate) / Double(p1WindowLots) : 0
+check(p1WindowLots > 0 && abs(p1MeanDetection - 0.775) <= 0.005,
+      "P1: 定常検出率 \(String(format: "%.4f", p1MeanDetection))（77.5% ±0.5pt、完了 \(p1WindowLots) ロット）")
+check(!p1Sim.stats.firstCompletions.isEmpty, "P1: ロットが完了して精算される")
+// 歩留まりの検証は WIP=1 の直行運転で行う（投入順 = 完了順が保証され、学習 W が 0, 25, 50, … と進む）。
+// 定常運転では完了順が投入順と一致しない（キューでの追い越し）ため、そちらでは検証しない。
+var yieldSim = SimCore(state: GameState.initial())
+yieldSim.wipCap = 1
+for _ in 0..<(600 * 60) { yieldSim.step() }
+check(yieldSim.stats.firstCompletions.count >= 5, "P1: 直行運転で5ロット以上が完了する")
+if let first = yieldSim.stats.firstCompletions.first {
+    check(abs(first.lotYield - 0.698337) < 0.005,
+          "P1: 初回ロット歩留まり \(String(format: "%.4f", first.lotYield))（0.95^7 = 0.6983 ±0.5pt）")
+}
+if yieldSim.stats.firstCompletions.count >= 5 {
+    let avg5 = yieldSim.stats.firstCompletions.prefix(5).reduce(0) { $0 + $1.lotYield } / 5
+    check(abs(avg5 - 0.698) <= 0.005,
+          "P1: 初期ロット歩留まり平均 \(String(format: "%.4f", avg5))（69.8% ±0.5pt）")
+}
+
+// 精算式の等価性: 現行 tick の式を、状態集計値（lineYield / detectionRate）で25枚分に適用した期待値と比較
+let eqState = GameState.initial()
+let eqDerived = Engine.derived(state: eqState)
+let eqNode = Catalog.node(id: "n28")!
+let eqProduct = Catalog.product(id: "logic")!
+let eqSettle = SimCore.settle(lotYield: eqDerived.lineYield, detectionRate: eqDerived.detectionRate,
+                              node: eqNode, product: eqProduct, priceYen: eqDerived.currentPriceYen)
+let eqGrossDies = 25.0 * Double(eqProduct.diesPerWafer)
+let eqGoodDies = eqGrossDies * eqDerived.lineYield
+let eqShippedDefect = (eqGrossDies - eqGoodDies) * (1 - eqDerived.detectionRate)
+let eqOutputChips = eqGoodDies + eqShippedDefect
+let eqSale = Engine.netSale(chips: eqOutputChips, defectRate: eqShippedDefect / eqOutputChips,
+                            priceYen: eqDerived.currentPriceYen, penaltyMultiplier: eqProduct.marketPenaltyMultiplier)
+let eqExpectedNet = eqSale.revenueYen - eqOutputChips * eqDerived.currentPriceYen
+    * min(max(eqProduct.cogsRate + eqNode.cogsAddition, 0), 0.95)
+check(abs(eqSettle.netYen - eqExpectedNet) < 0.01,
+      "P1: ロット精算 \(Int(eqSettle.netYen)) 円が現行 tick の式と一致（期待 \(Int(eqExpectedNet)) 円）")
+
 print("HEADLESS CHECK PASSED")
