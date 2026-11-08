@@ -6,6 +6,12 @@ import Foundation
 // 収容は到着時に行う（空きポート → ストッカー → 搬送中のまま再試行）。
 // 投入はプル方式：先頭工程の装置に空きポートがあり、WIP 上限未満のときだけ1ロット投入する。
 // GameState は読むだけで、シミュレーション状態は SimCore 自身が保持する。乱数は使わない。
+// P2: layout を与えるとレール搬送モード（Layout.swift の RailGraph による BFS 経路・1セル1ロットのブロッキング）になる。
+// レール搬送は P1 の意味論にレール固有の調整を加えたもの：出発・投入は経路のある次工程（投入は先頭工程）の装置、
+// 払い出しは経路があり inbound（自分より先に着くロットだけ）< 空きポート数を満たす装置を候補にする（投入は計量を免除）。
+// その中からスコア選択し、出発ではストッカー経由を往路 ＋ 取り扱い ＋ 最良候補の待ちで比較して混雑時の圧力逃がしにする。
+// 到着時の収容は ポート →（処理済みポートがある場合はドライブスルー）→ 待つ。
+// layout が nil なら従来の仮想搬送のまま（P1 の検証値はこの分岐に依存する）。
 
 // MARK: - エンティティ
 
@@ -64,7 +70,7 @@ enum LotLocation: Codable, Equatable {
     case stocker
     /// destinationToolId が nil なら出荷口行き
     case inTransit(remainingGameMin: Double, destinationToolId: UUID?)
-    /// P2 用（レール上）
+    /// レール上（P2）。cellIndex は lot.path のインデックス、progress はそのセル内の進み（1 で次セルへ）
     case rail(cellIndex: Int, progress: Double)
     case port(toolId: UUID, portIndex: Int)
 }
@@ -89,6 +95,19 @@ struct Lot: Codable, Equatable, Identifiable {
     var waitedGameMin: Double = 0
     /// 投入時点の学習枚数 W
     var learningWafersAtRelease: Double
+    /// レール上の経路（出発時に確定。始点・終点のセルを含む）
+    var path: [GridPoint] = []
+    /// レール搬送の行き先
+    var destination: LotDestination? = nil
+    /// ストッカーの取り扱い完了時刻（これより前は払い出さない）
+    var stockerHandlingUntilGameMin: Double = 0
+}
+
+/// レール搬送の行き先（P2）
+enum LotDestination: Codable, Equatable {
+    case tool(UUID)
+    case stocker
+    case shipping
 }
 
 enum RailDirection: String, Codable, Equatable {
@@ -275,13 +294,66 @@ struct SimCore {
     var stats = SimStats()
     private var nextLotSerial: Int = 0
 
+    // MARK: レール搬送（P2）
+
+    /// 1セルの通過時間（ゲーム分、§1.6）
+    static let railCellGameMin: Double = 3
+    /// デッドロック判定：WIP>0 かつこの時間「処理完了・出発・到着」が無い（§1.7）
+    static let deadlockGameMin: Double = 60
+
+    /// nil なら仮想搬送（P1）
+    var layout: FloorLayout? = nil
+    /// 直近の進行イベント（処理完了・出発・到着・精算）の時刻
+    var lastProgressGameMin: Double = 0
+
+    var isDeadlocked: Bool {
+        !lots.isEmpty && currentGameMin - lastProgressGameMin >= Self.deadlockGameMin
+    }
+
+    /// レール上で停止しているロットのセル（詰まりのハイライト用）
+    var deadlockCells: [GridPoint] {
+        var result: [GridPoint] = []
+        for id in lotReleaseOrder {
+            guard let lot = lots[id], case .rail(let index, let progress) = lot.location,
+                  progress >= 0.999, index < lot.path.count else { continue }
+            result.append(lot.path[index])
+        }
+        return result
+    }
+
+    private var railGraph: RailGraph?
+    private var toolPortCells: [UUID: [GridPoint]] = [:]
+    private var entryPortCells: [GridPoint] = []
+    private var stockerPortCells: [GridPoint] = []
+    private var shippingPortCells: [GridPoint] = []
+    /// 経路キャッシュ（レイアウトは SimCore の中では変わらない）。空配列 = 経路なし
+    private var railPathCache: [RailPathKey: [GridPoint]] = [:]
+
     init(state: GameState) {
-        tools = state.fab.equipment.map { ToolInstance(instance: $0) }
+        self.init(state: state, tools: state.fab.equipment.map { ToolInstance(instance: $0) }, layout: nil)
+    }
+
+    /// tools は配置済みの装置。layout が nil なら仮想搬送、あればレール搬送
+    init(state: GameState, tools: [ToolInstance], layout: FloorLayout?) {
+        self.tools = tools
         releaseNodeId = state.fab.currentNodeId
         releaseProductId = state.currentProductId
         releaseLithoClass = Engine.topLithoClass(state: state) ?? .duvDry
         research = Engine.researchEffects(state: state)
         settlementPriceYen = Engine.derived(state: state).currentPriceYen
+        self.layout = layout
+        if let layout = layout {
+            stocker.origin = layout.stocker.origin
+            stocker.capacity = layout.stocker.capacity
+            let graph = RailGraph(layout: layout)
+            railGraph = graph
+            for tool in tools {
+                toolPortCells[tool.id] = graph.portCells(footprint: layout.cells(of: tool))
+            }
+            entryPortCells = graph.portCells(footprint: layout.entryCells())
+            stockerPortCells = graph.portCells(footprint: layout.stockerCells())
+            shippingPortCells = graph.portCells(footprint: layout.shippingCells())
+        }
     }
 
     /// 1パスの処理時間（ゲーム分）。§1.3
@@ -328,6 +400,11 @@ struct SimCore {
         return Self.tPass(model: model, level: tools[index].level,
                           throughputMultiplier: research.throughputMultiplier,
                           uptimeAddition: research.uptimeAddition)
+    }
+
+    /// 次に処理を開始したときの remainingGameMin（1 パス ＋ 端数繰越。手順 2 と共通）
+    private func nextPassGameMin(_ index: Int, models: [EquipmentModel?]) -> Double {
+        toolPass(index, models: models) + tools[index].processingRemainderGameMin
     }
 
     /// 予想待ち：ポート上の残り時間＋搬送中で向かっているロット数 × T_pass
@@ -403,6 +480,7 @@ struct SimCore {
                 tools[t].ports[p].state = .done
                 tools[t].ports[p].remainingGameMin = 0
                 tools[t].processingRemainderGameMin = remaining
+                lastProgressGameMin = currentGameMin
             }
         }
 
@@ -411,10 +489,34 @@ struct SimCore {
             guard models[t] != nil, !tools[t].ports.contains(where: { $0.state == .processing }),
                   let p = tools[t].ports.firstIndex(where: { $0.state == .waiting }) else { continue }
             tools[t].ports[p].state = .processing
-            tools[t].ports[p].remainingGameMin = toolPass(t, models: models) + tools[t].processingRemainderGameMin
+            tools[t].ports[p].remainingGameMin = nextPassGameMin(t, models: models)
             tools[t].processingRemainderGameMin = 0
         }
 
+        // 3〜6. 出発・搬送・ストッカー払い出し・投入（layout が nil なら仮想搬送、あればレール搬送）
+        if layout == nil {
+            stepVirtualTransport(models: models, routes: &routes)
+        } else {
+            stepRailTransport(models: models, routes: &routes)
+        }
+
+        // 7. 統計（稼働率 EMA・待ち時間）
+        currentGameMin += 1
+        let alpha = 1 - exp(-1 / Self.busyEMATimeConstantGameMin)
+        for t in tools.indices {
+            tools[t].busyEMA += ((busy[t] ? 1 : 0) - tools[t].busyEMA) * alpha
+            for port in tools[t].ports where port.state == .waiting {
+                if let lotId = port.lotId {
+                    lots[lotId]?.waitedGameMin += 1
+                }
+            }
+        }
+    }
+
+    // MARK: 仮想搬送（P1）
+
+    /// 手順 3〜6 の仮想搬送（固定遅延）
+    private mutating func stepVirtualTransport(models: [EquipmentModel?], routes: inout [String: RouteInfo]) {
         // 3. 出発（次工程の装置のうちスコア最小へ。出荷は常に出す）
         //    処理済みロットは行き先の空きを待たず即座に出発し、ポートを空ける（再入工程の循環待ちデッドロック回避）。
         //    収容は到着時に行う（手順4）。次工程を処理できる装置が無い場合のみ .done のまま留まる
@@ -437,6 +539,7 @@ struct SimCore {
                 }
                 lots[lotId] = lot
                 tools[t].ports[p] = LoadPort(lotId: nil)
+                lastProgressGameMin = currentGameMin
             }
         }
 
@@ -458,15 +561,18 @@ struct SimCore {
                         tools[t].ports[p] = LoadPort(lotId: lotId, state: .waiting, remainingGameMin: 0)
                         lot.location = .port(toolId: destId, portIndex: p)
                         lot.destinationToolId = nil
+                        lastProgressGameMin = currentGameMin
                     } else if stocker.lotIds.count < stocker.capacity {
                         stocker.lotIds.append(lotId)
                         lot.location = .stocker
                         lot.destinationToolId = nil
+                        lastProgressGameMin = currentGameMin
                     } else {
                         // 置き場が無い：次ステップで再試行
                         lot.location = .inTransit(remainingGameMin: 0, destinationToolId: destId)
                     }
                 } else {
+                    lastProgressGameMin = currentGameMin
                     settle(lot)
                     shippedIds.insert(lotId)
                     lots[lotId] = nil
@@ -523,15 +629,445 @@ struct SimCore {
                 }
             }
         }
+    }
 
-        // 7. 統計（稼働率 EMA・待ち時間）
-        currentGameMin += 1
-        let alpha = 1 - exp(-1 / Self.busyEMATimeConstantGameMin)
+    // MARK: レール搬送（P2）
+
+    /// 経路の端点（ポートセル群）
+    private enum RailEndpoint: Hashable {
+        case entry, stocker, shipping
+        case tool(Int)
+        case cell(GridPoint)
+    }
+
+    private struct RailPathKey: Hashable {
+        var from: RailEndpoint
+        var to: RailEndpoint
+    }
+
+    /// セル → そこにいるロットと、そのセルから出る方向（最終セルなら nil）
+    private typealias RailOccupancy = [GridPoint: [(lotId: UUID, exitDirection: RailDirection?)]]
+
+    private struct RailCandidate {
+        var index: Int
+        var path: [GridPoint]
+        /// P1 の score() と同じ予想待ち
+        var wait: Double
+        /// 経路セル数 × 3分 ＋ 予想待ち（候補同士の順位付けとストッカー迂回との比較に使う）
+        var score: Double
+    }
+
+    private static func toolId(of destination: LotDestination) -> UUID? {
+        if case .tool(let id) = destination { return id }
+        return nil
+    }
+
+    private func railPorts(_ endpoint: RailEndpoint) -> [GridPoint] {
+        switch endpoint {
+        case .entry: return entryPortCells
+        case .stocker: return stockerPortCells
+        case .shipping: return shippingPortCells
+        case .tool(let index): return toolPortCells[tools[index].id] ?? []
+        case .cell(let point): return [point]
+        }
+    }
+
+    /// BFS 最短経路（キャッシュつき）。経路が無ければ nil
+    private mutating func railPath(from: RailEndpoint, to: RailEndpoint) -> [GridPoint]? {
+        let key = RailPathKey(from: from, to: to)
+        if let cached = railPathCache[key] {
+            return cached.isEmpty ? nil : cached
+        }
+        let path = railGraph?.shortestPath(from: railPorts(from), to: Set(railPorts(to))) ?? []
+        railPathCache[key] = path
+        return path.isEmpty ? nil : path
+    }
+
+    /// レール上で装置へ向かうロット数（装置ごと）と、ストッカーへ向かうロット数、
+    /// 装置へ向かう各ロットの残り経路セル数（path.count − cellIndex。払い出しの距離考慮型計量用）
+    private func railInbound() -> (tools: [UUID: Int], stocker: Int, remainingCells: [UUID: [Int]]) {
+        var counts: [UUID: Int] = [:]
+        var stockerCount = 0
+        var remaining: [UUID: [Int]] = [:]
+        for id in lotReleaseOrder {
+            guard let lot = lots[id], case .rail(let index, _) = lot.location else { continue }
+            switch lot.destination {
+            case .tool(let toolId)?:
+                counts[toolId, default: 0] += 1
+                remaining[toolId, default: []].append(lot.path.count - index)
+            case .stocker?: stockerCount += 1
+            case .shipping?, nil: break
+            }
+        }
+        return (counts, stockerCount, remaining)
+    }
+
+    private func railOccupancy() -> RailOccupancy {
+        var occupancy: RailOccupancy = [:]
+        for id in lotReleaseOrder {
+            guard let lot = lots[id], case .rail(let index, _) = lot.location, index < lot.path.count else { continue }
+            Self.occupy(&occupancy, lotId: id, path: lot.path, index: index)
+        }
+        return occupancy
+    }
+
+    private static func occupy(_ occupancy: inout RailOccupancy, lotId: UUID, path: [GridPoint], index: Int) {
+        let exit = index + 1 < path.count ? RailDirection.between(path[index], path[index + 1]) : nil
+        occupancy[path[index], default: []].append((lotId: lotId, exitDirection: exit))
+    }
+
+    private static func vacate(_ occupancy: inout RailOccupancy, lotId: UUID, cell: GridPoint) {
+        occupancy[cell]?.removeAll { $0.lotId == lotId }
+        if occupancy[cell]?.isEmpty ?? false {
+            occupancy[cell] = nil
+        }
+    }
+
+    /// セルへ入れるか。travelDirection はそのセルへ入る移動方向。
+    /// 空きなら可。交差セルは占有1でその出る方向の軸が直交していれば可（第2枠）
+    private func canEnter(_ cell: GridPoint, travelDirection: RailDirection, occupancy: RailOccupancy) -> Bool {
+        guard let rail = railGraph?.cells[cell] else { return false }
+        let occupants = occupancy[cell] ?? []
+        if occupants.isEmpty { return true }
+        if rail.kind == .cross, occupants.count == 1, let exit = occupants[0].exitDirection,
+           exit.isVertical != travelDirection.isVertical {
+            return true
+        }
+        return false
+    }
+
+    /// 経路の先頭セルへ入線できるか（移動方向は先頭セルのレールの向きとみなす）
+    private func canDepart(onto path: [GridPoint], occupancy: RailOccupancy) -> Bool {
+        guard let first = path.first, let rail = railGraph?.cells[first] else { return false }
+        return canEnter(first, travelDirection: rail.direction, occupancy: occupancy)
+    }
+
+    private func hasTools(process: ProcessType, nodeId: String, models: [EquipmentModel?]) -> Bool {
+        models.contains { model in
+            guard let model = model else { return false }
+            return model.process == process && model.supports(nodeId: nodeId)
+        }
+    }
+
+    /// 工程 process・ノード nodeId を処理でき、from から経路がある装置（tool index 順）。
+    /// metered が true なら、.empty ポートを 1 つ以上持ち、「レール上でその装置へ向かうロットのうち残り経路セル数が
+    /// この候補の経路セル数より小さいもの（自分より先に着くロット）」の数 < 空きポート数のものに限る（払い出し）。
+    /// 計量の残りセル数は remainingCells（railInbound().remainingCells）を使う（スコアの予想待ちは常に inbound）
+    private mutating func railCandidates(process: ProcessType, nodeId: String, from: RailEndpoint, metered: Bool,
+                                         remainingCells: [UUID: [Int]] = [:],
+                                         models: [EquipmentModel?], inbound: [UUID: Int]) -> [RailCandidate] {
+        var result: [RailCandidate] = []
+        for index in tools.indices {
+            guard let model = models[index], model.process == process, model.supports(nodeId: nodeId) else { continue }
+            guard let path = railPath(from: from, to: .tool(index)) else { continue }
+            if metered {
+                let emptyPorts = tools[index].ports.filter { $0.state == .empty }.count
+                let ahead = (remainingCells[tools[index].id] ?? []).filter { $0 < path.count }.count
+                guard emptyPorts > 0, ahead < emptyPorts else { continue }
+            }
+            let wait = score(index, models: models, inbound: inbound)
+            result.append(RailCandidate(index: index, path: path, wait: wait,
+                                        score: Double(path.count) * Self.railCellGameMin + wait))
+        }
+        return result
+    }
+
+    /// スコア（経路セル数 × 3分 ＋ 予想待ち）最小の候補（同点は tool index 順）。
+    /// 予想待ちのみの順位付けも試したが定常スループットは同等（7.90 WPH）だったため、近い装置が選ばれる合計に戻した
+    /// （成膜の台間偏り 88.8% / 98.2% は残課題）
+    private static func bestCandidate(_ candidates: [RailCandidate]) -> RailCandidate? {
+        var best: RailCandidate?
+        for candidate in candidates {
+            if let current = best, candidate.score >= current.score { continue }
+            best = candidate
+        }
+        return best
+    }
+
+    /// 手順 3〜6 のレール搬送（P1 の意味論 ＋ レール固有の調整）。
+    /// 出発：経路のある次工程の装置のうちスコア（経路セル数 × 3分 ＋ 予想待ち）最小へ向かう。ストッカー経由は
+    /// 完全な迂回コスト「往路 ＋ 取り扱い ＋ 復路（ストッカー → 最良の直接候補、BFS セル数 × 3分）＋ その候補の待ち」で
+    /// 直接の最良スコアと比べ、
+    /// 行き先が混んでいるときに圧力逃がしとして選ばれる
+    /// （復路を含めない形は西側の装置からストッカーが常に安く見え、迂回と往復が多発してストッカー滞留が WIP の 58% を占めたため戻した）。
+    /// 候補が無ければストッカーへ退避し、それも無理なら .done のままポートに留まる。
+    /// 加えて出発には「経路の先頭セルが空いていること」が要る。
+    /// inbound は各フェーズ開始時にレール上のロットから数え直し、割り当てのたびに加算する。
+    /// 払い出し：距離考慮型の計量（自分より先に着くロット数 < 空きポート数）を通った装置のうちスコア最小へ。
+    /// 投入：計量なしで、経路のある先頭工程の装置のうちスコア最小へ。
+    /// （一律の inbound 計量は遠方のロットまで予約として数え、成膜行きをストッカーに滞留させた。無計量は長距離の
+    /// 払い出しが環を溢れさせて凍結した。このため自分より先に着けるロットだけを競合として数える）
+    /// （到着時刻とポート空き時刻のマッチングは、処理済みポートを即空くとみなす見積もりが幽霊の容量を作り、
+    /// 処理済みロットの出発自体がその容量に依存する循環待ちで凍結したため撤去した）
+    /// 到着時の収容順：空きポートがあれば入線 → 行き先装置に処理済みポートがある（待つとその出口を塞ぐ）場合だけ
+    /// ドライブスルー（ストッカーのポートなら直接収容 → ストッカーへ付け替え → 同じ行き先へ循環経路でループ）→
+    /// それ以外はその場で待つ。満杯のストッカーへの到着は循環経路でループする。
+    /// （特定ポート予約は、補充搬送の長いボトルネック装置でパイプラインが作れず枯渇させたため撤去した）
+    /// ストッカーの空きは「在庫 ＋ レール上でストッカーへ向かうロット」で数える（到着時に満杯で詰まらないよう予約扱い）
+    private mutating func stepRailTransport(models: [EquipmentModel?], routes: inout [String: RouteInfo]) {
+        var occupancy = railOccupancy()
+        let inboundState = railInbound()
+        var inbound = inboundState.tools
+        var stockerInbound = inboundState.stocker
+
+        // 3. 出発（経路のある次工程の候補のうちスコア最小へ。ストッカー経由のスコア
+        //    （往路 ＋ 取り扱い ＋ 復路（ストッカー → 最良候補）＋ 最良候補の待ち）の方が小さければストッカーへ：
+        //    §1.7 の予防策・混雑時の圧力逃がし。
+        //    候補が無ければストッカーへ退避、それも無理なら .done のまま留まる。出荷口行きは無条件）
         for t in tools.indices {
-            tools[t].busyEMA += ((busy[t] ? 1 : 0) - tools[t].busyEMA) * alpha
-            for port in tools[t].ports where port.state == .waiting {
-                if let lotId = port.lotId {
-                    lots[lotId]?.waitedGameMin += 1
+            for p in tools[t].ports.indices where tools[t].ports[p].state == .done {
+                guard let lotId = tools[t].ports[p].lotId, var lot = lots[lotId] else { continue }
+                let route = Self.routeInfo(nodeId: lot.nodeId, lithoClass: lot.lithoClass, cache: &routes)
+                let stockerHasRoom = stocker.lotIds.count + stockerInbound < stocker.capacity
+                var choice: (path: [GridPoint], destination: LotDestination)?
+                if lot.stepIndex >= route.steps.count {
+                    if let path = railPath(from: .tool(t), to: .shipping) {
+                        choice = (path: path, destination: .shipping)
+                    } else if stockerHasRoom, let path = railPath(from: .tool(t), to: .stocker) {
+                        choice = (path: path, destination: .stocker)
+                    }
+                } else {
+                    let process = route.steps[lot.stepIndex]
+                    let candidates = railCandidates(process: process, nodeId: lot.nodeId, from: .tool(t), metered: false,
+                                                    models: models, inbound: inbound)
+                    let stockerPath = stockerHasRoom ? railPath(from: .tool(t), to: .stocker) : nil
+                    if let best = Self.bestCandidate(candidates) {
+                        choice = (path: best.path, destination: .tool(tools[best.index].id))
+                        if let detour = stockerPath, let onward = railPath(from: .stocker, to: .tool(best.index)) {
+                            let stockerScore = Double(detour.count) * Self.railCellGameMin + stocker.handlingGameMin
+                                + Double(onward.count) * Self.railCellGameMin + best.wait
+                            if stockerScore < best.score {
+                                choice = (path: detour, destination: .stocker)
+                            }
+                        }
+                    } else if hasTools(process: process, nodeId: lot.nodeId, models: models), let detour = stockerPath {
+                        // 経路のある装置は無いが装置自体はある：ストッカーへ退避
+                        choice = (path: detour, destination: .stocker)
+                    }
+                }
+                // 行き先なし、または経路の先頭セルが塞がっている：.done のままポートに留まる
+                guard let chosen = choice, canDepart(onto: chosen.path, occupancy: occupancy) else { continue }
+                lot.location = .rail(cellIndex: 0, progress: 0)
+                lot.path = chosen.path
+                lot.destination = chosen.destination
+                lot.destinationToolId = Self.toolId(of: chosen.destination)
+                lots[lotId] = lot
+                tools[t].ports[p] = LoadPort(lotId: nil)
+                Self.occupy(&occupancy, lotId: lotId, path: chosen.path, index: 0)
+                switch chosen.destination {
+                case .tool(let id): inbound[id, default: 0] += 1
+                case .stocker: stockerInbound += 1
+                case .shipping: break
+                }
+                lastProgressGameMin = currentGameMin
+            }
+        }
+
+        // 4. 搬送・到着（投入順に1セル/3分。次セルが塞がっていればその場で待つ）
+        let railIds = lotReleaseOrder.filter {
+            if case .rail? = lots[$0]?.location { return true }
+            return false
+        }
+        var shippedIds: Set<UUID> = []
+        for lotId in railIds {
+            guard var lot = lots[lotId], case .rail(let index, let progressBefore) = lot.location,
+                  index < lot.path.count else { continue }
+            let progress = progressBefore + 1 / Self.railCellGameMin
+            if progress < 1 - 1e-9 {
+                lot.location = .rail(cellIndex: index, progress: progress)
+                lots[lotId] = lot
+                continue
+            }
+            let cell = lot.path[index]
+            if index == lot.path.count - 1 {
+                // 空きポートがあれば入線（最小インデックス）→ 無ければ、行き先装置に処理済みポートがある
+                // （待つとその出口を塞ぐ）場合はドライブスルー（下）→ それ以外はその場で待つ
+                // （満杯時の既定のストッカー迂回は、迂回交通そのものが環を塞ぎ WIP60 で完了 0 の凍結になったため戻した）
+                var driveThrough = false
+                switch lot.destination {
+                case .tool(let destId)?:
+                    let t = tools.firstIndex(where: { $0.id == destId })
+                    if let t = t, let p = tools[t].ports.firstIndex(where: { $0.state == .empty }) {
+                        tools[t].ports[p] = LoadPort(lotId: lotId, state: .waiting, remainingGameMin: 0)
+                        lot.location = .port(toolId: destId, portIndex: p)
+                        lot.path = []
+                        lot.destination = nil
+                        lot.destinationToolId = nil
+                        Self.vacate(&occupancy, lotId: lotId, cell: cell)
+                        lastProgressGameMin = currentGameMin
+                    } else if let t = t, tools[t].ports.contains(where: { $0.state == .done }) {
+                        driveThrough = true
+                    } else {
+                        // 全ポートが処理中または待機中：その場で待つ
+                        lot.location = .rail(cellIndex: index, progress: 1)
+                        lot.waitedGameMin += 1
+                    }
+                case .stocker?:
+                    if stocker.lotIds.count < stocker.capacity {
+                        stocker.lotIds.append(lotId)
+                        lot.location = .stocker
+                        lot.stockerHandlingUntilGameMin = currentGameMin + stocker.handlingGameMin
+                        lot.path = []
+                        lot.destination = nil
+                        lot.destinationToolId = nil
+                        Self.vacate(&occupancy, lotId: lotId, cell: cell)
+                        stockerInbound -= 1
+                        lastProgressGameMin = currentGameMin
+                    } else if let loop = railGraph?.loopPath(from: cell, to: Set(stockerPortCells)), loop.count >= 2 {
+                        // ストッカーが満杯：循環して再試行する（行き先・stockerInbound は変えない）
+                        lot.path = loop
+                        lot.location = .rail(cellIndex: 0, progress: 0)
+                        Self.vacate(&occupancy, lotId: lotId, cell: cell)
+                        Self.occupy(&occupancy, lotId: lotId, path: loop, index: 0)
+                    } else {
+                        lot.location = .rail(cellIndex: index, progress: 1)
+                        lot.waitedGameMin += 1
+                    }
+                case .shipping?:
+                    Self.vacate(&occupancy, lotId: lotId, cell: cell)
+                    lastProgressGameMin = currentGameMin
+                    settle(lot)
+                    shippedIds.insert(lotId)
+                    lots[lotId] = nil
+                    continue
+                case nil:
+                    // 行き先なし（通常は起きない）：その場で待つ
+                    lot.location = .rail(cellIndex: index, progress: 1)
+                    lot.waitedGameMin += 1
+                }
+                if driveThrough {
+                    // ドライブスルー：処理済みロットの出口になるポートセルに駐車させない。
+                    // ストッカーのポートなら直接収容 → ストッカーへ付け替え → 同じ行き先へ循環 → その場で待つ
+                    var headingToStocker = false
+                    if case .stocker? = lot.destination { headingToStocker = true }
+                    let stockerHasRoom = stocker.lotIds.count + stockerInbound < stocker.capacity
+                    let loopGoals: Set<GridPoint>
+                    switch lot.destination {
+                    case .tool(let destId)?: loopGoals = Set(toolPortCells[destId] ?? [])
+                    case .stocker?: loopGoals = Set(stockerPortCells)
+                    default: loopGoals = []
+                    }
+                    if stockerHasRoom, stockerPortCells.contains(cell) {
+                        // 現在セルがストッカーのポート：そのまま収容する
+                        stocker.lotIds.append(lotId)
+                        lot.location = .stocker
+                        lot.stockerHandlingUntilGameMin = currentGameMin + stocker.handlingGameMin
+                        lot.path = []
+                        lot.destination = nil
+                        lot.destinationToolId = nil
+                        Self.vacate(&occupancy, lotId: lotId, cell: cell)
+                        if headingToStocker { stockerInbound -= 1 }
+                        lastProgressGameMin = currentGameMin
+                    } else if stockerHasRoom,
+                              let detour = railPath(from: .cell(cell), to: .stocker), detour.first == cell {
+                        // 現在セルからストッカーへ付け替える
+                        lot.path = detour
+                        lot.location = .rail(cellIndex: 0, progress: 0)
+                        lot.destination = .stocker
+                        lot.destinationToolId = nil
+                        Self.vacate(&occupancy, lotId: lotId, cell: cell)
+                        Self.occupy(&occupancy, lotId: lotId, path: detour, index: 0)
+                        if !headingToStocker { stockerInbound += 1 }
+                    } else if !loopGoals.isEmpty,
+                              let loop = railGraph?.loopPath(from: cell, to: loopGoals), loop.count >= 2 {
+                        // 同じ行き先へ循環して再試行する（行き先・inbound は変えない）
+                        lot.path = loop
+                        lot.location = .rail(cellIndex: 0, progress: 0)
+                        Self.vacate(&occupancy, lotId: lotId, cell: cell)
+                        Self.occupy(&occupancy, lotId: lotId, path: loop, index: 0)
+                    } else {
+                        lot.location = .rail(cellIndex: index, progress: 1)
+                        lot.waitedGameMin += 1
+                    }
+                }
+            } else {
+                let next = lot.path[index + 1]
+                if let travel = RailDirection.between(cell, next),
+                   canEnter(next, travelDirection: travel, occupancy: occupancy) {
+                    Self.vacate(&occupancy, lotId: lotId, cell: cell)
+                    lot.location = .rail(cellIndex: index + 1, progress: progress - 1)
+                    Self.occupy(&occupancy, lotId: lotId, path: lot.path, index: index + 1)
+                } else {
+                    lot.location = .rail(cellIndex: index, progress: 1)
+                    lot.waitedGameMin += 1
+                }
+            }
+            lots[lotId] = lot
+        }
+        if !shippedIds.isEmpty {
+            lotReleaseOrder.removeAll { shippedIds.contains($0) }
+        }
+
+        // 5. ストッカー払い出し（取り扱い時間の経過後、経路のある候補のうちスコア最小へ、経路の先頭セルへ
+        //    出発できるときだけ。inbound はスコアの予想待ち用にフェーズ開始時に数え直し、払い出すたびに加算する）
+        //    計量は距離考慮型：候補 T への inbound として数えるのは、レール上で T へ向かうロットのうち残り経路セル数が
+        //    この払い出しの経路セル数より小さいもの（自分より先に着くロット）だけで、それが T の空きポート数未満なら通す。
+        //    一律の計量は遠方のロットまで予約扱いし、最頻工程の成膜で 600 分中 0 回しか通らなかった。一方、無計量だと
+        //    長距離の払い出しが環を溢れさせて凍結する。先に着けるロットだけを競合として数えれば、ストッカー隣接の
+        //    成膜への補充は即座に通り、長距離の払い出しには流量調整が効く。
+        let dispatchInbound = railInbound()
+        inbound = dispatchInbound.tools
+        var remainingCells = dispatchInbound.remainingCells
+        let stockedIds = stocker.lotIds
+        for lotId in stockedIds {
+            guard var lot = lots[lotId], currentGameMin >= lot.stockerHandlingUntilGameMin else { continue }
+            let route = Self.routeInfo(nodeId: lot.nodeId, lithoClass: lot.lithoClass, cache: &routes)
+            var choice: (path: [GridPoint], destination: LotDestination)?
+            if lot.stepIndex >= route.steps.count {
+                if let path = railPath(from: .stocker, to: .shipping) {
+                    choice = (path: path, destination: .shipping)
+                }
+            } else {
+                let candidates = railCandidates(process: route.steps[lot.stepIndex], nodeId: lot.nodeId, from: .stocker,
+                                                metered: true, remainingCells: remainingCells,
+                                                models: models, inbound: inbound)
+                if let best = Self.bestCandidate(candidates) {
+                    choice = (path: best.path, destination: .tool(tools[best.index].id))
+                }
+            }
+            guard let chosen = choice, canDepart(onto: chosen.path, occupancy: occupancy) else { continue }
+            lot.location = .rail(cellIndex: 0, progress: 0)
+            lot.path = chosen.path
+            lot.destination = chosen.destination
+            lot.destinationToolId = Self.toolId(of: chosen.destination)
+            lots[lotId] = lot
+            Self.occupy(&occupancy, lotId: lotId, path: chosen.path, index: 0)
+            if let id = Self.toolId(of: chosen.destination) {
+                inbound[id, default: 0] += 1
+                remainingCells[id, default: []].append(chosen.path.count)
+            }
+            stocker.lotIds.removeAll { $0 == lotId }
+        }
+
+        // 6. 投入（プル方式。WIP 上限未満で、先頭工程の装置のうち投入口から経路がある候補のスコア最小へ、
+        //    経路の先頭セルへ出発できるときだけ1ロット。inbound 計量はしない：遠方を走行中の戻りロットまで数えると
+        //    投入が定常的に塞がれるため。戻りロットとのポート競合は到着時収容で処理する）
+        if lots.count < wipCap {
+            inbound = railInbound().tools
+            let route = Self.routeInfo(nodeId: releaseNodeId, lithoClass: releaseLithoClass, cache: &routes)
+            if let first = route.steps.first {
+                let candidates = railCandidates(process: first, nodeId: releaseNodeId, from: .entry, metered: false,
+                                                models: models, inbound: inbound)
+                if let best = Self.bestCandidate(candidates), canDepart(onto: best.path, occupancy: occupancy) {
+                    nextLotSerial += 1
+                    let destId = tools[best.index].id
+                    let lot = Lot(
+                        id: Self.lotId(serial: nextLotSerial),
+                        nodeId: releaseNodeId,
+                        productId: releaseProductId,
+                        lithoClass: releaseLithoClass,
+                        wafers: Self.lotWafers,
+                        location: .rail(cellIndex: 0, progress: 0),
+                        destinationToolId: destId,
+                        releasedAtGameMin: currentGameMin,
+                        learningWafersAtRelease: stats.releasedWafers,
+                        path: best.path,
+                        destination: .tool(destId)
+                    )
+                    lots[lot.id] = lot
+                    lotReleaseOrder.append(lot.id)
+                    stats.releasedWafers += Double(Self.lotWafers)
+                    stats.releasedLots += 1
                 }
             }
         }

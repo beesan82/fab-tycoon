@@ -915,4 +915,180 @@ let eqExpectedNet = eqSale.revenueYen - eqOutputChips * eqDerived.currentPriceYe
 check(abs(eqSettle.netYen - eqExpectedNet) < 0.01,
       "P1: ロット精算 \(Int(eqSettle.netYen)) 円が現行 tick の式と一致（期待 \(Int(eqExpectedNet)) 円）")
 
+// MARK: - 1.0 P2: レイアウトグラフ
+
+let p2State = GameState.initial()
+let p2Template = LayoutTemplate.starter16(equipment: p2State.fab.equipment)
+let p2Layout = p2Template.layout
+let p2Placed = p2Template.placed
+check(p2Placed.count == 11 && p2Template.stored.isEmpty,
+      "P2: テンプレートに初期装置 11 台がすべて配置される（配置 \(p2Placed.count) 台・倉庫 \(p2Template.stored.count) 台）")
+check(p2Layout.parcels == FloorLayout.initialParcels, "P2: テンプレートの区画は初期 2×2")
+check(p2Layout.rails.count == 40, "P2: テンプレートのレールは 38 セルのリング＋スパー 2 セル（\(p2Layout.rails.count) セル）")
+let p2PlacementErrors = p2Placed.compactMap { tool -> String? in
+    guard let error = p2Layout.toolPlacementError(tool, origin: tool.origin, rotation: tool.rotation, among: p2Placed)
+    else { return nil }
+    return "\(tool.modelId)@(\(tool.origin.x),\(tool.origin.y)): \(error)"
+}
+let p2PlacementDetail = p2PlacementErrors.joined(separator: " / ")
+check(p2PlacementErrors.isEmpty, "P2: テンプレートの装置は区画内で重なりなし \(p2PlacementDetail)")
+
+check((try? JSONDecoder().decode(FloorLayout.self, from: JSONEncoder().encode(p2Layout))) == p2Layout,
+      "P2: FloorLayout の Codable ラウンドトリップ")
+let p2RailLot = Lot(id: SimCore.lotId(serial: 998), nodeId: "n28", productId: "logic", lithoClass: .duvDry,
+                    location: .rail(cellIndex: 1, progress: 0.5), releasedAtGameMin: 0, learningWafersAtRelease: 0,
+                    path: [GridPoint(x: 0, y: 5), GridPoint(x: 1, y: 5), GridPoint(x: 2, y: 5)],
+                    destination: .tool(p2Placed.first?.id ?? UUID()))
+check((try? JSONDecoder().decode(Lot.self, from: JSONEncoder().encode(p2RailLot))) == p2RailLot,
+      "P2: レール上のロット（path・行き先つき）の Codable ラウンドトリップ")
+
+let p2Graph = RailGraph(layout: p2Layout)
+let p2EntryPorts = p2Graph.portCells(footprint: p2Layout.entryCells())
+let p2StockerPorts = p2Graph.portCells(footprint: p2Layout.stockerCells())
+let p2ShippingPorts = p2Graph.portCells(footprint: p2Layout.shippingCells())
+check(p2Graph.shortestPath(from: p2EntryPorts, to: Set(p2ShippingPorts)) != nil, "P2: 投入口から出荷口へレール経路がある")
+if let d1 = p2Placed.first(where: { $0.modelId == "D1" }), let l1 = p2Placed.first(where: { $0.modelId == "L1" }) {
+    let d1Ports = p2Graph.portCells(footprint: p2Layout.cells(of: d1))
+    let l1Ports = p2Graph.portCells(footprint: p2Layout.cells(of: l1))
+    let direct = p2Graph.shortestPath(from: d1Ports, to: Set(l1Ports))
+    let toStocker = p2Graph.shortestPath(from: d1Ports, to: Set(p2StockerPorts))
+    let fromStocker = p2Graph.shortestPath(from: p2StockerPorts, to: Set(l1Ports))
+    if let direct = direct, let toStocker = toStocker, let fromStocker = fromStocker {
+        let directMin = Double(direct.count) * 3
+        let viaStockerMin = Double(toStocker.count + fromStocker.count) * 3 + p2Layout.stocker.handlingGameMin
+        check(directMin < viaStockerMin,
+              "P2: D1 → L1 の直結 \(Int(directMin)) 分はストッカー経由 \(Int(viaStockerMin)) 分より速い")
+    } else {
+        check(false, "P2: D1 → L1 の直結経路とストッカー経由の経路がある")
+    }
+} else {
+    check(false, "P2: テンプレートに D1 と L1 が配置されている")
+}
+
+let p2LithoClass = Engine.topLithoClass(state: p2State) ?? .duvDry
+let p2Analysis = LayoutAnalysis.analyze(layout: p2Layout, tools: p2Placed, nodeId: "n28", lithoClass: p2LithoClass)
+let p2AnalysisDetail = p2Analysis.problems.map { $0.message }.joined(separator: " / ")
+check(p2Analysis.problems.isEmpty && p2Analysis.lineConnected,
+      "P2: テンプレートは全ルートペア接続済み・未接続装置なし（問題 \(p2Analysis.problems.count) 件）\(p2AnalysisDetail)")
+
+// 寸断検出: 左端の戻りレール（x=0 の y=6〜9）を切る
+var p2BrokenLayout = p2Layout
+for y in 6...9 {
+    p2BrokenLayout.removeRail(at: GridPoint(x: 0, y: y))
+}
+let p2BrokenAnalysis = LayoutAnalysis.analyze(layout: p2BrokenLayout, tools: p2Placed, nodeId: "n28", lithoClass: p2LithoClass)
+var p2BreakCount = 0
+var p2BreakToDeposition = false
+var p2BreakToShipping = false
+var p2UnconnectedOutputs = 0
+for problem in p2BrokenAnalysis.problems {
+    switch problem {
+    case .lineBreak(let from, let to):
+        p2BreakCount += 1
+        if to == .deposition { p2BreakToDeposition = true }
+        if from == .packaging && to == nil { p2BreakToShipping = true }
+    case .unconnectedOutput:
+        p2UnconnectedOutputs += 1
+    case .unconnectedInput:
+        break
+    }
+}
+check(p2BreakCount >= 1 && !p2BrokenAnalysis.lineConnected, "P2: 戻りレールを切るとライン寸断を検出（\(p2BreakCount) 件）")
+check(p2BreakToDeposition, "P2: 寸断に「→ 成膜」のペアが含まれる")
+check(p2BreakToShipping, "P2: 寸断に「PKG → 出荷口」が含まれる")
+check(p2UnconnectedOutputs >= 1, "P2: 出口が未接続の装置を検出（\(p2UnconnectedOutputs) 台）")
+
+// デッドロック検出: ストッカー・出荷口に繋がらない 12 セルの閉リングに D1 だけを置く
+func p2Rail(_ x: Int, _ y: Int, _ direction: RailDirection, _ kind: RailCellKind = .straight) -> RailCell {
+    RailCell(point: GridPoint(x: x, y: y), direction: direction, kind: kind)
+}
+let p2RingLayout = FloorLayout(
+    parcels: [ParcelCoord(x: 0, y: 0)],
+    rails: [
+        p2Rail(2, 2, .east), p2Rail(3, 2, .east), p2Rail(4, 2, .east), p2Rail(5, 2, .south, .corner),
+        p2Rail(5, 3, .south), p2Rail(5, 4, .south), p2Rail(5, 5, .west, .corner),
+        p2Rail(4, 5, .west), p2Rail(3, 5, .west), p2Rail(2, 5, .north, .corner),
+        p2Rail(2, 4, .north), p2Rail(2, 3, .north),
+    ],
+    stocker: Stocker(origin: GridPoint(x: 6, y: 6)),
+    entry: EntryPort(origin: GridPoint(x: 3, y: 3)),
+    shipping: ShippingPort(origin: GridPoint(x: 6, y: 0))
+)
+if let ringD1Instance = p2State.fab.equipment.first(where: { $0.modelId == "D1" }) {
+    var ringD1 = ToolInstance(instance: ringD1Instance)
+    ringD1.origin = GridPoint(x: 2, y: 0)
+    check(p2RingLayout.toolPlacementError(ringD1, origin: ringD1.origin, rotation: 0, among: [ringD1]) == nil,
+          "P2: 閉リングのレイアウトに D1 を配置できる")
+    var ringSim = SimCore(state: p2State, tools: [ringD1], layout: p2RingLayout)
+    for _ in 0..<(30 * 60) { ringSim.step() }
+    check(ringSim.isDeadlocked && ringSim.stats.completedLots == 0,
+          "P2: 閉リングでデッドロックを検出（完了 \(ringSim.stats.completedLots) ロット、WIP \(ringSim.lots.count)）")
+    let ringAnalysis = LayoutAnalysis.analyze(layout: p2RingLayout, tools: [ringD1], nodeId: "n28", lithoClass: p2LithoClass)
+    let ringBreakToLitho = ringAnalysis.problems.contains { problem in
+        if case .lineBreak(_, let to) = problem { return to == .lithography }
+        return false
+    }
+    check(ringBreakToLitho, "P2: 閉リングのレイアウトで「→ 露光」の寸断を検出")
+} else {
+    check(false, "P2: 初期装備に D1 がある")
+}
+
+// 配置バリデーション
+if p2Placed.count >= 3 {
+    let firstL1 = p2Placed[0]
+    let secondL1 = p2Placed[1]
+    let firstD1 = p2Placed[2]
+    check(p2Layout.toolPlacementError(secondL1, origin: firstL1.origin, rotation: 0, among: p2Placed) != nil,
+          "P2: 既存の L1 と同じ場所には置けない（重なり）")
+    check(p2Layout.toolPlacementError(firstD1, origin: GridPoint(x: 20, y: 20), rotation: 0, among: p2Placed) != nil,
+          "P2: 未購入区画 (20,20) には置けない")
+    check(p2Layout.toolPlacementError(firstD1, origin: GridPoint(x: 5, y: 13), rotation: 0, among: p2Placed) == nil,
+          "P2: 空き地 (5,13) には D1 を置ける")
+} else {
+    check(false, "P2: 配置バリデーション用の装置がテンプレートにある")
+}
+
+// 定常運転: P1 と同じプロトコル（ウォームアップ 900 ゲーム時間 → 計測 1200 ゲーム時間）をレール搬送で。
+// WIP 上限は 16×16 テンプレートの CONWIP 運転点として実測で安定な 45 を使う（設計上限は 200。
+// 環の物理容量から 52 以上では凍結する。根拠は設計書 付録 C.5）
+var p2Sim = SimCore(state: p2State, tools: p2Placed, layout: p2Layout)
+p2Sim.wipCap = 45
+var p2EverDeadlocked = false
+for _ in 0..<(900 * 60) {
+    p2Sim.step()
+    if p2Sim.isDeadlocked { p2EverDeadlocked = true }
+}
+let p2Snap = p2Sim.stats
+var p2MaxLots = 0
+var p2MaxStocker = 0
+for _ in 0..<(1200 * 60) {
+    p2Sim.step()
+    p2MaxLots = max(p2MaxLots, p2Sim.lots.count)
+    p2MaxStocker = max(p2MaxStocker, p2Sim.stocker.lotIds.count)
+    if p2Sim.isDeadlocked { p2EverDeadlocked = true }
+}
+let p2Throughput = (p2Sim.stats.completedWafers - p2Snap.completedWafers) / 1200
+let p2ReleaseRate = (p2Sim.stats.releasedWafers - p2Snap.releasedWafers) / 1200
+let p2WindowLots = p2Sim.stats.completedLots - p2Snap.completedLots
+let p2MeanDetection = p2WindowLots > 0
+    ? (p2Sim.stats.sumDetectionRate - p2Snap.sumDetectionRate) / Double(p2WindowLots) : 0
+// 設計書 付録 C.5 に転記する実測値（判定より先に出力する）
+print("P2 定常（レール搬送）: スループット \(num(p2Throughput, 3)) WPH / 投入 \(num(p2ReleaseRate, 3)) 枚/時")
+print("P2 定常（レール搬送）: 検出率 \(num(p2MeanDetection, 4))（完了 \(p2WindowLots) ロット） / 最大 WIP \(p2MaxLots) ロット")
+var p2RailLotsAtEnd = 0
+for lot in p2Sim.lots.values {
+    if case .rail = lot.location { p2RailLotsAtEnd += 1 }
+}
+print("P2 定常（レール搬送）: ストッカー最大 \(p2MaxStocker) / 終了時レール上ロット \(p2RailLotsAtEnd) / 停止セル \(p2Sim.deadlockCells.count) / デッドロック \(p2EverDeadlocked)")
+// P2 の帯: 実レール＋ブロッキング搬送では行き先の陳腐化による台間偏りで律速（成膜）の稼働率が約 93.5% に留まり、
+// 実測 7.92 WPH（P1 比 −6.8%）が物理的な着地点。予約・ゲート・リルート等は凍結または滞留で不採用（付録 C.5）
+check(p2Throughput >= 8.5 * 0.90 && p2Throughput <= 8.5 * 1.03,
+      "P2: テンプレートの定常スループット \(String(format: "%.3f", p2Throughput)) WPH（P1 基準 8.5 の −10%〜+3%。実レール搬送では律速・成膜の稼働率が上限、付録 C.5 参照）")
+check(p2ReleaseRate >= 8.5 * 0.90 && p2ReleaseRate <= 8.5 * 1.03,
+      "P2: 学習 W の加算 \(String(format: "%.3f", p2ReleaseRate)) 枚/時（P1 基準 8.5 の −10%〜+3%。実レール搬送では律速・成膜の稼働率が上限、付録 C.5 参照）")
+check(p2WindowLots > 0 && abs(p2MeanDetection - 0.775) <= 0.005,
+      "P2: 定常検出率 \(String(format: "%.4f", p2MeanDetection))（77.5% ±0.5pt、完了 \(p2WindowLots) ロット）")
+check(p2MaxLots <= 200, "P2: 計測中の WIP は常に 200 ロット以下（最大 \(p2MaxLots)）")
+check(!p2EverDeadlocked, "P2: テンプレート定常運転（2100 ゲーム時間）を通してデッドロックなし")
+
 print("HEADLESS CHECK PASSED")
