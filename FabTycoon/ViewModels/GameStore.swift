@@ -47,7 +47,7 @@ final class GameStore: ObservableObject {
             Engine.settleSubsidyIfDue(state: &loaded, now: now)
             let elapsed = now.timeIntervalSince(saved.lastSavedAt)
             if elapsed > Self.offlineThreshold {
-                report = Engine.offlineProgress(state: &loaded, elapsedRealSeconds: elapsed)
+                report = Self.advanceOffline(state: &loaded, elapsedRealSeconds: elapsed)
             }
         } else {
             loaded = GameState.initial(now: now)
@@ -102,7 +102,7 @@ final class GameStore: ObservableObject {
             Engine.settleResearchIfDue(state: &state, now: now)
             Engine.settleSubsidyIfDue(state: &state, now: now)
             if gap > Self.offlineThreshold {
-                offlineReport = Engine.offlineProgress(state: &state, elapsedRealSeconds: gap)
+                offlineReport = Self.advanceOffline(state: &state, elapsedRealSeconds: gap)
             } else if gap > 0 {
                 // 短い中断は通常速度でそのまま追いつく
                 Engine.tick(state: &state, dtRealSeconds: gap)
@@ -134,6 +134,26 @@ final class GameStore: ObservableObject {
     private func refresh() {
         derived = Engine.derived(state: state)
     }
+
+    /// オフライン進行（§1.8 のハイブリッド方式）。結果を OfflineReportSheet 用の OfflineReport に詰め替える
+    private static func advanceOffline(state: inout GameState, elapsedRealSeconds: Double) -> OfflineReport {
+        // OfflineProgress は fab.sim をそのまま使うので、先に配置と整合させておく
+        state.fab.sim = Engine.reconciledSnapshot(state: &state)
+        let report = OfflineProgress.advance(state: &state, elapsedRealSeconds: elapsedRealSeconds)
+        return OfflineReport(
+            elapsedSeconds: report.elapsedRealSeconds,
+            effectiveSeconds: report.effectiveRealSeconds,
+            producedWafers: report.releasedWafers,
+            goodChips: report.goodChips,
+            revenueYen: report.netYen
+        )
+    }
+
+    // MARK: ライン状態
+
+    var layoutProblems: [LayoutProblem] { Engine.layoutProblems(state: state) }
+
+    var simDeadlocked: Bool { Engine.isSimDeadlocked(state: state) }
 
     // MARK: アクション
 
@@ -199,10 +219,73 @@ final class GameStore: ObservableObject {
     }
 
     @discardableResult
-    func switchNode(_ nodeId: String) -> Bool {
-        let ok = Engine.switchNode(state: &state, toNodeId: nodeId)
+    func switchNode(_ nodeId: String, mode: NodeSwitchMode) -> Bool {
+        let ok = Engine.requestNodeSwitch(state: &state, toNodeId: nodeId, mode: mode)
         refresh()
         return ok
+    }
+
+    func cancelNodeSwitch() {
+        Engine.cancelNodeSwitch(state: &state)
+        refresh()
+    }
+
+    // MARK: 配置編集
+
+    @discardableResult
+    func placeStoredTool(toolId: UUID, origin: GridPoint, rotation: Int) -> Bool {
+        let ok = Engine.placeStoredTool(state: &state, toolId: toolId, origin: origin, rotation: rotation)
+        refresh()
+        return ok
+    }
+
+    @discardableResult
+    func movePlacedTool(toolId: UUID, origin: GridPoint, rotation: Int) -> Bool {
+        let ok = Engine.movePlacedTool(state: &state, toolId: toolId, origin: origin, rotation: rotation)
+        refresh()
+        return ok
+    }
+
+    @discardableResult
+    func rotatePlacedTool(toolId: UUID) -> Bool {
+        let ok = Engine.rotatePlacedTool(state: &state, toolId: toolId)
+        refresh()
+        return ok
+    }
+
+    @discardableResult
+    func removePlacedToolToStorage(toolId: UUID) -> Bool {
+        let ok = Engine.removePlacedToolToStorage(state: &state, toolId: toolId)
+        refresh()
+        return ok
+    }
+
+    @discardableResult
+    func setRail(cell: RailCell) -> Bool {
+        let ok = Engine.setRail(state: &state, cell: cell)
+        refresh()
+        return ok
+    }
+
+    @discardableResult
+    func removeRail(at point: GridPoint) -> Bool {
+        let ok = Engine.removeRail(state: &state, at: point)
+        refresh()
+        return ok
+    }
+
+    @discardableResult
+    func buyParcel(coord: ParcelCoord) -> Bool {
+        let ok = Engine.buyParcel(state: &state, coord: coord)
+        refresh()
+        return ok
+    }
+
+    @discardableResult
+    func resolveDeadlock() -> (moved: Int, scrapped: Int) {
+        let result = Engine.resolveDeadlock(state: &state)
+        refresh()
+        return result
     }
 
     @discardableResult

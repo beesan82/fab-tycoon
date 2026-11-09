@@ -31,6 +31,8 @@ struct SimOfflineReport: Equatable {
     var netYen: Double
     /// うち外挿分
     var extrapolatedNetYen: Double
+    /// 良品チップの増分（シミュレーション＋外挿）
+    var goodChips: Double
     /// 寸断・デッドロック・スループット0 で外挿を止めた
     var lineJammed: Bool
 }
@@ -112,11 +114,13 @@ enum OfflineProgress {
         if let snapshot = state.fab.sim {
             sim = SimCore(state: state, snapshot: snapshot)
         } else {
-            let tools = state.fab.placed.isEmpty
-                ? state.fab.equipment.map { ToolInstance(instance: $0) }
-                : state.fab.placed
-            sim = SimCore(state: state, tools: tools, layout: state.fab.layout)
+            // 装置の読み方は Engine.installedTools と同じ（レイアウトがあれば placed が空でも equipment を読まない）
+            sim = SimCore(state: state, tools: Engine.installedTools(state: state), layout: state.fab.layout)
         }
+        // 学習 W の起点を state.learningWafers から引き直す（Engine.reconciledSim と同じ自己修復）
+        Engine.resyncLearningWafersBase(&sim, state: state)
+        // WIP 上限は運転点に強制する（付録 C.5。テンプレートは 45）
+        sim.wipCap = SimCore.operatingWipCap(layout: state.fab.layout)
         let frozenPrice = state.market.recentAvgPriceYen
         sim.settlementPriceYen = frozenPrice
 
@@ -156,35 +160,41 @@ enum OfflineProgress {
         let total = simulated + extrapolated
         let completedLots = s2.completedLots - s0.completedLots
 
-        // 6. state への反映
+        // 6. state への反映（生産系は全額）
         state.learningWafers[sim.releaseNodeId, default: 0] += total.releasedWafers
         state.stats.totalWafersInput += total.releasedWafers
         state.stats.totalGoodChips += total.goodChips
         state.stats.totalDefectChips += total.detectedDefectChips
         state.stats.defectLossYen += total.detectedDefectChips * frozenPrice
         let shippedChips = total.goodChips + total.shippedDefectChips
-        state.stats.totalShippedChips += shippedChips
-        state.stats.totalMarketDefectChips += total.shippedDefectChips
-        state.stats.totalMarketPenaltyYen += total.penaltyYen
-        state.stats.totalGrossSalesYen += total.grossYen
-        state.stats.totalCogsYen += total.cogsYen
-        state.stats.totalRevenueYen += total.netYen
         // 外挿のロット数は数えない（実在しないため）
         state.stats.completedLots += completedLots
 
+        // 売上として計上する割合（自動販売は全量、手動販売は在庫上限を超えて現金化した分だけ。Engine.tick と同じ）
+        var soldFraction = 1.0
         if state.fab.autoSellEnabled {
             // 不良が多すぎると純収入がマイナスになりうるため、現金は0で下げ止める（Engine.tick と同じ）
             state.cashYen = max(0, state.cashYen + total.netYen)
         } else {
             // 在庫に積み、上限を超えた分は平均純益/チップで現金化する
             state.fab.inventoryChips += shippedChips
+            var overflow = 0.0
             if state.fab.inventoryChips > Engine.inventoryCap {
-                let overflow = state.fab.inventoryChips - Engine.inventoryCap
+                overflow = state.fab.inventoryChips - Engine.inventoryCap
                 state.fab.inventoryChips = Engine.inventoryCap
                 let netPerChip = shippedChips > 0 ? total.netYen / shippedChips : 0
                 state.cashYen = max(0, state.cashYen + overflow * netPerChip)
             }
+            soldFraction = shippedChips > 0 ? overflow / shippedChips : 0
         }
+        // 売上系は売れた割合で按分する（在庫に残った分は sellInventory で計上するので二重にしない。§7.1）
+        let sold = total.scaled(soldFraction)
+        state.stats.totalShippedChips += shippedChips * soldFraction
+        state.stats.totalMarketDefectChips += sold.shippedDefectChips
+        state.stats.totalMarketPenaltyYen += sold.penaltyYen
+        state.stats.totalGrossSalesYen += sold.grossYen
+        state.stats.totalCogsYen += sold.cogsYen
+        state.stats.totalRevenueYen += sold.netYen
 
         state.fab.running = total.completedWafers + total.releasedWafers > 0
         // 末状態はシミュレーション終了時のもの（外挿分のロットは実在しない）
@@ -203,6 +213,7 @@ enum OfflineProgress {
             releasedWafers: total.releasedWafers,
             netYen: total.netYen,
             extrapolatedNetYen: extrapolated.netYen,
+            goodChips: total.goodChips,
             lineJammed: jammed
         )
     }

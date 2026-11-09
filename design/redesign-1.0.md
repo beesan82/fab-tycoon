@@ -701,3 +701,54 @@ P2（レール搬送）は完了。HeadlessCheck は 377 件すべて通過（HE
 - `freshSnapshot` は SimCore の既定の `wipCap = 200` を持つ。C.5 のとおり 16×16 テンプレートは 52 ロット以上で凍結するため、新規ゲーム・移行直後のセーブをそのまま `advance` すると寸断なしでも詰まり判定になりうる。運転点（45）の設定場所を P4 で決める必要がある。
 - SimCore の学習 W はシミュレーション内の `stats.releasedWafers`（投入時点の値）で、`GameState.learningWafers` とは連動していない。移行直後の sim は W = 0 から始まるため、学習の進んだセーブでは歩留まりが初期値に戻る。
 - 手動販売（`autoSellEnabled == false`）のとき、`advance` は Stats の売上系（`totalRevenueYen` 等）を全量で加えつつ、チップは在庫に積む（指示どおり）。在庫を後で売ると売上系が二重計上になりうる。
+
+### C.7 P4 実装記録（2026-11-09）
+
+> 実測値は 2026-11-09 の検証実行（HeadlessCheck 517 件全通過、HEADLESS CHECK PASSED）の print 出力から転記した。
+
+**実装した方式**
+
+- ゲームループの正を `SimCore` に移行：`Engine.tick` は `reconciledSim`（`fab.sim` と `fab.placed` を整合させた `SimCore`）で整数分ステップし、`SimStats` の増分を `OfflineProgress.advance` と同じ式で `GameState`（学習 W・生産/売上 Stats・資金・在庫）へ反映する。derived は理論値（従来定義、マイルストーン判定用 §9-14）と実測値（sim の EMA）を併記し、`incomePerMinuteYen` は完了ロットがある間は実測を使う。
+- WIP 上限の運転点（P3 申し送り①）：`SimCore.operatingWipCap` = レールセル数 + 5 を [30, 200] にクランプ（16×16 テンプレートは 40 セル → 45）。`freshSnapshot`・tick・advance・レール編集後の `syncWipCap` で適用。
+- 学習連動（P3 申し送り②）：`SimSnapshot.learningWafersBase` を追加し、ロットの `learningWafersAtRelease` = base + `stats.releasedWafers`。復元時は `learningWafers[node]` − `releasedWafers` で base を引き直す自己修復式にしたため、移行・外部変更でも学習はリセットされない。
+- 異常の装置紐づけ（§9-7）：`ActiveExcursion.causeToolId` を tick が `SimCore` に渡し、原因装置での処理完了時に工程全体の欠陥倍率を容量シェア（公称 WPH × Lv 倍率）で割り戻してその装置だけに適用（`lot.excursionHits` で観測可能）。derived の異常表示も同じ割り戻し（同一装置 2 台・片方原因では従来の工程全体劣化と厳密に一致）。
+- ノード切替：`requestNodeSwitch`（drain = 投入停止して流し切り、完了時に切替／immediate = 在庫売却＋仕掛かり廃棄して即切替）と `cancelNodeSwitch` を追加。`switchNode` は即時経路に統一。
+- 旧フィールド退役：tick・buy・upgrade・sell・detach/attach・`migrateToLayout` は `fab.equipment / slots / wipWafers` を書かない。`placed / layout / sim` が正。v4 セーブ往復はチェックで担保。
+- 配置・レール・区画 API：`placeStoredTool / movePlacedTool / rotatePlacedTool / removePlacedToolToStorage / setRail`（新規セルのみ課金 200 万円）/ `removeRail`（全額返金、§3.1・§9-9）/ `buyParcel / expandFab`。デッドロックは `isSimDeadlocked` + `resolveDeadlock`（`SimCore.resolveDeadlockByHandCarry` の手運び解消）。
+- UI：`FloorGridView`（新規、Canvas 描画。区画・レール＋方向シェブロン・ストッカー/投入口/出荷口・装置＋状態ランプ・ボトルネック赤点滅・FOUP 補間移動＋滞留 ⏳・ズーム/パン、編集モード 3 種＝装置（倉庫パレット＋ゴースト緑/赤＋タップ確定）・レール（ドラッグでマンハッタン経路、消しゴム、費用表示）・区画（購入確認））。`LineView` は旧ベイ描画を削除して `FloorGridView` に置換し、問題バナー＋`LayoutProblemsSheet`（タップで該当装置をハイライト）、詰まりバナー＋解消確認、排出バナー＋キャンセル、`NodeSwitchSheet` の方式 Picker、`DefectAnalysisSheet` の原因装置表示を追加。`ProcessDetailView` は設置中/倉庫の 2 系統表示、`ShopView` はフロア/区画表示と自動配置の注記、`GameStore` は `OfflineProgress.advance` 接続と配置系アクション・`layoutProblems / simDeadlocked` を追加。`MARKETING_VERSION` は 1.0.0（β1）。
+
+**実測（HeadlessCheck の print 出力から転記）**
+
+- 初回良品：初期状態から 0.25 秒 tick で 2,714 tick（6,785 ゲーム分）で初回ロット完了。
+- P4 定常（tick 駆動、ウォームアップ 900 時間→計測 1,200 時間）：スループット 7.917 WPH / 投入 7.917 枚/時 / 検出率 0.7783 / 完了 380 ロット（P2 の直接シミュレーションと完全一致）。
+- derived 実測：throughputEMA 8.266 WPH / detectionEMA 0.7778 / 実測収入 42,450,882 円/分。
+- 学習連動：初回ロット歩留まり W=3,000 で 0.7972、W=0 で 0.6983。
+- 異常：平均歩留まり 異常あり 0.7144 / 対照 0.7715（各 176 ロット、差 0.057）。`excursionHits` > 0 のロット存在を確認。
+- オフライン接続：3,600 秒 → シミュレーション 18,000 ゲーム分 / 完了 81 ロット / 純収入 513,126,437 円、詰まりなし。
+- 排出切替：予約から 23 tick で n14 へ切替完了。即時切替は `scrappedLots` の増加を確認。
+- デッドロック：閉リングで tick 駆動デッドロックを検出、解消で ストッカーへ 14 / 廃棄 0、解消後は非デッドロック。
+- HeadlessCheck 総数：451 件 → **517 件**（P4 で 58 件追加＋readyFor14nm 再実行分 8 件）、全件通過。
+
+**ハーネスの読み替え（主張は弱めていない）**
+
+- セクション 2：集計 tick 前提の「実 10 分で良品生産」は、ロット実体化で初回完了（2,714 tick）まで延ばした。プレイ時間チェックは tick 総数 × 0.25 秒との一致に変更（tick がロット単位の実シミュレーションになり、10 分では初回ロットが出ないため）。
+- アドバイザーの満杯フィクスチャは `fab.slots` 悪用をやめ、テンプレートに Q3（28nm では待機）で全 origin を埋めて `isFloorFull` を作る形に変更（`slots` が退役し、満杯判定がフロア基準になったため）。
+- 0.6.0 節 `q3State` は D3/Q3 をレールに接する (0,3)/(4,3) に配置（(0,0)/(4,0) は未接続で接続フィルタに落ちるため）。
+- P3 移行チェックの equipment 断文は「移行後、旧 equipment フィールドは書き換えられない（v3 の設置リストのまま）」に読み替え（旧フィールド退役の主張に合わせた）。
+
+**指示からの細部の判断・逸脱**
+
+1. 購入時の自動配置：設計 §4 の「購入→倉庫、配置は編集モード」に対し、接続可能位置があれば自動配置する形にした（既存チェック「購入後にライン WPH が上がる」「プレビュー一致」の主張維持と β1 の操作性のため。置けない場合は倉庫行き）。
+2. 手動販売モードの売上 Stats 二重計上（P3 申し送り）を、売れた割合での按分に修正（tick と advance の両方。自動販売では割合 1.0 で従来どおり）。
+3. オフライン中は異常効果と排出モードの投入停止を適用しない（§1.8 に規定なし。P3 の方式を維持）。
+4. レール撤去は全額返金のため、テンプレートの無償レール 40 セルを売ると最大 8,000 万円得られる。設計どおりだが攻略上の論点として P6 で判断。
+5. 性能：derived のたびに `LayoutAnalysis`、tick のたびに `SimCore` 再構築（`RailGraph` 含む）。テンプレート規模では問題ないが、48×48 終盤は P6 で最適化候補。
+6. `FloorGridView` のピンチズームは `MagnificationGesture`（iOS 17 で非推奨警告 1 件）。動作に問題なし、P5/P6 で `MagnifyGesture` へ移行可。
+7. 異常の原因装置ランプ（赤）は常時表示のため、欠陥分析ヒント未購入でも原因が分かる。仕様どおり実装したが、ゲーム性としてはヒント段階連動が P5/P6 の検討事項。
+8. `StatsView` は旧フィールド参照が無かったため未変更。`GameState` の `Fab.equipment` コメント（「placed と同じ装置を持つ」）は実態とずれ、`freeSlots` / `BuyBlockReason.noFreeSlot` は不使用として残置（P6 で掃除）。
+
+**P5/P6 への申し送り**
+
+- P5：`FloorGridView` のベクタ描画（`EquipmentPainter` のグリフ共用）をスプライトへ差し替える構造にしてある。状態ランプ・FOUP・滞留表示の意味は変えない。
+- P6：初回ロット完了まで約 113 ゲーム時間（実約 11 分）かかる点は経済再調整（§8 P6）の入力。サイクルタイム実測（cycleTimeEMA 7,890 分）と合わせて検討。
+- P6：レール返金の扱い、derived/tick の性能最適化、原因装置ランプのヒント連動、旧フィールド残置コードの掃除。

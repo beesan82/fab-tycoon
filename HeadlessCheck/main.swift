@@ -49,17 +49,31 @@ check(abs(d0.lineWPH - 8.5) < 1e-6, "初期ラインWPH ≈ 8.5")
 check(d0.bottleneck == .deposition, "初期ボトルネックは成膜")
 check(abs(d0.currentYield - 0.6983) < 0.005, "初期歩留まり 約69.8%")
 
-// 2. 実10分相当の tick
-print("== 2. tick 0.25秒 × 2400回（実10分） ==")
+// 2. 実10分相当の tick（初回ロット完了まで延長）
+// P4 でゲームループの正がロット実体シミュレーション（SimCore）になり、初回ロットの完了
+// （実測 2,714 tick = 6,785 ゲーム分）まで売上が出ない。そのため主張（良品生産・売上・資金増）は
+// 変えずに、観測区間だけを初回完了まで延ばす：まず従来どおり 2,400 tick 回し、良品チップが
+// 出るまで 0.25 秒 tick を継続する（合計の上限は 4,800 tick）。
+print("== 2. tick 0.25秒 × 2400回（実10分）＋ 初回良品まで延長（上限 4800回） ==")
 var produced = 0.0
 var goodChips = 0.0
 var revenue = 0.0
-for _ in 0..<2_400 {
+var section2Ticks = 0
+let section2TickLimit = 4_800
+func section2Tick() {
     let result = Engine.tick(state: &state, dtRealSeconds: 0.25)
     produced += result.producedWafers
     goodChips += result.goodChips
     revenue += result.revenueYen
+    section2Ticks += 1
 }
+for _ in 0..<2_400 {
+    section2Tick()
+}
+while goodChips <= 0 && section2Ticks < section2TickLimit {
+    section2Tick()
+}
+print("  tick 総数: \(section2Ticks)回（実\(num(Double(section2Ticks) * 0.25, 2))秒）")
 let d1 = Engine.derived(state: state)
 print("  投入ウェハ: \(num(produced))枚")
 print("  良品チップ: \(num(goodChips, 0))個")
@@ -73,7 +87,7 @@ print("== 3. チェック ==")
 check(goodChips > 0 && state.stats.totalGoodChips > 0, "良品チップが生産された")
 check(state.stats.totalRevenueYen > 0, "売上が立った")
 check(state.cashYen > initialCash, "資金が初期より増えた")
-check(abs(state.stats.playSeconds - 600) < 1e-6, "プレイ時間が600秒")
+check(abs(state.stats.playSeconds - Double(section2Ticks) * 0.25) < 1e-6, "プレイ時間が tick 総数 × 0.25秒と一致")
 check(abs(state.stats.totalRevenueYen - (state.stats.totalGrossSalesYen - state.stats.totalCogsYen - state.stats.totalMarketPenaltyYen)) < 1.0, "粗利 = 売上 − 原価 − ペナルティ")
 check(state.stats.totalGrossSalesYen > 0 && state.stats.totalCogsYen > 0, "売上と原価が計上された")
 
@@ -289,7 +303,12 @@ let advisorInitial = Engine.advisorMessage(state: glossaryInitial, derived: brea
 print("  初期: \(advisorInitial)")
 check(advisorInitial.contains("成膜") && advisorInitial.contains("PECVD"), "初期状態ではボトルネックの成膜に PECVD を勧める")
 var noDepositionState = GameState.initial()
+// P4 読み替え：装置の正は fab.placed（derived は placed ベース）。placed から成膜を除き（倉庫には入れない）、sim を作り直す。
+// equipment 側も従来どおり除く（退役済みで derived には効かないが、二重に安全側）
+noDepositionState.fab.placed.removeAll { Catalog.model(id: $0.modelId)?.process == .deposition }
 noDepositionState.fab.equipment.removeAll { Catalog.model(id: $0.modelId)?.process == .deposition }
+noDepositionState.fab.sim = SimCore.freshSnapshot(state: noDepositionState, tools: noDepositionState.fab.placed,
+                                                  layout: noDepositionState.fab.layout)
 let advisorStopped = Engine.advisorMessage(state: noDepositionState, derived: Engine.derived(state: noDepositionState))
 print("  成膜なし: \(advisorStopped)")
 check(advisorStopped.contains("止まって"), "成膜装置が無いとライン停止を知らせる")
@@ -298,14 +317,37 @@ subsidyReadyState.subsidy.totalInvestedYen = 300_000_000
 let advisorSubsidy = Engine.advisorMessage(state: subsidyReadyState, derived: Engine.derived(state: subsidyReadyState))
 print("  投資3億円: \(advisorSubsidy)")
 check(advisorSubsidy.contains("補助金"), "補助金を申請できるときは申請を勧める")
-var fullAffordState = GameState.initial()
-fullAffordState.fab.slots = fullAffordState.fab.equipment.count
+/// 床が埋まった状態（P4 読み替え：fab.slots による「満杯」は退役。満杯は Engine.isFloorFull = D1 の 2×2 を置ける空きが無いこと）。
+/// 初期テンプレートの 11 台はそのまま残し、残りの空きを 2×2 の Q3（5nm 以降専用、28nm では待機）で y → x の全原点を
+/// 貪欲に埋める（全原点を走査して置けるところに置くので、終了時に 2×2 の空きは残らない）。
+/// 指示案（placed を D1 の 2 セル刻み 64 台で敷き詰める）は次の理由でアドバイザーの主張が成立しないため採らない：
+/// ・D1 64 台だけにすると露光などが 0 台でライン停止（ルール1「止まって」）になる。
+/// ・テンプレートに D1 を足して敷き詰めると、接続された D1 で成膜が律速でなくなり、律速がエッチング（3×80/20 = 12）と
+///   CMP（60/5 = 12）の同値になる。最安 E1 を足しても CMP が律速のままでラインWPH が上がらず、ルール5（増床・倉庫）に入らない。
+/// 待機の Q3 は derived に入らない（現在ノード非対応）ので、律速は成膜のまま・D1 を足せばラインWPH が上がる、という
+/// 元のフィクスチャ（初期装備＋スロット満杯）と同じ状況になる
+func floorFilledState() -> GameState {
+    var s = GameState.initial()
+    guard let layout = s.fab.layout else { fail("0.3.0: 新規ゲームに layout が無い") }
+    let extent = FloorLayout.parcelSize * 2   // 初期区画 2×2 = 16×16
+    for y in 0..<extent {
+        for x in 0..<extent {
+            let filler = ToolInstance(instance: EquipmentInstance(modelId: "Q3"))
+            if let placed = layout.placed(filler, origin: GridPoint(x: x, y: y), rotation: 0, among: s.fab.placed) {
+                s.fab.placed.append(placed)
+            }
+        }
+    }
+    s.fab.sim = SimCore.freshSnapshot(state: s, tools: s.fab.placed, layout: layout)
+    guard Engine.isFloorFull(state: s) else { fail("0.3.0: 床を埋めたフィクスチャが満杯になっていない") }
+    return s
+}
+var fullAffordState = floorFilledState()
 fullAffordState.cashYen = 10_000_000_000
 let advisorFullAfford = Engine.advisorMessage(state: fullAffordState, derived: Engine.derived(state: fullAffordState))
 print("  スロット満杯・資金あり: \(advisorFullAfford)")
 check(advisorFullAfford.contains("増床") && !advisorFullAfford.contains("を足すと"), "スロット満杯で増床資金があれば増床を勧める")
-var fullPoorState = GameState.initial()
-fullPoorState.fab.slots = fullPoorState.fab.equipment.count
+var fullPoorState = floorFilledState()   // P4 読み替え：fullAffordState と同じ「床が埋まった状態」
 fullPoorState.cashYen = 0
 let advisorFullPoor = Engine.advisorMessage(state: fullPoorState, derived: Engine.derived(state: fullPoorState))
 print("  スロット満杯・資金不足: \(advisorFullPoor)")
@@ -575,7 +617,8 @@ check(nodeState.fab.currentNodeId == "n14", "現在のノードが n14")
 check(nodeState.stats.achievedMilestones["node_14"] != nil, "マイルストーン node_14 を達成")
 let justSwitched = Engine.derived(state: nodeState)
 check(justSwitched.lineWPH == 0, "移行直後はラインWPH 0（L1 が待機）")
-guard let standbyL1 = nodeState.fab.equipment.first(where: { $0.modelId == "L1" }) else { fail("L1 が設置されていない") }
+// P4 読み替え：設置中の装置は fab.placed から取る（fab.equipment は退役済み）。isStandby は ToolInstance のオーバーロード
+guard let standbyL1 = nodeState.fab.placed.first(where: { $0.modelId == "L1" }) else { fail("L1 が設置されていない") }
 check(Engine.isStandby(standbyL1, state: nodeState), "L1 は待機中")
 check(Engine.standbyCount(state: nodeState, process: .lithography) == 2, "露光の待機台数は 2")
 var poorSwitched = nodeState
@@ -584,10 +627,12 @@ check(Engine.emergencyGrantYen(state: poorSwitched) == nil, "待機による停�
 check(Engine.canRestartLineWithOwnedEquipment(state: poorSwitched), "14nm で待機停止中でも、所有装置で 28nm に戻せば再稼働する")
 // 待機中の L1 を全て倉庫へ外しても、所有関係は変わらないため対象外のまま（付け替えでの回避を塞ぐ）
 var detachedStandby = poorSwitched
-for instance in detachedStandby.fab.equipment where instance.modelId == "L1" {
-    check(Engine.detachEquipment(state: &detachedStandby, instanceId: instance.id), "待機中の L1 を倉庫へ外せる")
+// P4 読み替え：placed の id を先に集めてから外す（イテレーション中に placed を変更しない）
+let standbyL1Ids = detachedStandby.fab.placed.filter { $0.modelId == "L1" }.map { $0.id }
+for id in standbyL1Ids {
+    check(Engine.detachEquipment(state: &detachedStandby, instanceId: id), "待機中の L1 を倉庫へ外せる")
 }
-check(detachedStandby.fab.equipment.allSatisfy { $0.modelId != "L1" }, "設置中の L1 は 0 台")
+check(detachedStandby.fab.placed.allSatisfy { $0.modelId != "L1" }, "設置中の L1 は 0 台")
 check(detachedStandby.fab.storedEquipment.contains { $0.modelId == "L1" }, "L1 は倉庫にある")
 check(Engine.canRestartLineWithOwnedEquipment(state: detachedStandby), "L1 を倉庫へ外しても、所有装置で 28nm に戻せば再稼働する")
 check(Engine.emergencyGrantYen(state: detachedStandby) == nil, "待機装置を全て倉庫へ外しても緊急救済の対象外")
@@ -595,8 +640,10 @@ check(Engine.emergencyGrantYen(state: detachedStandby) == nil, "待機装置を�
 print("== 0.5.0. 緊急救済（古典的詰み） ==")
 // 28nm で検査装置を全て手放し、どのノードでも再稼働しない詰みは従来どおり対象になる
 var deadlock = GameState.initial()
-for instance in deadlock.fab.equipment where instance.modelId == "Q1" {
-    check(Engine.sellEquipment(state: &deadlock, instanceId: instance.id), "Q1 を売却できる")
+// P4 読み替え：placed の id を先に集めてから売却する
+let deadlockQ1Ids = deadlock.fab.placed.filter { $0.modelId == "Q1" }.map { $0.id }
+for id in deadlockQ1Ids {
+    check(Engine.sellEquipment(state: &deadlock, instanceId: id), "Q1 を売却できる")
 }
 deadlock.cashYen = 0
 check(Engine.derived(state: deadlock).lineWPH == 0, "検査装置が無くラインが止まっている")
@@ -632,8 +679,10 @@ check(nodeState.learningWafers["n28"] == learned28BeforeTick, "14nm 稼働中は
 
 print("== 0.5.0. 車載チップ（14nm で Q2×2） ==")
 completeResearch(&nodeState, "unlock_eb", startAt: t0)
-for instance in nodeState.fab.equipment where instance.modelId == "L1" {
-    check(Engine.detachEquipment(state: &nodeState, instanceId: instance.id), "L1 を倉庫へ外せる")
+// P4 読み替え：placed の id を先に集めてから外す
+let nodeStateL1Ids = nodeState.fab.placed.filter { $0.modelId == "L1" }.map { $0.id }
+for id in nodeStateL1Ids {
+    check(Engine.detachEquipment(state: &nodeState, instanceId: id), "L1 を倉庫へ外せる")
 }
 check(Engine.buy(state: &nodeState, modelId: "Q2"), "Q2 を1台目購入できる")
 check(Engine.buy(state: &nodeState, modelId: "Q2"), "Q2 を2台目購入できる")
@@ -751,11 +800,21 @@ check(q2Cand.count == 2 && q2Cand.contains(.deposition), "Q2あり・ヒント1�
 
 print("== 0.6.0. 検査グレード（Q3） ==")
 var q3State = GameState.initial()
+// P4 読み替え：fab.equipment への直接代入をやめ、placed に D3・Q3 を置いて sim を作り直す。
+// ノードは freshSnapshot（state を読む）より前に n5 にする。
+// 位置は指示案の D3 (0,0)・Q3 (4,0) ではなく D3 (0,3)・Q3 (4,3) にする：テンプレートのレールは y=5 から下にあり、
+// y=0〜1 に置くとポートが無く未接続になって derived（接続フィルタ付き）の成膜が 0 台になり、
+// forceStartExcursion（derived.units(.deposition) > 0 と接続済みの原因装置が必要）が失敗するため。
+// (0,3)・(4,3) は上段レール y=5 に接し、投入口・出荷口とリングで繋がる（テンプレートの D1 (0,3)・L1 (4,2) と同じ並び）
 q3State.fab.currentNodeId = "n5"
-q3State.fab.equipment = [
-    EquipmentInstance(modelId: "D3", level: 1, purchasedAt: t0),
-    EquipmentInstance(modelId: "Q3", level: 1, purchasedAt: t0),
-]
+guard let q3Layout = q3State.fab.layout,
+      let q3D3 = q3Layout.placed(ToolInstance(instance: EquipmentInstance(modelId: "D3", level: 1, purchasedAt: t0)),
+                                 origin: GridPoint(x: 0, y: 3), rotation: 0, among: []),
+      let q3Q3 = q3Layout.placed(ToolInstance(instance: EquipmentInstance(modelId: "Q3", level: 1, purchasedAt: t0)),
+                                 origin: GridPoint(x: 4, y: 3), rotation: 0, among: [q3D3])
+else { fail("0.6.0: D3・Q3 をテンプレートに配置できない") }
+q3State.fab.placed = [q3D3, q3Q3]
+q3State.fab.sim = SimCore.freshSnapshot(state: q3State, tools: q3State.fab.placed, layout: q3State.fab.layout)
 check(Engine.bestInspectionGrade(state: q3State) == 3, "Q3 稼働でグレードは 3")
 check(Engine.forceStartExcursion(state: &q3State, causeProcess: .deposition), "成膜に異常を発生できた（n5）")
 check(Engine.revealExcursionHint(state: &q3State), "ヒントを開示できた")
@@ -1141,6 +1200,8 @@ var p3Base = p3Initial
 p3Base.fab.layout = p3TemplateFresh.layout
 p3Base.fab.placed = p3WarmSim.tools   // テンプレートの配置（稼働状態つき）
 p3Base.fab.sim = p3WarmSim.snapshot()
+// 学習 W は sim の投入累計と連動させる（不変条件 learningWafers[node] = base ＋ 投入累計。復元時に base を引き直すため）
+p3Base.learningWafers["n28"] = p3WarmSim.learningWafersBase + p3WarmSim.stats.releasedWafers
 let p3BaseSnapshot = p3Snapshot(p3Base)
 print("P3 base（900 ゲーム時間）: WIP \(p3BaseSnapshot.lots.count) ロット / 完了 \(p3BaseSnapshot.stats.completedLots) ロット / throughputEMA \(num(p3WarmSim.throughputEMA, 3)) WPH / yieldEMA \(num(p3WarmSim.yieldEMA, 4)) / detectionEMA \(num(p3WarmSim.detectionEMA, 4)) / cycleTimeEMA \(num(p3WarmSim.cycleTimeEMA, 1)) 分 / incomeEMA \(num(p3WarmSim.incomeEMA, 0)) 円/時")
 check(p3BaseSnapshot.lots.count > 0 && p3BaseSnapshot.stats.completedLots > 0, "P3: base はロットが流れている定常状態")
@@ -1252,6 +1313,7 @@ var p3AltBase = p3AltInitial
 p3AltBase.fab.layout = p3AltTemplate.layout
 p3AltBase.fab.placed = p3AltWarmSim.tools
 p3AltBase.fab.sim = p3AltWarmSim.snapshot()
+p3AltBase.learningWafers["n28"] = p3AltWarmSim.learningWafersBase + p3AltWarmSim.stats.releasedWafers
 p3AltBase.cashYen = 100_000_000_000
 let p3AltTransportDone = completeResearch(&p3AltBase, "transport", startAt: t0)
 completeResearch(&p3AltBase, "offline_cap_1", startAt: p3AltTransportDone)
@@ -1355,8 +1417,10 @@ print("P3 移行: 配置 \(p3Migrated.fab.placed.count) 台 / 倉庫 \(p3Migrate
 check(p3MigAllIds.count == p3OwnedIds.count && Set(p3MigAllIds) == Set(p3OwnedIds),
       "P3: 配置＋倉庫の装置 id が移行前の所有装置と一致（重複なし、\(p3MigAllIds.count) 台）")
 check(p3Migrated.fab.placed.count < 51, "P3: 収まらない装置は倉庫へ（配置 \(p3Migrated.fab.placed.count) 台）")
-check(p3Migrated.fab.equipment.count == p3Migrated.fab.placed.count
-      && Set(p3Migrated.fab.equipment.map { $0.id }) == Set(p3MigPlacedIds), "P3: fab.equipment は配置済み装置と一致")
+// P4 読み替え：migrateToLayout は fab.equipment を書かなくなった（装置の正は placed / storedEquipment）。
+// 主張を「旧 equipment フィールドは移行で書き換えられない（v3 の設置リストのまま）」に読み替える
+check(Set(p3Migrated.fab.equipment.map { $0.id }) == Set(p3V3.fab.equipment.map { $0.id }),
+      "P3: 移行後、旧 equipment フィールドは書き換えられない（v3 の設置リストのまま）")
 check((p3Migrated.fab.placed.map { ($0.id, $0.level) } + p3Migrated.fab.storedEquipment.map { ($0.id, $0.level) })
         .allSatisfy { p3OriginalLevels[$0.0] == $0.1 }, "P3: 装置の Lv を保持")
 guard let p3MigLayout = p3Migrated.fab.layout else { fail("P3: 移行後に layout が無い") }
@@ -1400,6 +1464,231 @@ check(p3RtLoaded?.schemaVersion == 4 && p3RtManager.lastLoadedOriginalVersion ==
 check(p3RtLoaded?.fab.sim?.lots.count == p3Snapshot(p3Rt).lots.count && p3Snapshot(p3Rt).lots.count > 0,
       "P3: SaveManager 経由でも sim のロット（\(p3Snapshot(p3Rt).lots.count) 件）を保持")
 check(p3RtLoaded?.fab.sim?.lots.map { $0.id } == p3Snapshot(p3Rt).lots.map { $0.id }, "P3: ロットの投入順を保持")
+
+// MARK: - 1.0 P4: Engine.tick の SimCore 駆動・配置 API
+
+// P4 の間は異常の発生抽選が当たらない値に固定する（必要箇所でのみ差し替えて戻す）
+Engine.excursionRandomUnit = { 0.999_999 }
+
+/// tick を dt 秒刻みで count 回進める（P4 の tick 駆動チェックは dt 30 = 300 ゲーム分）
+func p4Tick(_ s: inout GameState, times count: Int, dt: Double = 30) {
+    for _ in 0..<count {
+        Engine.tick(state: &s, dtRealSeconds: dt)
+    }
+}
+
+func p4SimStats(_ s: GameState) -> SimStats {
+    guard let snapshot = s.fab.sim else { fail("P4: state.fab.sim が無い") }
+    return snapshot.stats
+}
+
+print("== P4. 接続後の定常値（tick 駆動） ==")
+var p4State = GameState.initial()
+p4Tick(&p4State, times: 180)   // ウォームアップ 54,000 ゲーム分 = 900 ゲーム時間
+let p4StatsBefore = p4SimStats(p4State)
+let p4LearnBefore = p4State.learningWafers["n28"] ?? 0
+p4Tick(&p4State, times: 240)   // 計測 72,000 ゲーム分 = 1,200 ゲーム時間
+let p4StatsAfter = p4SimStats(p4State)
+let p4Throughput = (p4StatsAfter.completedWafers - p4StatsBefore.completedWafers) / 1200
+let p4ReleasedDelta = p4StatsAfter.releasedWafers - p4StatsBefore.releasedWafers
+let p4ReleaseRate = p4ReleasedDelta / 1200
+let p4WindowLots = p4StatsAfter.completedLots - p4StatsBefore.completedLots
+let p4MeanDetection = p4WindowLots > 0
+    ? (p4StatsAfter.sumDetectionRate - p4StatsBefore.sumDetectionRate) / Double(p4WindowLots) : 0
+let p4LearnDelta = (p4State.learningWafers["n28"] ?? 0) - p4LearnBefore
+// 設計書 付録 C.7 に転記する実測値（判定より先に出力する）
+print("P4 定常（tick 駆動）: スループット \(num(p4Throughput, 3)) WPH / 投入 \(num(p4ReleaseRate, 3)) 枚/時 / 検出率 \(num(p4MeanDetection, 4)) / 完了 \(p4WindowLots) ロット")
+check(p4Throughput >= 8.5 * 0.90 && p4Throughput <= 8.5 * 1.03,
+      "P4: tick 駆動の定常スループット \(num(p4Throughput, 3)) WPH（P2 と同じ帯 8.5 の −10%〜+3%）")
+check(p4WindowLots > 0 && abs(p4MeanDetection - 0.7783) <= 0.005,
+      "P4: tick 駆動の平均検出率 \(num(p4MeanDetection, 4))（0.7783 ±0.005、完了 \(p4WindowLots) ロット）")
+check(p4ReleasedDelta > 0 && p4LearnDelta == p4ReleasedDelta,
+      "P4: learningWafers[n28] の増分 \(num(p4LearnDelta, 0)) が sim の投入増分 \(num(p4ReleasedDelta, 0)) と一致")
+check(p4ReleaseRate >= 8.5 * 0.90 && p4ReleaseRate <= 8.5 * 1.03,
+      "P4: tick 駆動の投入レート \(num(p4ReleaseRate, 3)) 枚/時（8.5 の −10%〜+3%）")
+let p4Derived = Engine.derived(state: p4State)
+print("P4 derived 実測: スループット \(num(p4Derived.measuredThroughputWPH, 3)) WPH / 検出率 \(num(p4Derived.measuredDetectionRate, 4)) / 収入/分 \(num(p4Derived.measuredIncomePerMinuteYen, 0)) 円")
+check(p4Derived.measuredThroughputWPH >= 8.5 * 0.90 && p4Derived.measuredThroughputWPH <= 8.5 * 1.03,
+      "P4: derived の measuredThroughputWPH \(num(p4Derived.measuredThroughputWPH, 3)) が同じ帯")
+check(abs(p4Derived.measuredDetectionRate - 0.7783) <= 0.01,
+      "P4: derived の measuredDetectionRate \(num(p4Derived.measuredDetectionRate, 4))（0.7783 ±0.01）")
+check(p4StatsAfter.completedLots > 0 && p4Derived.incomePerMinuteYen == p4Derived.measuredIncomePerMinuteYen,
+      "P4: 完了ロットがあれば incomePerMinuteYen は実測（measuredIncomePerMinuteYen）")
+
+print("== P4. WIP 上限の運転点 ==")
+check(GameState.initial().fab.sim?.wipCap == 45, "P4: 新規ゲームの sim の WIP 上限は 45")
+check(SimCore.operatingWipCap(layout: GameState.initial().fab.layout) == 45, "P4: テンプレートの運転点は 45（レール 40 セル ＋ 5）")
+var p4Rail = GameState.initial()
+guard let p4RailCell = p4Rail.fab.layout?.rails.first else { fail("P4: テンプレートにレールが無い") }
+let p4RailCash0 = p4Rail.cashYen
+check(Engine.removeRail(state: &p4Rail, at: p4RailCell.point), "P4: テンプレートのレール (\(p4RailCell.point.x),\(p4RailCell.point.y)) を撤去できる")
+check(p4Rail.fab.sim?.wipCap == 44, "P4: レール 1 セル撤去で WIP 上限が 44")
+check(p4Rail.cashYen == p4RailCash0 + Engine.railCellCostYen, "P4: 撤去でレール 1 セル分が返金される")
+check(Engine.setRail(state: &p4Rail, cell: p4RailCell), "P4: 同じセルにレールを敷き直せる")
+check(p4Rail.fab.sim?.wipCap == 45, "P4: 敷き直すと WIP 上限が 45 に戻る")
+check(p4Rail.cashYen == p4RailCash0 && p4Rail.stats.railCellsBuilt == 1,
+      "P4: 敷設でレール 1 セル分が引かれ、railCellsBuilt == 1")
+
+print("== P4. 学習連動（移行でリセットされない） ==")
+/// 新規状態（learned を指定すれば learningWafers[n28] を設定）から tick で最初のロットが完了するまで進め、その歩留まりを返す
+func p4FirstLotYield(learned: Double?) -> Double? {
+    var s = GameState.initial()
+    if let learned = learned {
+        s.learningWafers["n28"] = learned
+    }
+    for _ in 0..<200 {
+        Engine.tick(state: &s, dtRealSeconds: 30)
+        if let first = s.fab.sim?.stats.firstCompletions.first {
+            return first.lotYield
+        }
+    }
+    return nil
+}
+let p4Yield3000 = p4FirstLotYield(learned: 3_000)
+let p4Yield0 = p4FirstLotYield(learned: nil)
+print("P4 初回ロット歩留まり: W=3,000 \(num(p4Yield3000 ?? -1, 4)) / W=0 \(num(p4Yield0 ?? -1, 4))")
+check(p4Yield3000.map { $0 >= 0.75 } == true, "P4: W=3,000 から始めた初回ロットの歩留まりが 0.75 以上（学習が効いている）")
+check(p4Yield0.map { abs($0 - 0.6983) <= 0.005 } == true, "P4: W=0 の初回ロットの歩留まりは 0.6983 ±0.005")
+
+print("== P4. 異常の装置紐づけ ==")
+var p4Exc = GameState.initial()
+var p4Ctl = GameState.initial()
+check(Engine.forceStartExcursion(state: &p4Exc, causeProcess: .deposition), "P4: 成膜に異常を強制発生できた")
+let p4CauseToolId = p4Exc.activeExcursion?.causeToolId
+check(p4CauseToolId != nil, "P4: 異常に原因装置 id が紐づく")
+let p4CauseProcess = p4Exc.fab.placed.first(where: { $0.id == p4CauseToolId })
+    .flatMap { Catalog.model(id: $0.modelId)?.process }
+check(p4CauseProcess == .deposition, "P4: 原因装置は配置済みの成膜装置")
+p4Tick(&p4Exc, times: 130)
+p4Tick(&p4Ctl, times: 130)
+let p4ExcStats = p4SimStats(p4Exc)
+let p4CtlStats = p4SimStats(p4Ctl)
+let p4ExcMeanYield = p4ExcStats.completedLots > 0 ? p4ExcStats.sumLotYield / Double(p4ExcStats.completedLots) : 0
+let p4CtlMeanYield = p4CtlStats.completedLots > 0 ? p4CtlStats.sumLotYield / Double(p4CtlStats.completedLots) : 0
+print("P4 異常あり／なしの平均歩留まり: \(num(p4ExcMeanYield, 4))（\(p4ExcStats.completedLots) ロット） / \(num(p4CtlMeanYield, 4))（\(p4CtlStats.completedLots) ロット）")
+check(p4ExcStats.completedLots > 0 && p4CtlStats.completedLots > 0 && p4ExcMeanYield <= p4CtlMeanYield - 0.01,
+      "P4: 異常側の平均歩留まりが対照より 0.01 以上低い")
+check(p4Exc.fab.sim?.lots.contains { $0.excursionHits > 0 } == true, "P4: 原因装置を通ったロット（excursionHits > 0）がある")
+
+print("== P4. オフライン接続 ==")
+var p4Off = GameState.initial()
+p4Tick(&p4Off, times: 10)
+let p4OffLearnBefore = p4Off.learningWafers["n28"] ?? 0
+let p4OffPlacedCount = p4Off.fab.placed.count
+let p4OffReport = OfflineProgress.advance(state: &p4Off, elapsedRealSeconds: 3_600)
+print("P4 オフライン（3,600 秒）: シミュレーション \(num(p4OffReport.simulatedGameMinutes, 0)) 分 / 完了 \(p4OffReport.completedLots) ロット / 純収入 \(num(p4OffReport.netYen, 0)) 円")
+check(p4OffReport.netYen >= 0 && !p4OffReport.lineJammed, "P4: 運転中のオフライン進行は純収入 ≥ 0・詰まりなし")
+check((p4Off.learningWafers["n28"] ?? 0) > p4OffLearnBefore, "P4: オフライン進行で learningWafers[n28] が増える")
+check(p4Off.fab.placed.count == p4OffPlacedCount, "P4: オフライン進行で配置台数は変わらない")
+check(p4Off.fab.sim != nil, "P4: オフライン進行後も fab.sim がある")
+
+print("== P4. 旧フィールド退役と v4 往復 ==")
+var p4Legacy = GameState.initial()
+let p4LegacyEquipment = p4Legacy.fab.equipment
+let p4LegacySlots = p4Legacy.fab.slots
+let p4LegacyIds = Set(p4Legacy.fab.placed.map { $0.id })
+p4Tick(&p4Legacy, times: 20)
+check(Engine.buy(state: &p4Legacy, modelId: "D1"), "P4: D1 を購入できた")
+guard let p4BoughtD1 = p4Legacy.fab.placed.first(where: { $0.modelId == "D1" && !p4LegacyIds.contains($0.id) })
+else { fail("P4: 購入した D1 が自動配置されていない") }
+check(Engine.detachEquipment(state: &p4Legacy, instanceId: p4BoughtD1.id), "P4: 購入した D1 を倉庫へ外せる")
+p4Tick(&p4Legacy, times: 3)
+check(p4Legacy.fab.slots == p4LegacySlots, "P4: fab.slots は初期値のまま")
+check(p4Legacy.fab.wipWafers == 0, "P4: fab.wipWafers は 0 のまま")
+check(p4Legacy.fab.equipment == p4LegacyEquipment, "P4: fab.equipment は初期配列と完全一致（順序含む）")
+check(p4Legacy.stats.totalWafersInput > 0 && (p4Legacy.fab.sim?.stats.releasedLots ?? 0) > 0, "P4: ゲームは進んでいる（投入あり）")
+let p4LegacyData = try? JSONEncoder().encode(p4Legacy)
+guard let p4LegacyDecoded = p4LegacyData.flatMap({ try? JSONDecoder().decode(GameState.self, from: $0) })
+else { fail("P4: GameState をエンコード→デコードできない") }
+check(p4LegacyDecoded.fab.placed == p4Legacy.fab.placed && p4LegacyDecoded.fab.layout == p4Legacy.fab.layout
+      && p4LegacyDecoded.fab.sim == p4Legacy.fab.sim, "P4: placed・layout・sim がエンコード→デコードで一致")
+check(p4LegacyDecoded.fab.sim?.lots.count == p4Legacy.fab.sim?.lots.count && (p4Legacy.fab.sim?.lots.count ?? 0) > 0,
+      "P4: sim のロット（\(p4Legacy.fab.sim?.lots.count ?? 0) 件）が往復で保持される")
+
+print("== P4. ノード切替（排出） ==")
+var p4Drain = readyFor14nm()
+p4Tick(&p4Drain, times: 30)
+check(p4Drain.fab.sim?.lots.isEmpty == false, "P4: 排出前に仕掛かりがある（\(p4Drain.fab.sim?.lots.count ?? 0) ロット）")
+check(Engine.requestNodeSwitch(state: &p4Drain, toNodeId: "n14", mode: .drain), "P4: 排出モードで 14nm への切替を予約できた")
+check(p4Drain.fab.nodeSwitch.pendingNodeId == "n14", "P4: 切替予約先は n14")
+let p4DrainReleased = p4SimStats(p4Drain).releasedWafers
+p4Tick(&p4Drain, times: 5)
+check(p4SimStats(p4Drain).releasedWafers == p4DrainReleased && p4Drain.fab.currentNodeId == "n28",
+      "P4: 予約中は投入が止まり、まだ n28")
+var p4DrainTicks = 5
+while p4Drain.fab.currentNodeId != "n14" && p4DrainTicks < 400 {
+    Engine.tick(state: &p4Drain, dtRealSeconds: 30)
+    p4DrainTicks += 1
+}
+print("P4 排出完了: 予約から \(p4DrainTicks) tick")
+check(p4Drain.fab.currentNodeId == "n14", "P4: 仕掛かりを流し切ると n14 に切り替わる（\(p4DrainTicks) tick）")
+let p4Learn14Before = p4Drain.learningWafers["n14"] ?? 0
+p4Tick(&p4Drain, times: 5)
+check((p4Drain.learningWafers["n14"] ?? 0) > p4Learn14Before, "P4: 切替後の tick で learningWafers[n14] が増える")
+
+print("== P4. ノード切替（即時） ==")
+var p4Immediate = readyFor14nm()
+p4Tick(&p4Immediate, times: 30)
+check(p4Immediate.fab.sim?.lots.isEmpty == false, "P4: 即時切替前に仕掛かりがある")
+let p4ScrappedBefore = p4Immediate.stats.scrappedLots
+check(Engine.requestNodeSwitch(state: &p4Immediate, toNodeId: "n14", mode: .immediate), "P4: 即時モードで 14nm へ切り替えた")
+check(p4Immediate.fab.currentNodeId == "n14", "P4: 即時切替で即座に n14")
+check(p4Immediate.stats.scrappedLots > p4ScrappedBefore,
+      "P4: 即時切替で仕掛かりが廃棄される（scrappedLots \(p4ScrappedBefore) → \(p4Immediate.stats.scrappedLots)）")
+
+print("== P4. デッドロック検出と解消 ==")
+// P3 の p3Ring と同じ作り方（P2 の閉リング＋ D1 1 台を (2,0)）。fab.equipment は退役済みなので書かない
+var p4Ring = GameState.initial()
+guard var p4RingD1 = p4Ring.fab.placed.first(where: { $0.modelId == "D1" }) else { fail("P4: 初期配置に D1 が無い") }
+p4RingD1.origin = GridPoint(x: 2, y: 0)
+p4RingD1.rotation = 0
+p4Ring.fab.layout = p2RingLayout
+p4Ring.fab.placed = [p4RingD1]
+p4Ring.fab.sim = SimCore.freshSnapshot(state: p4Ring, tools: [p4RingD1], layout: p2RingLayout)
+var p4RingTicks = 0
+while !Engine.isSimDeadlocked(state: p4Ring) && p4RingTicks < 20 {
+    Engine.tick(state: &p4Ring, dtRealSeconds: 30)
+    p4RingTicks += 1
+}
+check(Engine.isSimDeadlocked(state: p4Ring), "P4: 閉リングは tick 駆動でデッドロックする（\(p4RingTicks) tick）")
+let p4Resolved = Engine.resolveDeadlock(state: &p4Ring)
+print("P4 詰まり解消: ストッカーへ \(p4Resolved.moved) / 廃棄 \(p4Resolved.scrapped)")
+check(p4Resolved.moved + p4Resolved.scrapped >= 1, "P4: 詰まり解消でロットを手運び・廃棄した")
+check(!Engine.isSimDeadlocked(state: p4Ring), "P4: 解消直後はデッドロックではない")
+
+print("== P4. 配置 API と区画購入 ==")
+var p4Place = GameState.initial()
+let p4PlaceIds = Set(p4Place.fab.placed.map { $0.id })
+check(Engine.buy(state: &p4Place, modelId: "D1"), "P4: D1 を購入できた")
+guard let p4PlaceD1 = p4Place.fab.placed.first(where: { $0.modelId == "D1" && !p4PlaceIds.contains($0.id) })
+else { fail("P4: 購入した D1 が自動配置されていない") }
+check(Engine.detachEquipment(state: &p4Place, instanceId: p4PlaceD1.id)
+      && p4Place.fab.storedEquipment.contains { $0.id == p4PlaceD1.id }, "P4: D1 を倉庫へ外せる")
+check(Engine.placeStoredTool(state: &p4Place, toolId: p4PlaceD1.id, origin: GridPoint(x: 13, y: 12), rotation: 0)
+      && p4Place.fab.placed.contains { $0.id == p4PlaceD1.id && $0.origin == GridPoint(x: 13, y: 12) },
+      "P4: 倉庫の D1 を (13,12) に置ける")
+check(Engine.movePlacedTool(state: &p4Place, toolId: p4PlaceD1.id, origin: GridPoint(x: 11, y: 12), rotation: 0)
+      && p4Place.fab.placed.first(where: { $0.id == p4PlaceD1.id })?.origin == GridPoint(x: 11, y: 12),
+      "P4: D1 を (11,12) へ移動できる")
+check(Engine.rotatePlacedTool(state: &p4Place, toolId: p4PlaceD1.id)
+      && p4Place.fab.placed.first(where: { $0.id == p4PlaceD1.id })?.rotation == 90, "P4: D1 を 90° 回転できる")
+check(Engine.removePlacedToolToStorage(state: &p4Place, toolId: p4PlaceD1.id)
+      && !p4Place.fab.placed.contains { $0.id == p4PlaceD1.id }
+      && p4Place.fab.storedEquipment.contains { $0.id == p4PlaceD1.id }, "P4: D1 を倉庫へ戻せる")
+
+var p4Parcel = GameState.initial()
+p4Parcel.cashYen = 100_000_000_000
+let p4ParcelCost = Engine.expansionCostYen(state: p4Parcel)
+let p4ParcelCash = p4Parcel.cashYen
+let p4ParcelCount = p4Parcel.fab.expansionCount
+check(Engine.buyParcel(state: &p4Parcel, coord: ParcelCoord(x: 2, y: 0)), "P4: 区画 (2,0) を購入できた")
+check(p4Parcel.fab.layout?.parcels.contains(ParcelCoord(x: 2, y: 0)) == true, "P4: 購入した区画が layout に入る")
+check(p4Parcel.fab.expansionCount == p4ParcelCount + 1 && p4Parcel.stats.parcelsBought == 1,
+      "P4: expansionCount が 1 増え、parcelsBought == 1")
+check(p4Parcel.cashYen == p4ParcelCash - p4ParcelCost, "P4: 資金が増床価格（購入前の値）だけ減る")
+let p4ParcelsBeforeExpand = p4Parcel.fab.layout?.parcels.count ?? 0
+check(Engine.expandFab(state: &p4Parcel) && p4Parcel.fab.layout?.parcels.count == p4ParcelsBeforeExpand + 1,
+      "P4: expandFab でも区画が 1 つ増える")
 
 try? fileManager.removeItem(at: tempRoot)
 

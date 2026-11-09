@@ -226,7 +226,7 @@ struct ScaleNoticeBanner: View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "info.circle.fill")
                 .foregroundStyle(.blue)
-            Text("アップデートで数字のバランスが変わりました。以前のセーブはそのまま使えます。新しいバランスで始める場合は、設定（歯車アイコン）から新規開始できます。")
+            Text("1.0アップデートでフロアが自由配置になりました。以前のセーブはそのまま使え、装置は自動で配置されています。フロアの「編集」から並べ替えやレールの引き直しができます。")
                 .font(.footnote)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)

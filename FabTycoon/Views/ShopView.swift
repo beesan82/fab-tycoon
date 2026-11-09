@@ -47,9 +47,10 @@ struct ShopView: View {
 
     private var slotSummary: some View {
         let fab = store.state.fab
+        let placedCount = Engine.installedTools(state: store.state).count
+        let parcelCount = fab.layout?.parcels.count ?? 0
         return HStack {
-            Label("空きスロット \(fab.freeSlots) / \(fab.slots)", systemImage: "square.grid.3x3")
-                .foregroundStyle(fab.freeSlots > 0 ? Color.primary : Color.red)
+            Label("フロア：配置 \(placedCount)台／区画 \(parcelCount)", systemImage: "square.grid.3x3")
             Spacer()
             Text("資金 \(MoneyFormat.yen(store.state.cashYen))")
                 .monospacedDigit()
@@ -58,20 +59,21 @@ struct ShopView: View {
         .font(.subheadline)
     }
 
-    /// 増床（スロット +4）
+    /// 増床（区画 +8×8セル。追加できる区画のうち読み順で最初のものを買う）
     private var expansionRow: some View {
         let state = store.state
-        let fab = state.fab
         let cost = Engine.expansionCostYen(state: state)
         let canExpand = Engine.canExpandFab(state: state)
+        let size = FloorLayout.parcelSize
         return HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("増床（スロット拡張）")
+                Text("区画 +\(size)×\(size)セル（\(MoneyFormat.yen(cost))）")
                     .font(.subheadline.bold())
-                Text("スロット \(fab.slots) → \(fab.slots + Engine.expansionSlotCount)")
-                    .font(.caption)
                     .monospacedDigit()
+                Text("場所を選んで買うときはフロアの「編集」→「区画」から")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 2) {
@@ -79,7 +81,7 @@ struct ShopView: View {
                     store.expandFab()
                 } label: {
                     VStack(spacing: 2) {
-                        Text("増床する（+\(Engine.expansionSlotCount)枠）")
+                        Text("増床する")
                         Text(MoneyFormat.yen(cost))
                             .font(.caption2)
                             .monospacedDigit()
@@ -88,9 +90,15 @@ struct ShopView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(!canExpand)
                 if !canExpand {
-                    Text("資金不足（あと\(MoneyFormat.yen(cost - state.cashYen))）")
-                        .font(.caption)
-                        .foregroundStyle(.red)
+                    if state.cashYen < cost {
+                        Text("資金不足（あと\(MoneyFormat.yen(cost - state.cashYen))）")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    } else {
+                        Text("これ以上増床できません")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         }
@@ -222,6 +230,10 @@ private struct ShopModelCard: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(block != nil)
+                Text("購入した装置は自動で配置されます。置けない場合は倉庫に入ります")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding()
@@ -266,7 +278,7 @@ private struct ShopModelCard: View {
         case .locked(let reasons):
             return reasons.joined(separator: "／")
         case .noFreeSlot:
-            return "スロット不足（空きがありません）"
+            return "フロアに空きがありません"
         case .insufficientCash(let shortfall):
             return "資金不足（あと\(MoneyFormat.yen(shortfall))）"
         }

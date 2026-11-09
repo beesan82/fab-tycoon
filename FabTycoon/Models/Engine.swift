@@ -34,7 +34,7 @@ struct DerivedState: Equatable {
     var cycleFactor: Double
     var walkFactor: Double
     var currentPriceYen: Double
-    /// 実時間1分あたりの純収入（円）
+    /// 実時間1分あたりの純収入（円）。SimCore に完了ロットがあれば実測値、無ければ理論値
     var incomePerMinuteYen: Double
 
     // 「なぜ？」内訳（derived の計算途中の値をそのまま保持する）
@@ -54,6 +54,18 @@ struct DerivedState: Equatable {
     var excursionProcess: ProcessType?
     /// 歩留まり異常によるライン歩留まりの低下分（比率。異常が無ければ 0）
     var excursionYieldLoss: Double
+
+    // 実測値（P4。fab.sim の観測 EMA。sim が無ければ 0）。lineWPH 等の上の値は理論値のまま（§9-14）
+    /// 完了ウェハ/時（throughputEMA）
+    var measuredThroughputWPH: Double = 0
+    /// 完了ロットの歩留まり（yieldEMA）
+    var measuredYield: Double = 0
+    /// 完了ロットの検出率（detectionEMA）
+    var measuredDetectionRate: Double = 0
+    /// 実時間1分あたりの純収入の実測値（incomeEMA × gameMinutesPerRealSecond）
+    var measuredIncomePerMinuteYen: Double = 0
+    /// 実時間1分あたりの純収入の理論値（従来式）
+    var theoreticalIncomePerMinuteYen: Double = 0
 
     func wph(_ process: ProcessType) -> Double { processWPH[process] ?? 0 }
     func units(_ process: ProcessType) -> Int { activeUnits[process] ?? 0 }
@@ -261,10 +273,32 @@ enum Engine {
         1 + 0.1 * Double(level - 1)
     }
 
+    /// 設置中の装置（装置の正は fab.placed）。placed が空でレイアウトも無ければ旧形式・手作り状態とみなし、
+    /// fab.equipment から作る。レイアウトがある状態の placed が空なのは「全台を外した・売った」なので、
+    /// 据え置きの fab.equipment（初期装備のまま）を読み戻さない
+    static func installedTools(state: GameState) -> [ToolInstance] {
+        state.fab.placed.isEmpty && state.fab.layout == nil
+            ? state.fab.equipment.map { ToolInstance(instance: $0) }
+            : state.fab.placed
+    }
+
+    /// 旧形式状態（placed が空・レイアウト無し）を編集する前に、fab.equipment から placed を作る。
+    /// 以降の編集は placed に対して行う（fab.equipment には書き込まない）
+    private static func adoptLegacyInstalledTools(state: inout GameState) {
+        if state.fab.placed.isEmpty && state.fab.layout == nil {
+            state.fab.placed = installedTools(state: state)
+        }
+    }
+
+    /// 倉庫・旧 API 用の EquipmentInstance（id・modelId・level・purchasedAt を保持）
+    static func equipmentInstance(_ tool: ToolInstance) -> EquipmentInstance {
+        EquipmentInstance(id: tool.id, modelId: tool.modelId, level: tool.level, purchasedAt: tool.purchasedAt)
+    }
+
     /// 稼働中の露光機のうち最上位の露光クラス
     static func topLithoClass(state: GameState) -> LithoClass? {
         let nodeId = state.fab.currentNodeId
-        return state.fab.equipment
+        return installedTools(state: state)
             .compactMap { Catalog.model(id: $0.modelId) }
             .filter { $0.process == .lithography && isActive($0, nodeId: nodeId) }
             .compactMap { $0.lithoClass }
@@ -287,10 +321,31 @@ enum Engine {
         return model.nominalWPH * levelMultiplier(level) / Double(passes) * throughput
     }
 
+    /// レイアウト上で未接続（入口・出口のいずれか）の装置 id。レイアウトが無ければ空
+    private static func unconnectedToolIds(state: GameState) -> Set<UUID> {
+        var ids = Set<UUID>()
+        for problem in layoutProblems(state: state) {
+            switch problem {
+            case .unconnectedInput(let toolId, _), .unconnectedOutput(let toolId, _):
+                ids.insert(toolId)
+            case .lineBreak:
+                break
+            }
+        }
+        return ids
+    }
+
+    /// 理論値の派生状態。レイアウト上で未接続の装置は WPH・歩留まり・検出率の集計から除外する
     static func derived(state: GameState) -> DerivedState {
+        derived(state: state, countUnconnected: false)
+    }
+
+    /// countUnconnected が true なら未接続の装置も集計に含める（プレビュー・所有装置での再稼働判定用）
+    static func derived(state: GameState, countUnconnected: Bool) -> DerivedState {
         let node = currentNode(state: state)
         let topLitho = topLithoClass(state: state)
         let fx = researchEffects(state: state)
+        let excluded: Set<UUID> = countUnconnected ? [] : unconnectedToolIds(state: state)
 
         var wph: [ProcessType: Double] = [:]
         var units: [ProcessType: Int] = [:]
@@ -301,23 +356,30 @@ enum Engine {
 
         // 工程歩留まり用：unitWPH（稼働率適用前）で重み付けした effFactor の合計
         var weightedFactor: [ProcessType: Double] = [:]
+        // 装置ごとの寄与（歩留まり異常の装置1台の悪化に使う）
+        var contributions: [(toolId: UUID, process: ProcessType, unit: Double, factor: Double)] = []
         var detectionBase = 0.0
-        for instance in state.fab.equipment {
-            guard let model = Catalog.model(id: instance.modelId), isActive(model, nodeId: node.id) else { continue }
+        for tool in installedTools(state: state) {
+            guard !excluded.contains(tool.id),
+                  let model = Catalog.model(id: tool.modelId), isActive(model, nodeId: node.id) else { continue }
             // スループット倍率は unitWPH 側に含まれる（ここで重ねて掛けない）
-            let unit = unitWPH(model: model, level: instance.level, state: state)
+            let unit = unitWPH(model: model, level: tool.level, state: state)
             wph[model.process, default: 0] += unit
             units[model.process, default: 0] += 1
             // 研究による欠陥寄与の縮小は装置ごとの (1 − 実効寄与) に掛ける
-            let factor = 1 - (1 - effectiveYieldFactor(model, level: instance.level)) * fx.yieldDefectMultiplier
+            let factor = 1 - (1 - effectiveYieldFactor(model, level: tool.level)) * fx.yieldDefectMultiplier
             weightedFactor[model.process, default: 0] += unit * factor
+            contributions.append((toolId: tool.id, process: model.process, unit: unit, factor: factor))
             if model.process == .inspection {
                 detectionBase = max(detectionBase, model.detectionBase)
             }
         }
         var processYields: [ProcessType: Double] = [:]
+        // 稼働率適用前の工程WPH（容量シェアの分母）
+        var rawWPH: [ProcessType: Double] = [:]
         for process in ProcessType.allCases {
             let raw = wph[process] ?? 0
+            rawWPH[process] = raw
             processYields[process] = (units[process] ?? 0) > 0 && raw > 0 ? (weightedFactor[process] ?? 0) / raw : 0
             wph[process] = raw * min(uptime + fx.uptimeAddition, 0.99)
         }
@@ -342,7 +404,27 @@ enum Engine {
             excursionProcess = spec.causeProcess
             let causeYield = processYields[spec.causeProcess] ?? 0
             if (units[spec.causeProcess] ?? 0) > 0, causeYield > 0 {
-                let degraded = max(0, 1 - (1 - causeYield) * spec.defectMultiplier)
+                let degraded: Double
+                if let causeToolId = excursion.causeToolId {
+                    // 装置1台の悪化（§4・§9-7）：工程全体の倍率を原因装置の容量シェア s で割り戻し
+                    // （M' = 1 + (M − 1) / s）、悪化後の寄与で加重平均した工程歩留まりを使う。
+                    // 同一機種2台・片方だけ原因なら、加重平均の悪化は工程全体×M と一致する。
+                    // 原因装置が集計対象外（未接続・待機・撤去）なら悪化しない
+                    let total = rawWPH[spec.causeProcess] ?? 0
+                    var weighted = 0.0
+                    for c in contributions where c.process == spec.causeProcess {
+                        var factor = c.factor
+                        if c.toolId == causeToolId, c.unit > 0 {
+                            let corrected = 1 + (spec.defectMultiplier - 1) / (c.unit / total)
+                            factor = max(0.5, 1 - (1 - factor) * corrected)
+                        }
+                        weighted += c.unit * factor
+                    }
+                    degraded = weighted / total
+                } else {
+                    // 原因装置の無い異常（互換）：工程全体を悪化させる
+                    degraded = max(0, 1 - (1 - causeYield) * spec.defectMultiplier)
+                }
                 excursionDefectAdd = processProduct * (1 - degraded / causeYield)
                 processYields[spec.causeProcess] = degraded
             }
@@ -379,6 +461,12 @@ enum Engine {
         let grossPerWafer = dies * price * (lineYield + shippedDefectFraction)
         let penaltyPerWafer = dies * price * shippedDefectFraction * penaltyRate
         let marginPerWafer = grossPerWafer * (1 - cogsRate(state: state)) - penaltyPerWafer
+        // lineWPH はゲーム内1時間あたり → 実1分 = ゲーム内 gameMinutesPerRealSecond 時間
+        let theoreticalIncome = lineWPH * marginPerWafer * gameMinutesPerRealSecond
+        // 実測値は SimCore の観測 EMA（/ゲーム時間）。完了ロットが出るまでは理論値で見せる
+        let sim = state.fab.sim
+        let measuredIncome = (sim?.incomeEMA ?? 0) * gameMinutesPerRealSecond
+        let hasMeasurement = (sim?.stats.completedLots ?? 0) > 0
 
         return DerivedState(
             nodeId: node.id,
@@ -400,8 +488,7 @@ enum Engine {
             cycleFactor: cycleFactor,
             walkFactor: state.market.walkFactor,
             currentPriceYen: price,
-            // lineWPH はゲーム内1時間あたり → 実1分 = ゲーム内 gameMinutesPerRealSecond 時間
-            incomePerMinuteYen: lineWPH * marginPerWafer * gameMinutesPerRealSecond,
+            incomePerMinuteYen: hasMeasurement ? measuredIncome : theoreticalIncome,
             detectionBase: detectionBase,
             // ライン停止時は余裕度が意味を持たないので 0 として表示する
             detectionHeadroom: lineWPH > 0 ? headroom : 0,
@@ -410,7 +497,12 @@ enum Engine {
             learningDefectScale: learningDefectScale,
             rawLineYield: rawLineYield,
             excursionProcess: excursionProcess,
-            excursionYieldLoss: excursionYieldLoss
+            excursionYieldLoss: excursionYieldLoss,
+            measuredThroughputWPH: sim?.throughputEMA ?? 0,
+            measuredYield: sim?.yieldEMA ?? 0,
+            measuredDetectionRate: sim?.detectionEMA ?? 0,
+            measuredIncomePerMinuteYen: measuredIncome,
+            theoreticalIncomePerMinuteYen: theoreticalIncome
         )
     }
 
@@ -450,79 +542,108 @@ enum Engine {
         state.stats.playSeconds += dtRealSeconds
         state.gameHoursElapsed += gameMinutes / 60
         // 補助金の審査は実時間で進む（オフライン中も時計は進むので、復帰直後の tick で交付される）。
-        // offlineProgress は frozenPriceYen を渡して tick を呼ぶので、そのシミュレーション中は精算しない
+        // frozenPriceYen を渡した呼び出し（価格固定のシミュレーション）では精算・評価・異常の抽選をしない
         if frozenPriceYen == nil {
             settleSubsidyIfDue(state: &state)
-        }
-        evaluateMilestones(state: &state)
-
-        let d = derived(state: state)
-        let node = currentNode(state: state)
-        let price = frozenPriceYen ?? d.currentPriceYen
-
-        // 投入ウェハ（lineWPH はゲーム内1時間あたり）
-        let flow = d.lineWPH * gameMinutes / 60
-        guard flow > 0 else {
-            state.fab.running = false
-            return .zero
-        }
-        state.fab.running = true
-        // 歩留まり異常の発生抽選はプレイ中のみ（オフライン進行の frozenPrice 経路では発生しない）
-        if frozenPriceYen == nil {
-            maybeStartExcursion(state: &state, dtGameHours: gameMinutes / 60, derived: d)
+            evaluateMilestones(state: &state)
+            // 歩留まり異常の発生抽選はプレイ中のみ
+            maybeStartExcursion(state: &state, dtGameHours: gameMinutes / 60, derived: derived(state: state))
         }
 
-        state.learningWafers[node.id, default: 0] += flow
-        state.stats.totalWafersInput += flow
-        state.fab.wipWafers = (state.fab.wipWafers + flow).truncatingRemainder(dividingBy: 1)
-
-        // 不良は各工程で生まれ、検査で見つかった分だけ廃棄される。残りは良品に混ざって出荷される
-        let grossDies = flow * Double(productDiesPerWafer(state: state))
-        let goodDies = grossDies * d.lineYield
-        let defectDies = grossDies - goodDies
-        let detectedDies = defectDies * d.detectionRate
-        let shippedDefectDies = defectDies - detectedDies
-        state.stats.totalGoodChips += goodDies
-        state.stats.totalDefectChips += detectedDies
-        state.stats.defectLossYen += detectedDies * price
-
-        let outputChips = goodDies + shippedDefectDies
-        let defectMix = outputChips > 0 ? shippedDefectDies / outputChips : 0
-        var soldChips = 0.0
-        if state.fab.autoSellEnabled {
-            soldChips = outputChips
+        // ゲームループの正は SimCore（§1.2）。配置と整合させたスナップショットから復元してステップ実行する
+        var sim = reconciledSim(state: &state)
+        sim.settlementPriceYen = frozenPriceYen ?? derived(state: state).currentPriceYen
+        if let excursion = state.activeExcursion, let spec = Catalog.excursion(id: excursion.specId) {
+            sim.excursionToolId = excursion.causeToolId
+            sim.excursionDefectMultiplier = spec.defectMultiplier
         } else {
-            // 不良は区別できないので在庫に混ざる
-            state.fab.inventoryChips += outputChips
+            sim.excursionToolId = nil
+            sim.excursionDefectMultiplier = 1
+        }
+        // ノード切替の予約中は投入を止めて仕掛かりを流し切る（排出モード）
+        sim.releasesEnabled = state.fab.nodeSwitch.pendingNodeId == nil
+        sim.wipCap = SimCore.operatingWipCap(layout: state.fab.layout)
+
+        // 1ステップ = ゲーム内1分。端数は pendingMinutes に繰り越す
+        let totalMinutes = sim.pendingMinutes + gameMinutes
+        let steps = Int(totalMinutes)
+        sim.pendingMinutes = totalMinutes - Double(steps)
+        let statsBefore = sim.stats
+        for _ in 0..<steps {
+            sim.step()
+        }
+        let statsAfter = sim.stats
+
+        // 増分を state へ反映する（OfflineProgress.advance と同じ式・同じ項目）
+        let price = sim.settlementPriceYen
+        let released = statsAfter.releasedWafers - statsBefore.releasedWafers
+        let goodChips = statsAfter.sumGoodChips - statsBefore.sumGoodChips
+        let detectedDefectChips = statsAfter.sumDetectedDefectChips - statsBefore.sumDetectedDefectChips
+        let shippedDefectChips = statsAfter.sumShippedDefectChips - statsBefore.sumShippedDefectChips
+        let penaltyYen = statsAfter.sumPenaltyYen - statsBefore.sumPenaltyYen
+        let netYen = statsAfter.sumNetYen - statsBefore.sumNetYen
+        let completedLots = statsAfter.completedLots - statsBefore.completedLots
+        let shippedChips = goodChips + shippedDefectChips
+        // 生産系は全額
+        state.learningWafers[sim.releaseNodeId, default: 0] += released
+        state.stats.totalWafersInput += released
+        state.stats.totalGoodChips += goodChips
+        state.stats.totalDefectChips += detectedDefectChips
+        state.stats.defectLossYen += detectedDefectChips * price
+        state.stats.completedLots += completedLots
+
+        var realizedYen = 0.0
+        // 売上として計上する割合（自動販売は全量、手動販売は在庫上限を超えて現金化した分だけ）
+        var soldFraction = 1.0
+        if state.fab.autoSellEnabled {
+            // 不良が多すぎると純収入がマイナスになりうるため、現金は0で下げ止める
+            state.cashYen = max(0, state.cashYen + netYen)
+            realizedYen = netYen
+        } else {
+            // 不良は区別できないので在庫に混ざる。上限を超えた分は平均純益/チップで現金化する
+            state.fab.inventoryChips += shippedChips
+            var overflow = 0.0
             if state.fab.inventoryChips > inventoryCap {
-                soldChips = state.fab.inventoryChips - inventoryCap
+                overflow = state.fab.inventoryChips - inventoryCap
                 state.fab.inventoryChips = inventoryCap
+                let netPerChip = shippedChips > 0 ? netYen / shippedChips : 0
+                realizedYen = overflow * netPerChip
+                state.cashYen = max(0, state.cashYen + realizedYen)
             }
+            soldFraction = shippedChips > 0 ? overflow / shippedChips : 0
         }
-        var sale = (revenueYen: 0.0, defectChips: 0.0, penaltyYen: 0.0)
-        var netYen = 0.0
-        if soldChips > 0 {
-            let grossYen = soldChips * price
-            sale = netSale(chips: soldChips, defectRate: defectMix, priceYen: price,
-                           penaltyMultiplier: productMarketPenaltyMultiplier(state: state))
-            let cogsYen = grossYen * cogsRate(state: state)
-            netYen = sale.revenueYen - cogsYen
-            state.stats.totalGrossSalesYen += grossYen
-            state.stats.totalCogsYen += cogsYen
-            state.stats.totalShippedChips += soldChips
-            state.stats.totalMarketDefectChips += sale.defectChips
-            state.stats.totalMarketPenaltyYen += sale.penaltyYen
-            recordSale(state: &state, revenueYen: netYen, priceYen: price)
+        // 売上系は売れた割合で按分する（在庫に残った分は sellInventory で計上するので二重にしない。§7.1）
+        state.stats.totalShippedChips += shippedChips * soldFraction
+        state.stats.totalMarketDefectChips += shippedDefectChips * soldFraction
+        state.stats.totalMarketPenaltyYen += penaltyYen * soldFraction
+        state.stats.totalGrossSalesYen += (statsAfter.sumGrossYen - statsBefore.sumGrossYen) * soldFraction
+        state.stats.totalCogsYen += (statsAfter.sumCogsYen - statsBefore.sumCogsYen) * soldFraction
+        state.stats.totalRevenueYen += netYen * soldFraction
+        if completedLots > 0 {
+            state.market.recentAvgPriceYen =
+                state.market.recentAvgPriceYen * (1 - recentPriceSmoothing) + price * recentPriceSmoothing
         }
+
+        // 書き戻し（装置の正は fab.placed、シミュレーション状態は fab.sim）
+        state.fab.placed = sim.tools
+        state.fab.sim = sim.snapshot()
+        state.fab.running = released > 0 || completedLots > 0 || !sim.lots.isEmpty
+
+        // 排出モードのノード切替：仕掛かりを流し切ったら切り替える
+        if let pendingNodeId = state.fab.nodeSwitch.pendingNodeId,
+           state.fab.nodeSwitch.mode == .drain, sim.lots.isEmpty {
+            completeNodeSwitch(state: &state, toNodeId: pendingNodeId)
+        }
+
         // 生産・販売で累計値が動いた分を評価する
         evaluateMilestones(state: &state)
 
         return TickResult(
-            producedWafers: flow,
-            goodChips: goodDies,
-            revenueYen: netYen,
-            shippedDefectChips: sale.defectChips,
-            marketPenaltyYen: sale.penaltyYen
+            producedWafers: released,
+            goodChips: goodChips,
+            revenueYen: realizedYen,
+            shippedDefectChips: shippedDefectChips,
+            marketPenaltyYen: penaltyYen
         )
     }
 
@@ -546,49 +667,167 @@ enum Engine {
         baseOfflineEfficiency + researchEffects(state: state).offlineEfficiencyAddition
     }
 
+    /// オフライン進行（§1.8 のハイブリッド方式）。OfflineProgress.advance の結果を OfflineReport に詰め替える
     static func offlineProgress(state: inout GameState, elapsedRealSeconds: Double) -> OfflineReport {
-        let capped = min(max(elapsedRealSeconds, 0), offlineCapSeconds(state: state))
-        let effective = capped * offlineEfficiency(state: state)
-        let frozenPrice = state.market.recentAvgPriceYen
-        // オフライン中はゲーム内時計・市況位相・プレイ時間を進めない（tick が加算した分をループ後に戻す）
-        let savedGameHours = state.gameHoursElapsed
-        let savedMarketMinutes = state.market.gameTimeMinutes
-        let savedPlaySeconds = state.stats.playSeconds
-
-        var remaining = effective
-        var produced = 0.0
-        var good = 0.0
-        var revenue = 0.0
-        while remaining > 0 {
-            let step = min(offlineStepSeconds, remaining)
-            let result = tick(state: &state, dtRealSeconds: step, frozenPriceYen: frozenPrice)
-            produced += result.producedWafers
-            good += result.goodChips
-            revenue += result.revenueYen
-            remaining -= step
-        }
-        state.gameHoursElapsed = savedGameHours
-        state.market.gameTimeMinutes = savedMarketMinutes
-        state.stats.playSeconds = savedPlaySeconds
-        // 不在中に達成した目標は、戻した時計の「今」に達成したものとして記録する
-        for (id, hours) in state.stats.achievedMilestones where hours > savedGameHours {
-            state.stats.achievedMilestones[id] = savedGameHours
-        }
-
+        // OfflineProgress は fab.sim をそのまま使うので、先に配置と整合させておく
+        state.fab.sim = reconciledSnapshot(state: &state)
+        let report = OfflineProgress.advance(state: &state, elapsedRealSeconds: elapsedRealSeconds)
         return OfflineReport(
-            elapsedSeconds: capped,
-            effectiveSeconds: effective,
-            producedWafers: produced,
-            goodChips: good,
-            revenueYen: revenue
+            elapsedSeconds: report.elapsedRealSeconds,
+            effectiveSeconds: report.effectiveRealSeconds,
+            producedWafers: report.releasedWafers,
+            goodChips: report.goodChips,
+            revenueYen: report.netYen
         )
+    }
+
+    // MARK: SimCore の復元と配置整合
+
+    /// fab.sim を fab.placed と整合させたスナップショット（sim が無ければ新規）。
+    /// placed に無い装置は除去し、そのポートにいたロットと、その装置へ向かっていた搬送中（レール上・仮想搬送）のロットは
+    /// ストッカーへ手運び（満杯なら廃棄して scrappedLots に数える）。
+    /// placed にある装置は Lv・配置を同期し、スナップショットに無い装置は追加する。lots の投入順は保持する
+    static func reconciledSnapshot(state: inout GameState) -> SimSnapshot {
+        let installed = installedTools(state: state)
+        var snapshot = state.fab.sim
+            ?? SimCore.freshSnapshot(state: state, tools: installed, layout: state.fab.layout)
+        let installedById = Dictionary(installed.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+
+        let removedIds = Set(snapshot.tools.map { $0.id }).subtracting(installedById.keys)
+        if !removedIds.isEmpty {
+            var scrappedIds: Set<UUID> = []
+            for index in snapshot.lots.indices {
+                let lot = snapshot.lots[index]
+                let orphaned: Bool
+                switch lot.location {
+                case .port(let toolId, _):
+                    orphaned = removedIds.contains(toolId)
+                case .inTransit(_, let destId):
+                    // 行き先を失った搬送中ロットはレール端で待ち続けるので、ポートロットと同じく退避する
+                    orphaned = destId.map { removedIds.contains($0) } ?? false
+                case .rail:
+                    orphaned = lot.destinationToolId.map { removedIds.contains($0) } ?? false
+                case .entry, .stocker:
+                    orphaned = false
+                }
+                guard orphaned else { continue }
+                if snapshot.stocker.lotIds.count < snapshot.stocker.capacity {
+                    handCarryToStocker(&snapshot, lotIndex: index)
+                } else {
+                    scrappedIds.insert(snapshot.lots[index].id)
+                }
+            }
+            if !scrappedIds.isEmpty {
+                snapshot.lots.removeAll { scrappedIds.contains($0.id) }
+                state.stats.scrappedLots += scrappedIds.count
+            }
+            snapshot.tools.removeAll { removedIds.contains($0.id) }
+        }
+
+        var knownIds = Set<UUID>()
+        for index in snapshot.tools.indices {
+            guard let tool = installedById[snapshot.tools[index].id] else { continue }
+            knownIds.insert(tool.id)
+            snapshot.tools[index].level = tool.level
+            snapshot.tools[index].origin = tool.origin
+            snapshot.tools[index].rotation = tool.rotation
+            snapshot.tools[index].mirrored = tool.mirrored
+        }
+        // スナップショットに無い装置は placed のものをそのまま追加する（新規設置なのでポートは空）
+        for tool in installed where !knownIds.contains(tool.id) {
+            snapshot.tools.append(tool)
+            knownIds.insert(tool.id)
+        }
+        return snapshot
+    }
+
+    /// reconciledSnapshot から復元した SimCore
+    static func reconciledSim(state: inout GameState) -> SimCore {
+        let snapshot = reconciledSnapshot(state: &state)
+        var sim = SimCore(state: state, snapshot: snapshot)
+        resyncLearningWafersBase(&sim, state: state)
+        return sim
+    }
+
+    /// 学習 W の起点を state.learningWafers から引き直す（自己修復）。
+    /// 不変条件「learningWafers[node] = base ＋ その sim で投入した累計」を、learningWafers が外部で
+    /// 変更された場合（移行・テスト等）にも保つ。freshSnapshot（base = learningWafers[node]、投入 0）とも整合する
+    static func resyncLearningWafersBase(_ sim: inout SimCore, state: GameState) {
+        sim.learningWafersBase = (state.learningWafers[sim.releaseNodeId] ?? 0) - sim.stats.releasedWafers
+    }
+
+    /// スナップショット上でロットを手運びでストッカーへ移す（空き確認は呼び出し側）
+    private static func handCarryToStocker(_ snapshot: inout SimSnapshot, lotIndex index: Int) {
+        snapshot.lots[index].location = .stocker
+        snapshot.lots[index].destination = nil
+        snapshot.lots[index].destinationToolId = nil
+        snapshot.lots[index].path = []
+        snapshot.lots[index].stockerHandlingUntilGameMin = snapshot.currentGameMin + snapshot.stocker.handlingGameMin
+        snapshot.stocker.lotIds.append(snapshot.lots[index].id)
+    }
+
+    /// 装置のポートにいるロットをスナップショット上でストッカーへ手運びし、ポートを空ける（§2.4）。
+    /// ストッカーに収まらなければ何も変えず false。sim が無い・ポートにロットが無ければ true
+    private static func evacuatePortLots(state: inout GameState, toolId: UUID) -> Bool {
+        guard var snapshot = state.fab.sim else { return true }
+        let indices = snapshot.lots.indices.filter { index in
+            guard case .port(let id, _) = snapshot.lots[index].location else { return false }
+            return id == toolId
+        }
+        guard !indices.isEmpty else { return true }
+        guard snapshot.stocker.lotIds.count + indices.count <= snapshot.stocker.capacity else { return false }
+        for index in indices {
+            handCarryToStocker(&snapshot, lotIndex: index)
+        }
+        if let t = snapshot.tools.firstIndex(where: { $0.id == toolId }) {
+            snapshot.tools[t].ports = snapshot.tools[t].ports.map { _ in LoadPort(lotId: nil) }
+        }
+        state.fab.sim = snapshot
+        return true
+    }
+
+    /// WIP 上限の運転点をレイアウトに合わせる（レール編集後）
+    private static func syncWipCap(state: inout GameState) {
+        state.fab.sim?.wipCap = SimCore.operatingWipCap(layout: state.fab.layout)
+    }
+
+    // MARK: ライン状態（ビュー・検証用）
+
+    /// レイアウト上の問題（寸断・未接続）。レイアウトが無ければ空
+    static func layoutProblems(state: GameState) -> [LayoutProblem] {
+        guard let layout = state.fab.layout else { return [] }
+        return LayoutAnalysis.analyze(layout: layout, tools: installedTools(state: state),
+                                      nodeId: state.fab.currentNodeId,
+                                      lithoClass: topLithoClass(state: state) ?? .duvDry).problems
+    }
+
+    /// セーブ中のシミュレーションがデッドロックしているか（sim が無ければ false）
+    static func isSimDeadlocked(state: GameState) -> Bool {
+        guard let snapshot = state.fab.sim else { return false }
+        return SimCore(state: state, snapshot: snapshot).isDeadlocked
+    }
+
+    /// 「詰まりを解消」（§1.7）：レール上・搬送中・処理済みのロットを手運びでストッカーへ。満杯なら廃棄する
+    @discardableResult
+    static func resolveDeadlock(state: inout GameState) -> (moved: Int, scrapped: Int) {
+        var sim = reconciledSim(state: &state)
+        let result = sim.resolveDeadlockByHandCarry()
+        state.fab.placed = sim.tools
+        state.fab.sim = sim.snapshot()
+        state.stats.scrappedLots += result.scrapped
+        return result
     }
 
     // MARK: 売買
 
     static func upgradeCostYen(state: GameState, instance: EquipmentInstance) -> Double? {
-        guard instance.level < maxLevel, let model = Catalog.model(id: instance.modelId) else { return nil }
-        return model.priceYen * upgradeCostRate * Double(instance.level)
+        upgradeCostYen(modelId: instance.modelId, level: instance.level)
+    }
+
+    /// 改良費（価格 × 20% × 現在Lv）。最大レベル・不明な機種なら nil
+    private static func upgradeCostYen(modelId: String, level: Int) -> Double? {
+        guard level < maxLevel, let model = Catalog.model(id: modelId) else { return nil }
+        return model.priceYen * upgradeCostRate * Double(level)
     }
 
     static func sellRefundYen(instance: EquipmentInstance) -> Double {
@@ -623,11 +862,11 @@ enum Engine {
         return reasons
     }
 
+    /// 購入できない理由。床面積が上限なのでスロット不足（.noFreeSlot）ではブロックしない（置けなければ倉庫へ）
     static func buyBlockReason(state: GameState, modelId: String) -> BuyBlockReason? {
         guard let model = Catalog.model(id: modelId) else { return .unknownModel }
         let locks = lockReasons(model: model, state: state)
         if !locks.isEmpty { return .locked(locks) }
-        if state.fab.freeSlots <= 0 { return .noFreeSlot }
         if state.cashYen < model.priceYen {
             return .insufficientCash(shortfallYen: model.priceYen - state.cashYen)
         }
@@ -638,33 +877,102 @@ enum Engine {
         buyBlockReason(state: state, modelId: modelId) == nil
     }
 
+    /// 購入して自動配置する。レイアウトがあれば接続できる空きへ置き、無ければ倉庫へ。
+    /// レイアウトが無い（旧形式）なら原点に置く
     @discardableResult
     static func buy(state: inout GameState, modelId: String, now: Date = Date()) -> Bool {
         guard canBuy(state: state, modelId: modelId), let model = Catalog.model(id: modelId) else { return false }
+        adoptLegacyInstalledTools(state: &state)
         state.cashYen -= model.priceYen
-        state.fab.equipment.append(EquipmentInstance(modelId: modelId, level: 1, purchasedAt: now))
+        let instance = EquipmentInstance(modelId: modelId, level: 1, purchasedAt: now)
+        let tool = ToolInstance(instance: instance)
+        if state.fab.layout != nil {
+            if let placedTool = autoPlaced(state: state, tool: tool) {
+                state.fab.placed.append(placedTool)
+            } else {
+                state.fab.storedEquipment.append(instance)
+            }
+        } else {
+            state.fab.placed.append(tool)
+        }
         state.subsidy.totalInvestedYen += model.priceYen
         return true
     }
 
+    /// 自動配置の位置（§2.4 の配置可＋入口・出口とも接続できる）。レイアウトが無い・接続できる空きが無ければ nil。
+    /// 走査は y 昇順 → x 昇順（購入済み区画の広がり範囲内）、各原点で回転 0 → 90。最初に見つかった候補を返す
+    static func autoPlaceOrigin(state: GameState, tool: ToolInstance) -> (origin: GridPoint, rotation: Int)? {
+        guard let layout = state.fab.layout else { return nil }
+        let graph = RailGraph(layout: layout)
+        let stockerPorts = graph.portCells(footprint: layout.stockerCells())
+        // 入口側：投入口・ストッカーのポートから到達できるセル
+        let fromEntry = graph.reachableCells(from: graph.portCells(footprint: layout.entryCells()) + stockerPorts)
+        // 出口側：出荷口・ストッカーのポート
+        let exitPorts = Set(graph.portCells(footprint: layout.shippingCells()) + stockerPorts)
+        let extent = floorExtent(layout)
+        for y in 0..<extent.height {
+            for x in 0..<extent.width {
+                let origin = GridPoint(x: x, y: y)
+                for rotation in [0, 90] {
+                    guard layout.placed(tool, origin: origin, rotation: rotation, among: state.fab.placed) != nil
+                    else { continue }
+                    let footprint = FloorLayout.cells(
+                        origin: origin, size: FloorLayout.footprintSize(modelId: tool.modelId, rotation: rotation))
+                    let ports = graph.portCells(footprint: footprint)
+                    guard ports.contains(where: { fromEntry.contains($0) }) else { continue }
+                    guard !graph.reachableCells(from: ports).isDisjoint(with: exitPorts) else { continue }
+                    return (origin: origin, rotation: rotation)
+                }
+            }
+        }
+        return nil
+    }
+
+    /// autoPlaceOrigin の位置に置いたコピー（ポートは元のまま）。置けなければ nil
+    private static func autoPlaced(state: GameState, tool: ToolInstance) -> ToolInstance? {
+        guard let layout = state.fab.layout, let spot = autoPlaceOrigin(state: state, tool: tool) else { return nil }
+        return layout.placed(tool, origin: spot.origin, rotation: spot.rotation, among: state.fab.placed)
+    }
+
+    /// 購入済み区画を含む矩形の大きさ（セル。原点 0,0 から）
+    private static func floorExtent(_ layout: FloorLayout) -> (width: Int, height: Int) {
+        let width = ((layout.parcels.map { $0.x }.max() ?? 0) + 1) * FloorLayout.parcelSize
+        let height = ((layout.parcels.map { $0.y }.max() ?? 0) + 1) * FloorLayout.parcelSize
+        return (width: width, height: height)
+    }
+
+    /// 設置中（placed）の同 id、無ければ倉庫の同 id を1段階改良する
     @discardableResult
     static func upgrade(state: inout GameState, instanceId: UUID) -> Bool {
-        guard let index = state.fab.equipment.firstIndex(where: { $0.id == instanceId }),
-              let cost = upgradeCostYen(state: state, instance: state.fab.equipment[index]),
-              state.cashYen >= cost
-        else { return false }
-        state.cashYen -= cost
-        state.fab.equipment[index].level += 1
-        state.subsidy.totalInvestedYen += cost
-        return true
+        adoptLegacyInstalledTools(state: &state)
+        if let index = state.fab.placed.firstIndex(where: { $0.id == instanceId }) {
+            let tool = state.fab.placed[index]
+            guard let cost = upgradeCostYen(modelId: tool.modelId, level: tool.level), state.cashYen >= cost
+            else { return false }
+            state.cashYen -= cost
+            state.fab.placed[index].level += 1
+            state.subsidy.totalInvestedYen += cost
+            return true
+        }
+        if let index = state.fab.storedEquipment.firstIndex(where: { $0.id == instanceId }) {
+            guard let cost = upgradeCostYen(state: state, instance: state.fab.storedEquipment[index]),
+                  state.cashYen >= cost
+            else { return false }
+            state.cashYen -= cost
+            state.fab.storedEquipment[index].level += 1
+            state.subsidy.totalInvestedYen += cost
+            return true
+        }
+        return false
     }
 
     @discardableResult
     static func sellEquipment(state: inout GameState, instanceId: UUID) -> Bool {
-        // 設置中・倉庫のどちらからでも売却できる
-        if let index = state.fab.equipment.firstIndex(where: { $0.id == instanceId }) {
-            let refund = sellRefundYen(instance: state.fab.equipment[index])
-            state.fab.equipment.remove(at: index)
+        // 設置中・倉庫のどちらからでも売却できる。設置中のポートのロットは次の reconcile でストッカーへ退避される
+        adoptLegacyInstalledTools(state: &state)
+        if let index = state.fab.placed.firstIndex(where: { $0.id == instanceId }) {
+            let refund = sellRefundYen(instance: equipmentInstance(state.fab.placed[index]))
+            state.fab.placed.remove(at: index)
             state.cashYen += refund
             return true
         }
@@ -679,45 +987,178 @@ enum Engine {
 
     // MARK: 付け替え（倉庫）
 
-    /// 設置中の装置を倉庫へ外す（無料。レベル・購入日時は保持）
+    /// 設置中の装置を倉庫へ外す（無料。レベル・購入日時は保持）。
+    /// ポートのロットはストッカーへ手運びする。ストッカーに収まらなければ外せない（§2.4）
     @discardableResult
     static func detachEquipment(state: inout GameState, instanceId: UUID) -> Bool {
-        guard let index = state.fab.equipment.firstIndex(where: { $0.id == instanceId }) else { return false }
-        let instance = state.fab.equipment.remove(at: index)
-        state.fab.storedEquipment.append(instance)
+        adoptLegacyInstalledTools(state: &state)
+        guard let index = state.fab.placed.firstIndex(where: { $0.id == instanceId }),
+              evacuatePortLots(state: &state, toolId: instanceId)
+        else { return false }
+        let tool = state.fab.placed.remove(at: index)
+        state.fab.storedEquipment.append(equipmentInstance(tool))
         return true
     }
 
-    /// 倉庫の装置を再設置できるか（倉庫に存在し、空きスロットがある）
+    /// 倉庫の装置を再設置できるか（倉庫に存在し、接続できる空きへ自動配置できる）
     static func canAttachEquipment(state: GameState, instanceId: UUID) -> Bool {
-        state.fab.storedEquipment.contains { $0.id == instanceId } && state.fab.freeSlots > 0
+        guard let instance = state.fab.storedEquipment.first(where: { $0.id == instanceId }) else { return false }
+        return autoPlaced(state: state, tool: ToolInstance(instance: instance)) != nil
     }
 
-    /// 倉庫の装置をラインに設置する（空きスロットが必要）
+    /// 倉庫の装置を接続できる空きへ自動配置する（ポートは空）。置けなければ false
     @discardableResult
     static func attachEquipment(state: inout GameState, instanceId: UUID) -> Bool {
-        guard state.fab.freeSlots > 0,
-              let index = state.fab.storedEquipment.firstIndex(where: { $0.id == instanceId })
+        guard let index = state.fab.storedEquipment.firstIndex(where: { $0.id == instanceId }),
+              let tool = autoPlaced(state: state, tool: ToolInstance(instance: state.fab.storedEquipment[index]))
         else { return false }
-        let instance = state.fab.storedEquipment.remove(at: index)
-        state.fab.equipment.append(instance)
+        state.fab.storedEquipment.remove(at: index)
+        state.fab.placed.append(tool)
         return true
     }
 
-    // MARK: 増床
+    // MARK: 配置編集（配置モード）
+    // プレイヤーの配置は未接続でも許可する（グレー表示＋問題リストで示す）
+
+    /// 倉庫の装置を指定位置に置く（§2.4 の配置バリデーションのみ）
+    @discardableResult
+    static func placeStoredTool(state: inout GameState, toolId: UUID, origin: GridPoint, rotation: Int) -> Bool {
+        guard let layout = state.fab.layout,
+              let index = state.fab.storedEquipment.firstIndex(where: { $0.id == toolId }),
+              let tool = layout.placed(ToolInstance(instance: state.fab.storedEquipment[index]),
+                                       origin: origin, rotation: rotation, among: state.fab.placed)
+        else { return false }
+        state.fab.storedEquipment.remove(at: index)
+        state.fab.placed.append(tool)
+        return true
+    }
+
+    /// 設置中の装置を移動する。ポートのロットはストッカーへ手運びし（収まらなければ移動不可）、ポートは空になる
+    @discardableResult
+    static func movePlacedTool(state: inout GameState, toolId: UUID, origin: GridPoint, rotation: Int) -> Bool {
+        guard let layout = state.fab.layout,
+              let index = state.fab.placed.firstIndex(where: { $0.id == toolId })
+        else { return false }
+        let current = state.fab.placed[index]
+        if current.origin == origin && current.rotation == rotation { return true }
+        let others = state.fab.placed.filter { $0.id != toolId }
+        guard var moved = layout.placed(current, origin: origin, rotation: rotation, among: others),
+              evacuatePortLots(state: &state, toolId: toolId)
+        else { return false }
+        moved.ports = moved.ports.map { _ in LoadPort(lotId: nil) }
+        state.fab.placed[index] = moved
+        return true
+    }
+
+    /// 同じ原点で 90° 回す（0 → 90 → 180 → 270 → 0）。検証・ロットの退避は movePlacedTool と同じ
+    @discardableResult
+    static func rotatePlacedTool(state: inout GameState, toolId: UUID) -> Bool {
+        guard let tool = state.fab.placed.first(where: { $0.id == toolId }) else { return false }
+        let rotation = (((tool.rotation % 360) + 360) % 360 + 90) % 360
+        return movePlacedTool(state: &state, toolId: toolId, origin: tool.origin, rotation: rotation)
+    }
+
+    /// 設置中の装置を倉庫へ（detachEquipment と同じ）
+    @discardableResult
+    static func removePlacedToolToStorage(state: inout GameState, toolId: UUID) -> Bool {
+        detachEquipment(state: &state, instanceId: toolId)
+    }
+
+    // MARK: レール編集（§3.1・§9-9）
+
+    /// レール1セルの敷設費（200万円）。撤去は全額返金。補助金の累計設備投資には数えない
+    static let railCellCostYen = 2_000_000.0
+
+    /// レールを敷く・描き替える。既存セルの描き替えは無償、新規セルは railCellCostYen
+    @discardableResult
+    static func setRail(state: inout GameState, cell: RailCell) -> Bool {
+        guard var layout = state.fab.layout else { return false }
+        let existing = layout.railIndex[cell.point]
+        if let existing = existing, existing.direction == cell.direction, existing.kind == cell.kind { return true }
+        let isNew = existing == nil
+        if isNew && state.cashYen < railCellCostYen { return false }
+        guard layout.setRail(cell, among: state.fab.placed) else { return false }
+        state.fab.layout = layout
+        if isNew {
+            state.cashYen -= railCellCostYen
+            state.stats.railCellsBuilt += 1
+        }
+        syncWipCap(state: &state)
+        return true
+    }
+
+    /// レールを撤去して全額返金する。そのセルを通るレール上のロットはストッカーへ手運びし、
+    /// ストッカーに収まらなければ撤去できない（§3.1）
+    @discardableResult
+    static func removeRail(state: inout GameState, at point: GridPoint) -> Bool {
+        guard var layout = state.fab.layout, layout.railIndex[point] != nil else { return false }
+        if var snapshot = state.fab.sim {
+            let indices = snapshot.lots.indices.filter { index in
+                guard case .rail = snapshot.lots[index].location else { return false }
+                return snapshot.lots[index].path.contains(point)
+            }
+            if !indices.isEmpty {
+                guard snapshot.stocker.lotIds.count + indices.count <= snapshot.stocker.capacity else { return false }
+                for index in indices {
+                    handCarryToStocker(&snapshot, lotIndex: index)
+                }
+                state.fab.sim = snapshot
+            }
+        }
+        layout.removeRail(at: point)
+        state.fab.layout = layout
+        state.cashYen += railCellCostYen
+        syncWipCap(state: &state)
+        return true
+    }
+
+    // MARK: 増床（区画購入、§2.5）
 
     /// 次回の増床価格（初回価格 × 1.6^増床回数）
     static func expansionCostYen(state: GameState) -> Double {
         expansionBasePriceYen * pow(expansionPriceGrowth, Double(state.fab.expansionCount))
     }
 
-    static func canExpandFab(state: GameState) -> Bool {
-        state.cashYen >= expansionCostYen(state: state)
+    /// 区画を購入する（既存区画と辺で接する範囲内の未購入区画）。補助金の累計設備投資には数えない
+    @discardableResult
+    static func buyParcel(state: inout GameState, coord: ParcelCoord) -> Bool {
+        guard var layout = state.fab.layout, layout.canAddParcel(coord) else { return false }
+        let cost = expansionCostYen(state: state)
+        guard state.cashYen >= cost else { return false }
+        state.cashYen -= cost
+        layout.addParcel(coord)
+        state.fab.layout = layout
+        state.fab.expansionCount += 1
+        state.stats.parcelsBought += 1
+        return true
     }
 
-    /// 増床してスロットを +4 する。補助金の累計設備投資には数えない
+    /// 読み順（y が外側、x が内側）で最初に追加できる区画（migrateToLayout の無償付与と同じ走査順）
+    private static func firstAddableParcel(_ layout: FloorLayout) -> ParcelCoord? {
+        for y in 0...FloorLayout.maxParcel {
+            for x in 0...FloorLayout.maxParcel {
+                let coord = ParcelCoord(x: x, y: y)
+                if layout.canAddParcel(coord) { return coord }
+            }
+        }
+        return nil
+    }
+
+    static func canExpandFab(state: GameState) -> Bool {
+        if let layout = state.fab.layout {
+            return firstAddableParcel(layout) != nil && state.cashYen >= expansionCostYen(state: state)
+        }
+        return state.cashYen >= expansionCostYen(state: state)
+    }
+
+    /// 増床する。レイアウトがあれば読み順で最初に追加できる区画を買い、
+    /// 無ければ（旧形式）スロットを +4 する。補助金の累計設備投資には数えない
     @discardableResult
     static func expandFab(state: inout GameState) -> Bool {
+        if let layout = state.fab.layout {
+            guard let coord = firstAddableParcel(layout) else { return false }
+            return buyParcel(state: &state, coord: coord)
+        }
         let cost = expansionCostYen(state: state)
         guard state.cashYen >= cost else { return false }
         state.cashYen -= cost
@@ -758,14 +1199,15 @@ enum Engine {
     /// 所有装置（設置中＋倉庫）のうち modelIds に含まれる台数（図鑑の解放・ショップの所持台数用）。
     /// 稼働しているかどうかは問わない
     static func ownedCount(state: GameState, modelIds: [String]) -> Int {
-        (state.fab.equipment + state.fab.storedEquipment).filter { modelIds.contains($0.modelId) }.count
+        let owned = installedTools(state: state).map { $0.modelId } + state.fab.storedEquipment.map { $0.modelId }
+        return owned.filter { modelIds.contains($0) }.count
     }
 
     /// 設置中の装置のうち modelIds に含まれ、現在のノードで稼働している台数
     static func activeCount(state: GameState, modelIds: [String]) -> Int {
         let nodeId = state.fab.currentNodeId
-        return state.fab.equipment.filter { instance in
-            guard modelIds.contains(instance.modelId), let model = Catalog.model(id: instance.modelId) else { return false }
+        return installedTools(state: state).filter { tool in
+            guard modelIds.contains(tool.modelId), let model = Catalog.model(id: tool.modelId) else { return false }
             return isActive(model, nodeId: nodeId)
         }.count
     }
@@ -810,8 +1252,16 @@ enum Engine {
 
     /// 設置中だが、モデルが現在のノードに非対応で稼働していない
     static func isStandby(_ instance: EquipmentInstance, state: GameState) -> Bool {
-        guard state.fab.equipment.contains(where: { $0.id == instance.id }),
-              let model = Catalog.model(id: instance.modelId)
+        isStandby(toolId: instance.id, modelId: instance.modelId, state: state)
+    }
+
+    static func isStandby(_ tool: ToolInstance, state: GameState) -> Bool {
+        isStandby(toolId: tool.id, modelId: tool.modelId, state: state)
+    }
+
+    private static func isStandby(toolId: UUID, modelId: String, state: GameState) -> Bool {
+        guard installedTools(state: state).contains(where: { $0.id == toolId }),
+              let model = Catalog.model(id: modelId)
         else { return false }
         return !isActive(model, nodeId: state.fab.currentNodeId)
     }
@@ -819,8 +1269,8 @@ enum Engine {
     /// 工程別の待機台数
     static func standbyCount(state: GameState, process: ProcessType) -> Int {
         let nodeId = state.fab.currentNodeId
-        return state.fab.equipment.filter { instance in
-            guard let model = Catalog.model(id: instance.modelId), model.process == process else { return false }
+        return installedTools(state: state).filter { tool in
+            guard let model = Catalog.model(id: tool.modelId), model.process == process else { return false }
             return !isActive(model, nodeId: nodeId)
         }.count
     }
@@ -858,9 +1308,12 @@ enum Engine {
         nodeSwitchBlockReason(state: state, toNodeId: toNodeId) == nil
     }
 
-    /// ノード切替後の状態（在庫売却なし。製品が選択不可なら既定製品に戻す）
+    /// ノード切替後の状態（在庫売却なし。製品が選択不可なら既定製品に戻す）。
+    /// プレビューに古い実測値や予約を持ち込まないよう、sim と切替予約はクリアする
     private static func stateAfterSwitchingNode(_ state: GameState, toNodeId: String) -> GameState {
         var copy = state
+        copy.fab.sim = nil
+        copy.fab.nodeSwitch = NodeSwitchState()
         copy.fab.currentNodeId = toNodeId
         if !canSelectProduct(state: copy, productId: copy.currentProductId) {
             copy.currentProductId = Catalog.defaultProductId
@@ -898,7 +1351,7 @@ enum Engine {
             }
             warnings.append(text)
         }
-        let standby = after.fab.equipment.filter { isStandby($0, state: after) }.count
+        let standby = installedTools(state: after).filter { isStandby($0, state: after) }.count
         if standby > 0 {
             warnings.append("\(standby)台の装置が\(target.displayName)非対応のため待機になります")
         }
@@ -912,19 +1365,59 @@ enum Engine {
         return warnings
     }
 
-    /// ノードを切り替える。在庫は旧ノードの単価で精算し、新ノードで作れない製品は既定製品に戻す
+    /// ノードを今すぐ切り替える。在庫は旧ノードの単価で精算し、残っている仕掛かりは廃棄、
+    /// 新ノードで作れない製品は既定製品に戻す（completeNodeSwitch）
     @discardableResult
     static func switchNode(state: inout GameState, toNodeId: String) -> Bool {
         guard canSwitchNode(state: state, toNodeId: toNodeId) else { return false }
+        completeNodeSwitch(state: &state, toNodeId: toNodeId)
+        return true
+    }
+
+    /// ノード切替を要求する。即時なら今すぐ切り替え、排出なら仕掛かりが無ければ今すぐ、
+    /// あれば予約して投入を止める（流し切った時点で tick が切り替える）
+    @discardableResult
+    static func requestNodeSwitch(state: inout GameState, toNodeId: String, mode: NodeSwitchMode) -> Bool {
+        guard canSwitchNode(state: state, toNodeId: toNodeId) else { return false }
+        switch mode {
+        case .immediate:
+            return switchNode(state: &state, toNodeId: toNodeId)
+        case .drain:
+            if state.fab.sim?.lots.isEmpty ?? true {
+                return switchNode(state: &state, toNodeId: toNodeId)
+            }
+            state.fab.nodeSwitch = NodeSwitchState(pendingNodeId: toNodeId, mode: .drain)
+            return true
+        }
+    }
+
+    /// ノード切替の予約を取り消す（投入を再開する）
+    static func cancelNodeSwitch(state: inout GameState) {
+        state.fab.nodeSwitch = NodeSwitchState()
+    }
+
+    /// ノード切替の確定（排出完了・即時切替の共通部）。在庫は旧ノードの単価で精算し、
+    /// 残っている仕掛かりは廃棄、新ノードで作れない製品は既定製品に戻し、シミュレーションを作り直す
+    private static func completeNodeSwitch(state: inout GameState, toNodeId: String) {
         if state.fab.inventoryChips > 0 {
             sellInventory(state: &state, priceYen: derived(state: state).currentPriceYen)
         }
+        state.stats.scrappedLots += state.fab.sim?.lots.count ?? 0
         state.fab.currentNodeId = toNodeId
         if !canSelectProduct(state: state, productId: state.currentProductId) {
             state.currentProductId = Catalog.defaultProductId
         }
+        state.fab.nodeSwitch = NodeSwitchState()
+        // 廃棄したロットが残らないようポートを空にしてから作り直す（学習 W の起点は新ノードの値になる）
+        let tools = installedTools(state: state).map { tool -> ToolInstance in
+            var cleared = tool
+            cleared.ports = tool.ports.map { _ in LoadPort(lotId: nil) }
+            cleared.processingRemainderGameMin = 0
+            return cleared
+        }
+        state.fab.placed = tools
+        state.fab.sim = SimCore.freshSnapshot(state: state, tools: tools, layout: state.fab.layout)
         evaluateMilestones(state: &state)
-        return true
     }
 
     // MARK: 国庫補助金
@@ -999,7 +1492,8 @@ enum Engine {
     }
 
     /// v3 → v4：フロアをテンプレートで再構成する（設計書 §7.2）。
-    /// 設置済み装置はテンプレート → 貪欲配置 → 倉庫の順で置き、Lv・購入日・id は保持する。
+    /// 設置済み装置（fab.equipment）はテンプレート → 貪欲配置 → 倉庫の順で fab.placed / fab.storedEquipment へ置き、
+    /// Lv・購入日・id は保持する。
     /// 増床回数ぶんの区画は無償付与する。仕掛かりの端数（wipWafers）と発生中の異常は破棄する
     static func migrateToLayout(state: inout GameState) {
         let template = LayoutTemplate.starter16(equipment: state.fab.equipment)
@@ -1050,13 +1544,10 @@ enum Engine {
             stored = remaining
         }
 
-        func instance(_ tool: ToolInstance) -> EquipmentInstance {
-            EquipmentInstance(id: tool.id, modelId: tool.modelId, level: tool.level, purchasedAt: tool.purchasedAt)
-        }
+        // 装置の正は placed（配置済み）と storedEquipment（倉庫）。fab.equipment は移行元として読むだけで書き戻さない
         state.fab.layout = layout
         state.fab.placed = placed
-        state.fab.equipment = placed.map(instance)
-        state.fab.storedEquipment += stored.map(instance)
+        state.fab.storedEquipment += stored.map { equipmentInstance($0) }
         // 移行時点ではロットは流れていない（wipWafers の端数は破棄、§7.2）。
         // SimCore の init は state を読むので、layout・placed を設定した後に作る
         state.fab.sim = SimCore.freshSnapshot(state: state, tools: placed, layout: layout)
@@ -1086,24 +1577,26 @@ enum Engine {
             .min()
     }
 
-    /// 所有装置（設置中＋倉庫）すべてを設置した仮定の状態。
+    /// 所有装置（設置中＋倉庫）すべてを設置した仮定の状態（配置・接続は問わない。sim は持ち込まない）。
     /// 倉庫からの再設置は無料なので、詰み判定では所有装置すべてを使えるものとして評価する
     private static func stateWithAllOwnedEquipmentInstalled(_ state: GameState) -> GameState {
         var copy = state
-        copy.fab.equipment += copy.fab.storedEquipment
+        copy.fab.placed = installedTools(state: state) + state.fab.storedEquipment.map { ToolInstance(instance: $0) }
         copy.fab.storedEquipment = []
+        copy.fab.sim = nil
         return copy
     }
 
     /// 切替可能なノード（プレイ可能かつ解放済み）のいずれかで、所有装置を使ってラインが再稼働するか。
-    /// 再稼働するなら、ノード切替と無料の付け替えで立て直せる（＝詰みではない）。
+    /// 再稼働するなら、ノード切替と無料の付け替え・レール敷設で立て直せる（＝詰みではない）。
+    /// 未接続の装置も数える（レール欠落による寸断は救済の対象外、§4）。
     /// 待機装置を倉庫へ外しても所有関係は変わらないため、この判定は付け替えで回避できない
     static func canRestartLineWithOwnedEquipment(state: GameState) -> Bool {
         let fielded = stateWithAllOwnedEquipmentInstalled(state)
         return Catalog.nodes.contains { node in
             Catalog.isPlayable(nodeId: node.id)
                 && isNodeUnlocked(state: state, nodeId: node.id)
-                && derived(state: fielded, asNode: node.id).lineWPH > 0
+                && derived(state: stateAfterSwitchingNode(fielded, toNodeId: node.id), countUnconnected: true).lineWPH > 0
         }
     }
 
@@ -1240,7 +1733,7 @@ enum Engine {
     /// 稼働中の検査装置の最良グレード（Q1=1、Q2=2、Q3=3、検査なし=0）
     static func bestInspectionGrade(state: GameState) -> Int {
         let nodeId = state.fab.currentNodeId
-        let best = state.fab.equipment
+        let best = installedTools(state: state)
             .compactMap { Catalog.model(id: $0.modelId) }
             .filter { $0.process == .inspection && isActive($0, nodeId: nodeId) }
             .map { $0.detectionBase }
@@ -1329,10 +1822,26 @@ enum Engine {
     static func forceStartExcursion(state: inout GameState, causeProcess: ProcessType) -> Bool {
         guard state.activeExcursion == nil,
               let spec = Catalog.excursion(for: causeProcess),
-              derived(state: state).units(causeProcess) > 0
+              derived(state: state).units(causeProcess) > 0,
+              let tool = excursionCauseTools(state: state)[causeProcess]?.first
         else { return false }
-        state.activeExcursion = ActiveExcursion(specId: spec.id, startedAtGameHours: state.gameHoursElapsed)
+        state.activeExcursion = ActiveExcursion(specId: spec.id, startedAtGameHours: state.gameHoursElapsed,
+                                                causeToolId: tool.id)
         return true
+    }
+
+    /// 工程ごとの原因装置の候補：設置中で現在のノードに対応し、derived の集計対象（レイアウト上で接続済み）の装置。
+    /// id（uuidString）順
+    private static func excursionCauseTools(state: GameState) -> [ProcessType: [ToolInstance]] {
+        let nodeId = state.fab.currentNodeId
+        let excluded = unconnectedToolIds(state: state)
+        var result: [ProcessType: [ToolInstance]] = [:]
+        for tool in installedTools(state: state).sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
+            guard !excluded.contains(tool.id),
+                  let model = Catalog.model(id: tool.modelId), isActive(model, nodeId: nodeId) else { continue }
+            result[model.process, default: []].append(tool)
+        }
+        return result
     }
 
     /// 発生抽選。発生間隔の期待値どおりになるよう、経過時間に比例した確率で発生させる
@@ -1343,46 +1852,60 @@ enum Engine {
         else { return }
         let p = min(dtGameHours / excursionMeanIntervalGameHours, 1)
         guard excursionRandomUnit() < p else { return }
-        // 原因工程は稼働中装置のある工程から一様に選ぶ
-        let candidates = ProcessType.allCases.filter { derived.units($0) > 0 }
+        // 原因工程は稼働中装置のある工程から一様に選ぶ（原因装置の候補が無い工程は除く）
+        let causeTools = excursionCauseTools(state: state)
+        let candidates = ProcessType.allCases.filter { derived.units($0) > 0 && !(causeTools[$0] ?? []).isEmpty }
         guard !candidates.isEmpty else { return }
         let index = min(max(Int(excursionRandomUnit() * Double(candidates.count)), 0), candidates.count - 1)
-        guard let spec = Catalog.excursion(for: candidates[index]) else { return }
-        state.activeExcursion = ActiveExcursion(specId: spec.id, startedAtGameHours: state.gameHoursElapsed)
+        guard let spec = Catalog.excursion(for: candidates[index]),
+              let tools = causeTools[candidates[index]] else { return }
+        // 原因装置は工程内の候補から一様に選ぶ（§4・§9-7）
+        let toolIndex = min(max(Int(excursionRandomUnit() * Double(tools.count)), 0), tools.count - 1)
+        state.activeExcursion = ActiveExcursion(specId: spec.id, startedAtGameHours: state.gameHoursElapsed,
+                                                causeToolId: tools[toolIndex].id)
     }
 
     // MARK: プレビュー
 
+    /// 1台追加した状態（原点に置く。配置・接続は問わない）。プレビューは derivedAfterAdding で見る
     private static func stateAfterAdding(_ state: GameState, modelId: String) -> GameState {
         var copy = state
-        copy.fab.equipment.append(EquipmentInstance(modelId: modelId))
+        adoptLegacyInstalledTools(state: &copy)
+        copy.fab.placed.append(ToolInstance(instance: EquipmentInstance(modelId: modelId)))
         return copy
+    }
+
+    /// 追加プレビューの派生状態。追加した装置は未配置なので、未接続の装置も集計に含める
+    private static func derivedAfterAdding(_ state: GameState, modelId: String) -> DerivedState {
+        derived(state: stateAfterAdding(state, modelId: modelId), countUnconnected: true)
     }
 
     private static func stateAfterUpgrading(_ state: GameState, instanceId: UUID) -> GameState {
         var copy = state
-        if let index = copy.fab.equipment.firstIndex(where: { $0.id == instanceId }) {
-            copy.fab.equipment[index].level = min(copy.fab.equipment[index].level + 1, maxLevel)
+        adoptLegacyInstalledTools(state: &copy)
+        if let index = copy.fab.placed.firstIndex(where: { $0.id == instanceId }) {
+            copy.fab.placed[index].level = min(copy.fab.placed[index].level + 1, maxLevel)
         }
         return copy
     }
 
     private static func stateAfterSelling(_ state: GameState, instanceId: UUID) -> GameState {
         var copy = state
-        copy.fab.equipment.removeAll { $0.id == instanceId }
+        adoptLegacyInstalledTools(state: &copy)
+        copy.fab.placed.removeAll { $0.id == instanceId }
         copy.fab.storedEquipment.removeAll { $0.id == instanceId }
         return copy
     }
 
     private static func processOf(instanceId: UUID, in state: GameState) -> ProcessType? {
-        guard let instance = (state.fab.equipment + state.fab.storedEquipment).first(where: { $0.id == instanceId })
-        else { return nil }
-        return Catalog.model(id: instance.modelId)?.process
+        let modelId = installedTools(state: state).first(where: { $0.id == instanceId })?.modelId
+            ?? state.fab.storedEquipment.first(where: { $0.id == instanceId })?.modelId
+        return modelId.flatMap { Catalog.model(id: $0)?.process }
     }
 
     /// 指定モデルを1台追加した場合のラインWPH（資金・スロットは無視）
     static func lineWPHAfterAdding(state: GameState, modelId: String) -> Double {
-        derived(state: stateAfterAdding(state, modelId: modelId)).lineWPH
+        derivedAfterAdding(state, modelId: modelId).lineWPH
     }
 
     /// 指定装置を1段階改良した場合のラインWPH（資金は無視）
@@ -1404,7 +1927,7 @@ enum Engine {
     /// 指定モデルを1台追加した場合の、そのモデルの工程の工程歩留まり
     static func processYieldAfterAdding(state: GameState, modelId: String) -> Double {
         guard let process = Catalog.model(id: modelId)?.process else { return 0 }
-        return derived(state: stateAfterAdding(state, modelId: modelId)).processYields[process] ?? 0
+        return derivedAfterAdding(state, modelId: modelId).processYields[process] ?? 0
     }
 
     /// 指定装置を1段階改良した場合の、その装置の工程の工程歩留まり
@@ -1420,7 +1943,7 @@ enum Engine {
     }
 
     static func lineYieldAfterAdding(state: GameState, modelId: String) -> Double {
-        derived(state: stateAfterAdding(state, modelId: modelId)).lineYield
+        derivedAfterAdding(state, modelId: modelId).lineYield
     }
 
     static func lineYieldAfterUpgrading(state: GameState, instanceId: UUID) -> Double {
@@ -1432,7 +1955,7 @@ enum Engine {
     }
 
     static func detectionRateAfterAdding(state: GameState, modelId: String) -> Double {
-        derived(state: stateAfterAdding(state, modelId: modelId)).detectionRate
+        derivedAfterAdding(state, modelId: modelId).detectionRate
     }
 
     static func detectionRateAfterUpgrading(state: GameState, instanceId: UUID) -> Double {
@@ -1449,7 +1972,7 @@ enum Engine {
 extension Engine {
     /// 設置中＋倉庫の全装置の最大レベル（装置が無ければ 0）
     static func maxOwnedLevel(state: GameState) -> Int {
-        (state.fab.equipment + state.fab.storedEquipment).map { $0.level }.max() ?? 0
+        (installedTools(state: state).map { $0.level } + state.fab.storedEquipment.map { $0.level }).max() ?? 0
     }
 
     static func milestoneAchieved(_ spec: MilestoneSpec, state: GameState, derived: DerivedState) -> Bool {
@@ -1631,6 +2154,24 @@ extension Engine {
 // MARK: - 次の一手アドバイザー
 
 extension Engine {
+    /// フロアに最小フットプリント（2×2、D1）の装置を置ける空きが1つも無いか（接続は問わない）。
+    /// 購入済み区画内の全原点・回転 0/90 で判定する。レイアウトが無ければ満杯ではない
+    static func isFloorFull(state: GameState) -> Bool {
+        guard let layout = state.fab.layout else { return false }
+        let probe = ToolInstance(instance: EquipmentInstance(modelId: "D1"))
+        let tools = installedTools(state: state)
+        let extent = floorExtent(layout)
+        for y in 0..<extent.height {
+            for x in 0..<extent.width {
+                for rotation in [0, 90]
+                where layout.placed(probe, origin: GridPoint(x: x, y: y), rotation: rotation, among: tools) != nil {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+
     /// 今いちばん効く次の一手を1行で返す（優先順位の高いルールから順に判定）
     static func advisorMessage(state: GameState, derived: DerivedState) -> String {
         // 1. ライン停止
@@ -1669,11 +2210,11 @@ extension Engine {
                .min(by: { $0.priceYen < $1.priceYen }) {
             let after = lineWPHAfterAdding(state: state, modelId: model.id)
             if after > derived.lineWPH + 1e-9 {
-                if state.fab.freeSlots <= 0 {
+                if isFloorFull(state: state) {
                     if canExpandFab(state: state) {
-                        return "設置スロットが満杯です。増床（\(MoneyFormat.yen(expansionCostYen(state: state)))）すると、ボトルネックの\(process.displayName)に装置を足せるようになります。"
+                        return "フロアに装置を置く空きがありません。区画を購入して増床（\(MoneyFormat.yen(expansionCostYen(state: state)))）すると、ボトルネックの\(process.displayName)に装置を足せるようになります。"
                     }
-                    return "設置スロットが満杯です。余裕のある工程の装置を倉庫へ外して\(process.displayName)に付け替えるか、増床の資金を貯めましょう。"
+                    return "フロアに装置を置く空きがありません。余裕のある工程の装置を倉庫へ外して\(process.displayName)に付け替えるか、増床の資金を貯めましょう。"
                 }
                 if state.cashYen >= model.priceYen {
                     return "ボトルネックの\(process.displayName)に\(model.name)（\(MoneyFormat.yen(model.priceYen))）を足すと、ラインWPH \(MoneyFormat.decimal(derived.lineWPH, digits: 2)) → \(MoneyFormat.decimal(after, digits: 2)) になります。"

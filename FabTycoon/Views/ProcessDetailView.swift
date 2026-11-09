@@ -15,9 +15,9 @@ struct ProcessDetailView: View {
         self.onAddEquipment = onAddEquipment
     }
 
-    /// 設置中の装置（この工程分）
-    private var instances: [EquipmentInstance] {
-        store.state.fab.equipment.filter { Catalog.model(id: $0.modelId)?.process == process }
+    /// 設置中の装置（この工程分。装置の正は fab.placed）
+    private var placedTools: [ToolInstance] {
+        Engine.installedTools(state: store.state).filter { Catalog.model(id: $0.modelId)?.process == process }
     }
 
     /// 倉庫の装置（この工程分）
@@ -66,14 +66,16 @@ struct ProcessDetailView: View {
                 }
 
                 Section("設置中の装置") {
-                    if instances.isEmpty {
+                    if placedTools.isEmpty {
                         Text("装置がありません。この工程が止まるとライン全体が停止します。")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     }
-                    ForEach(instances) { instance in
+                    ForEach(placedTools) { tool in
+                        let instance = Engine.equipmentInstance(tool)
                         EquipmentRow(
                             instance: instance,
+                            origin: tool.origin,
                             onSell: { pendingSell = instance },
                             onDetach: { store.detachEquipment(instance.id) }
                         )
@@ -177,6 +179,8 @@ struct ProcessDetailView: View {
 private struct EquipmentRow: View {
     @EnvironmentObject private var store: GameStore
     let instance: EquipmentInstance
+    /// フロア上の配置位置（左上セル）
+    let origin: GridPoint
     let onSell: () -> Void
     let onDetach: () -> Void
 
@@ -210,10 +214,14 @@ private struct EquipmentRow: View {
                              : "1台あたり実効 \(MoneyFormat.decimal(unit, digits: 2)) WPH（稼働率適用前）")
                             .font(.caption)
                             .foregroundStyle(isStandby ? Color.orange : Color.secondary)
+                        Text("配置 (\(origin.x), \(origin.y))")
+                            .font(.caption)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
                     }
                 }
                 if isStandby {
-                    Label("待機中：現在のノード（\(Engine.currentNode(state: state).displayName)）では稼働しません。スロットを空けるなら倉庫へ外しましょう。",
+                    Label("待機中：現在のノード（\(Engine.currentNode(state: state).displayName)）では稼働しません。フロアを空けるなら倉庫へ外しましょう。",
                           systemImage: "pause.circle.fill")
                         .font(.subheadline.bold())
                         .foregroundStyle(.orange)
@@ -265,7 +273,7 @@ private struct EquipmentRow: View {
                     }
                     .buttonStyle(.bordered)
                     if isStandby {
-                        // 待機中の装置はスロットを塞ぐだけなので、外す操作を目立たせる
+                        // 待機中の装置はフロアを塞ぐだけなので、外す操作を目立たせる
                         Button {
                             onDetach()
                         } label: {
@@ -301,7 +309,7 @@ private struct StoredEquipmentRow: View {
     let onSell: () -> Void
 
     var body: some View {
-        let canAttach = store.state.fab.freeSlots > 0
+        let canAttach = Engine.canAttachEquipment(state: store.state, instanceId: instance.id)
         if let model = Catalog.model(id: instance.modelId) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .center, spacing: 12) {
@@ -339,7 +347,7 @@ private struct StoredEquipmentRow: View {
                     .buttonStyle(.bordered)
                 }
                 if !canAttach {
-                    Text("空きスロットがありません")
+                    Text("レールに接続できる空きがありません（フロアの「編集」から手動で配置できます）")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

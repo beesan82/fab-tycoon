@@ -290,6 +290,30 @@ struct SimSnapshot: Codable, Equatable {
     var detectionEMA: Double
     var incomeEMA: Double
     var cycleTimeEMA: Double
+    /// 学習枚数 W の起点（P4）。ロットの learningWafersAtRelease = これ ＋ stats.releasedWafers
+    var learningWafersBase: Double = 0
+}
+
+extension SimSnapshot {
+    /// P4 より前のセーブには learningWafersBase のキーが無いので 0 とみなす
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        tools = try container.decode([ToolInstance].self, forKey: .tools)
+        lots = try container.decode([Lot].self, forKey: .lots)
+        stocker = try container.decode(Stocker.self, forKey: .stocker)
+        currentGameMin = try container.decode(Double.self, forKey: .currentGameMin)
+        lastProgressGameMin = try container.decode(Double.self, forKey: .lastProgressGameMin)
+        pendingMinutes = try container.decode(Double.self, forKey: .pendingMinutes)
+        wipCap = try container.decode(Int.self, forKey: .wipCap)
+        nextLotSerial = try container.decode(Int.self, forKey: .nextLotSerial)
+        stats = try container.decode(SimStats.self, forKey: .stats)
+        throughputEMA = try container.decode(Double.self, forKey: .throughputEMA)
+        yieldEMA = try container.decode(Double.self, forKey: .yieldEMA)
+        detectionEMA = try container.decode(Double.self, forKey: .detectionEMA)
+        incomeEMA = try container.decode(Double.self, forKey: .incomeEMA)
+        cycleTimeEMA = try container.decode(Double.self, forKey: .cycleTimeEMA)
+        learningWafersBase = try container.decodeIfPresent(Double.self, forKey: .learningWafersBase) ?? 0
+    }
 }
 
 // MARK: - SimCore
@@ -316,6 +340,17 @@ struct SimCore {
     var wipCap: Int = 200
     var stats = SimStats()
     var nextLotSerial: Int = 0
+    /// 学習枚数 W の起点（P4）。sim 作成時点の state.learningWafers[ノード]
+    var learningWafersBase: Double = 0
+
+    // MARK: Engine が tick ごとに設定する（P4。スナップショットには含めない）
+
+    /// 歩留まり異常の原因装置（§4・§9-7）。nil なら異常なし
+    var excursionToolId: UUID? = nil
+    /// 異常の欠陥倍率（工程全体に対する値。原因装置の台数シェアで割り戻して適用する）
+    var excursionDefectMultiplier: Double = 1
+    /// false なら投入しない（ノード切替の排出モード）。搬送・処理・払い出しは通常どおり
+    var releasesEnabled: Bool = true
 
     // MARK: 観測専用（P3。シミュレーションの判断には使わない）
 
@@ -418,6 +453,7 @@ struct SimCore {
         detectionEMA = snapshot.detectionEMA
         incomeEMA = snapshot.incomeEMA
         cycleTimeEMA = snapshot.cycleTimeEMA
+        learningWafersBase = snapshot.learningWafersBase
     }
 
     /// 現在の状態のスナップショット（lots は投入順）
@@ -436,13 +472,25 @@ struct SimCore {
             yieldEMA: yieldEMA,
             detectionEMA: detectionEMA,
             incomeEMA: incomeEMA,
-            cycleTimeEMA: cycleTimeEMA
+            cycleTimeEMA: cycleTimeEMA,
+            learningWafersBase: learningWafersBase
         )
     }
 
-    /// ロットの流れていない初期スナップショット（新規ゲーム・v3 → v4 移行用）
+    /// ロットの流れていない初期スナップショット（新規ゲーム・v3 → v4 移行用）。
+    /// WIP 上限は運転点、学習 W の起点は現在ノードの state.learningWafers
     static func freshSnapshot(state: GameState, tools: [ToolInstance], layout: FloorLayout?) -> SimSnapshot {
-        SimCore(state: state, tools: tools, layout: layout).snapshot()
+        var core = SimCore(state: state, tools: tools, layout: layout)
+        core.wipCap = operatingWipCap(layout: layout)
+        core.learningWafersBase = state.learningWafers[state.fab.currentNodeId] ?? 0
+        return core.snapshot()
+    }
+
+    /// WIP 上限の運転点（付録 C.5）。仮想搬送は 200、レール搬送はレールセル数 ＋ 5 を [30, 200] に収める
+    /// （16×16 テンプレートはレール 40 セル → 45）
+    static func operatingWipCap(layout: FloorLayout?) -> Int {
+        guard let layout = layout else { return 200 }
+        return min(200, max(30, layout.rails.count + 5))
     }
 
     /// 1パスの処理時間（ゲーム分）。§1.3
@@ -526,6 +574,21 @@ struct SimCore {
         return best?.index
     }
 
+    /// 装置の台数シェア：容量（公称 WPH × Lv 倍率）÷ 同じ工程でノード nodeId を処理できる装置の容量合計
+    /// （§4・§9-7 の異常の割り戻し用。そのロットを処理できる装置群の中でのシェア）
+    private func capacityShare(_ index: Int, nodeId: String, models: [EquipmentModel?]) -> Double {
+        guard let model = models[index] else { return 1 }
+        var own = 0.0
+        var total = 0.0
+        for i in tools.indices {
+            guard let other = models[i], other.process == model.process, other.supports(nodeId: nodeId) else { continue }
+            let capacity = other.nominalWPH * Engine.levelMultiplier(tools[i].level)
+            total += capacity
+            if i == index { own = capacity }
+        }
+        return own > 0 && total > 0 ? own / total : 1
+    }
+
     /// 搬送中ロットの行き先装置ごとの件数
     private func inboundCounts() -> [UUID: Int] {
         var counts: [UUID: Int] = [:]
@@ -559,7 +622,13 @@ struct SimCore {
                 if let lotId = tools[t].ports[p].lotId, var lot = lots[lotId], let model = models[t] {
                     let route = Self.routeInfo(nodeId: lot.nodeId, lithoClass: lot.lithoClass, cache: &routes)
                     let process = lot.stepIndex < route.steps.count ? route.steps[lot.stepIndex] : model.process
-                    let f = 1 - (1 - Engine.effectiveYieldFactor(model, level: tools[t].level)) * research.yieldDefectMultiplier
+                    var f = 1 - (1 - Engine.effectiveYieldFactor(model, level: tools[t].level)) * research.yieldDefectMultiplier
+                    if let excursionToolId, tools[t].id == excursionToolId, excursionDefectMultiplier > 1 {
+                        // 歩留まり異常（§4・§9-7）：工程全体の倍率を原因装置の台数シェアで割り戻し、欠陥側を拡大する
+                        let corrected = 1 + (excursionDefectMultiplier - 1) / capacityShare(t, nodeId: lot.nodeId, models: models)
+                        f = max(0.5, 1 - (1 - f) * corrected)
+                        lot.excursionHits += 1
+                    }
                     lot.goodFraction *= pow(f, 1.0 / Double(max(route.passes[process] ?? 1, 1)))
                     if process == .inspection {
                         let dq = min(Engine.maxDetectionRate,
@@ -700,8 +769,8 @@ struct SimCore {
             stocker.lotIds.removeAll { $0 == lotId }
         }
 
-        // 6. 投入（プル方式。先頭工程の装置に空きポートがあるときだけ、WIP 上限未満で1ロット）
-        if lots.count < wipCap {
+        // 6. 投入（プル方式。先頭工程の装置に空きポートがあるときだけ、WIP 上限未満で1ロット。排出モードでは止める）
+        if releasesEnabled && lots.count < wipCap {
             let route = Self.routeInfo(nodeId: releaseNodeId, lithoClass: releaseLithoClass, cache: &routes)
             if let first = route.steps.first {
                 if let dest = bestTool(process: first, nodeId: releaseNodeId, requireEmptyPort: true,
@@ -717,7 +786,7 @@ struct SimCore {
                         location: .inTransit(remainingGameMin: Self.virtualTransitGameMin, destinationToolId: destId),
                         destinationToolId: destId,
                         releasedAtGameMin: currentGameMin,
-                        learningWafersAtRelease: stats.releasedWafers
+                        learningWafersAtRelease: learningWafersBase + stats.releasedWafers
                     )
                     lots[lot.id] = lot
                     lotReleaseOrder.append(lot.id)
@@ -1138,8 +1207,8 @@ struct SimCore {
 
         // 6. 投入（プル方式。WIP 上限未満で、先頭工程の装置のうち投入口から経路がある候補のスコア最小へ、
         //    経路の先頭セルへ出発できるときだけ1ロット。inbound 計量はしない：遠方を走行中の戻りロットまで数えると
-        //    投入が定常的に塞がれるため。戻りロットとのポート競合は到着時収容で処理する）
-        if lots.count < wipCap {
+        //    投入が定常的に塞がれるため。戻りロットとのポート競合は到着時収容で処理する。排出モードでは止める）
+        if releasesEnabled && lots.count < wipCap {
             inbound = railInbound().tools
             let route = Self.routeInfo(nodeId: releaseNodeId, lithoClass: releaseLithoClass, cache: &routes)
             if let first = route.steps.first {
@@ -1157,7 +1226,7 @@ struct SimCore {
                         location: .rail(cellIndex: 0, progress: 0),
                         destinationToolId: destId,
                         releasedAtGameMin: currentGameMin,
-                        learningWafersAtRelease: stats.releasedWafers,
+                        learningWafersAtRelease: learningWafersBase + stats.releasedWafers,
                         path: best.path,
                         destination: .tool(destId)
                     )
@@ -1168,6 +1237,50 @@ struct SimCore {
                 }
             }
         }
+    }
+
+    // MARK: 詰まり解消（§1.7）
+
+    /// 「詰まりを解消」：レール上・搬送中のロットと処理済みポートのロットを、投入順に手運びでストッカーへ移す。
+    /// ストッカーが満杯になったら残りは投入順に廃棄する。戻り値は (ストッカーへ移した数, 廃棄した数)
+    mutating func resolveDeadlockByHandCarry() -> (moved: Int, scrapped: Int) {
+        var moved = 0
+        var scrappedIds: Set<UUID> = []
+        for lotId in lotReleaseOrder {
+            guard var lot = lots[lotId] else { continue }
+            var port: (toolIndex: Int, portIndex: Int)?
+            switch lot.location {
+            case .rail, .inTransit:
+                break
+            case .port(let toolId, let portIndex):
+                guard let t = tools.firstIndex(where: { $0.id == toolId }), portIndex < tools[t].ports.count,
+                      tools[t].ports[portIndex].state == .done else { continue }
+                port = (t, portIndex)
+            case .entry, .stocker:
+                continue
+            }
+            if let port = port {
+                tools[port.toolIndex].ports[port.portIndex] = LoadPort(lotId: nil)
+            }
+            if stocker.lotIds.count < stocker.capacity {
+                stocker.lotIds.append(lotId)
+                lot.location = .stocker
+                lot.stockerHandlingUntilGameMin = currentGameMin + stocker.handlingGameMin
+                lot.path = []
+                lot.destination = nil
+                lot.destinationToolId = nil
+                lots[lotId] = lot
+                moved += 1
+            } else {
+                lots[lotId] = nil
+                scrappedIds.insert(lotId)
+            }
+        }
+        if !scrappedIds.isEmpty {
+            lotReleaseOrder.removeAll { scrappedIds.contains($0) }
+        }
+        lastProgressGameMin = currentGameMin
+        return (moved, scrappedIds.count)
     }
 
     // MARK: 精算（§4。現行 Engine.tick と同じ式）

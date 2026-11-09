@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// フロア上で選択中のベイ
+/// 詳細カードの対象（フロアで装置・出荷口をタップして切り替える）
 enum FloorSelection: Equatable {
     case process(ProcessType)
     case shipping
@@ -11,6 +11,13 @@ struct NodeSwitchTarget: Identifiable, Equatable {
     let id: String
 }
 
+/// 詰まり解消の結果表示
+struct DeadlockResolution: Identifiable {
+    let id = UUID()
+    let moved: Int
+    let scrapped: Int
+}
+
 struct LineView: View {
     @EnvironmentObject private var store: GameStore
     @State private var selectedProcess: ProcessType?
@@ -18,6 +25,11 @@ struct LineView: View {
     @State private var didInitSelection = false
     @State private var nodeSwitchTarget: NodeSwitchTarget?
     @State private var showsDefectAnalysis = false
+    /// フロア上で選択・ハイライト中の装置（問題リストからも設定する）
+    @State private var highlightedToolId: UUID?
+    @State private var showsProblems = false
+    @State private var showsResolveConfirm = false
+    @State private var deadlockResolution: DeadlockResolution?
 
     var body: some View {
         let state = store.state
@@ -31,8 +43,11 @@ struct LineView: View {
                 nextGoalCard(state: state, derived: derived)
                     .padding(.horizontal)
 
-                FabFloorView(selection: $selection)
-                    .padding(.horizontal)
+                VStack(alignment: .leading, spacing: 8) {
+                    floorBanners(state: state)
+                    FloorGridView(selection: $selection, highlightedToolId: $highlightedToolId)
+                }
+                .padding(.horizontal)
 
                 detailCard(state: state, derived: derived)
                     .padding(.horizontal)
@@ -68,6 +83,98 @@ struct LineView: View {
         .sheet(isPresented: $showsDefectAnalysis) {
             DefectAnalysisSheet()
                 .environmentObject(store)
+        }
+        .sheet(isPresented: $showsProblems) {
+            LayoutProblemsSheet { toolId in
+                highlightedToolId = toolId
+                if let modelId = Engine.installedTools(state: store.state).first(where: { $0.id == toolId })?.modelId,
+                   let process = Catalog.model(id: modelId)?.process {
+                    selection = .process(process)
+                }
+                showsProblems = false
+            }
+            .environmentObject(store)
+        }
+        .alert("詰まりを解消しますか？", isPresented: $showsResolveConfirm) {
+            Button("解消する", role: .destructive) {
+                let result = store.resolveDeadlock()
+                // 確認アラートが閉じてから結果を出す
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    deadlockResolution = DeadlockResolution(moved: result.moved, scrapped: result.scrapped)
+                }
+            }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("レール上・搬送中・処理済みのロットを手運びでストッカーへ移します。ストッカーが満杯の分は廃棄されます。")
+        }
+        .alert("詰まりを解消しました", isPresented: Binding(
+            get: { deadlockResolution != nil },
+            set: { if !$0 { deadlockResolution = nil } }
+        ), presenting: deadlockResolution) { _ in
+            Button("OK") { deadlockResolution = nil }
+        } message: { result in
+            Text(result.scrapped > 0
+                 ? "\(result.moved)ロットをストッカーへ移し、\(result.scrapped)ロットを廃棄しました。"
+                 : "\(result.moved)ロットをストッカーへ移しました。")
+        }
+    }
+
+    // MARK: フロアのバナー（排出中・詰まり・レイアウトの問題）
+
+    @ViewBuilder
+    private func floorBanners(state: GameState) -> some View {
+        let problems = store.layoutProblems
+        let deadlocked = store.simDeadlocked
+        if let pendingNodeId = state.fab.nodeSwitch.pendingNodeId {
+            let name = Catalog.node(id: pendingNodeId)?.displayName ?? pendingNodeId
+            VStack(alignment: .leading, spacing: 8) {
+                Label("排出中：仕掛かりが流れ切ったら \(name) へ切り替えます", systemImage: "hourglass")
+                    .font(.subheadline.bold())
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("切替をやめる") {
+                    store.cancelNodeSwitch()
+                }
+                .buttonStyle(.bordered)
+            }
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 14).fill(Color.blue.opacity(0.12)))
+        }
+        if deadlocked {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("ラインが詰まっています（ロットが互いに道をふさいでいます）", systemImage: "exclamationmark.octagon.fill")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.white)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    showsResolveConfirm = true
+                } label: {
+                    Text("詰まりを解消")
+                        .bold()
+                        .foregroundStyle(.red)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.white)
+            }
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 14).fill(Color.red))
+        }
+        if !problems.isEmpty {
+            HStack(spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text("レイアウトに問題があります")
+                    .font(.subheadline.bold())
+                Spacer()
+                Button("問題 \(problems.count) 件") {
+                    showsProblems = true
+                }
+                .buttonStyle(.bordered)
+            }
+            .padding()
+            .background(RoundedRectangle(cornerRadius: 14).fill(Color.orange.opacity(0.15)))
         }
     }
 
@@ -200,7 +307,7 @@ struct LineView: View {
     }
 
     private func processCard(_ process: ProcessType, state: GameState, derived: DerivedState) -> some View {
-        let count = state.fab.equipment.filter { Catalog.model(id: $0.modelId)?.process == process }.count
+        let count = Engine.installedTools(state: state).filter { Catalog.model(id: $0.modelId)?.process == process }.count
         let standby = Engine.standbyCount(state: state, process: process)
         let wph = derived.wph(process)
         let load: Double = wph > 0 ? min(max(derived.lineWPH / wph, 0), 1) : 0
@@ -406,9 +513,16 @@ struct NodeSwitchSheet: View {
 
     let targetNodeId: String
 
+    @State private var mode: NodeSwitchMode = .drain
+
+    init(targetNodeId: String) {
+        self.targetNodeId = targetNodeId
+    }
+
     var body: some View {
         let state = store.state
         let from = store.derived
+        let wipLots = state.fab.sim?.lots.count ?? 0
         let to = Engine.derived(state: state, asNode: targetNodeId)
         let fromNode = Engine.currentNode(state: state)
         let target = Catalog.node(id: targetNodeId) ?? Catalog.defaultNode
@@ -479,8 +593,23 @@ struct NodeSwitchSheet: View {
                 }
 
                 Section {
+                    Picker("移行の方式", selection: $mode) {
+                        Text("排出モード（仕掛かりを流し切ってから切替）").tag(NodeSwitchMode.drain)
+                        Text("今すぐ切替（仕掛かりは廃棄）").tag(NodeSwitchMode.immediate)
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+                } header: {
+                    Text("移行の方式")
+                } footer: {
+                    Text(mode == .drain
+                         ? "投入を止め、ライン上の\(wipLots)ロットが出荷されたら切り替えます。その間もラインは動き続けます。"
+                         : "ライン上の\(wipLots)ロットは廃棄され、すぐに切り替わります。")
+                }
+
+                Section {
                     Button {
-                        store.switchNode(targetNodeId)
+                        store.switchNode(targetNodeId, mode: mode)
                         dismiss()
                     } label: {
                         Text("移行する")
@@ -524,6 +653,80 @@ struct NodeSwitchSheet: View {
                 .foregroundStyle(improved ? Color.green : Color.secondary)
         }
         .font(.subheadline)
+    }
+}
+
+// MARK: - レイアウトの問題シート
+
+struct LayoutProblemsSheet: View {
+    @EnvironmentObject private var store: GameStore
+    @Environment(\.dismiss) private var dismiss
+
+    /// 装置の問題をタップしたとき（フロアでハイライトしてシートを閉じるのは呼び出し側）
+    let onSelectTool: (UUID) -> Void
+
+    init(onSelectTool: @escaping (UUID) -> Void) {
+        self.onSelectTool = onSelectTool
+    }
+
+    var body: some View {
+        let problems = store.layoutProblems
+        NavigationStack {
+            List {
+                if problems.isEmpty {
+                    Text("問題はありません。")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Section {
+                        ForEach(Array(problems.enumerated()), id: \.offset) { item in
+                            problemRow(item.element)
+                        }
+                    } footer: {
+                        Text("装置の問題をタップすると、フロア上でその装置をハイライトします。レールはフロアの「編集」→「レール」で引き直せます。")
+                    }
+                }
+            }
+            .navigationTitle("レイアウトの問題")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("閉じる") { dismiss() }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func problemRow(_ problem: LayoutProblem) -> some View {
+        if let toolId = toolId(of: problem) {
+            Button {
+                onSelectTool(toolId)
+            } label: {
+                HStack {
+                    Label(problem.message, systemImage: "exclamationmark.circle")
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Image(systemName: "scope")
+                        .foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        } else {
+            Label(problem.message, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func toolId(of problem: LayoutProblem) -> UUID? {
+        switch problem {
+        case .unconnectedInput(let toolId, _), .unconnectedOutput(let toolId, _):
+            return toolId
+        case .lineBreak:
+            return nil
+        }
     }
 }
 
@@ -634,6 +837,13 @@ struct DefectAnalysisSheet: View {
             if excursion.hintsRevealed >= 1 {
                 row("候補工程", Engine.excursionCandidates(state: store.state).map { $0.displayName }.joined(separator: "・"))
             }
+            if excursion.hintsRevealed >= 3, Engine.bestInspectionGrade(state: store.state) == 3,
+               let causeToolId = excursion.causeToolId, let causeName = causeToolName(causeToolId) {
+                Label("\(causeName) を通ったロットだけ歩留まりが落ちています", systemImage: "scope")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if excursion.hintsRevealed < 3 {
                 Button {
                     store.revealExcursionHint()
@@ -649,6 +859,16 @@ struct DefectAnalysisSheet: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    /// 原因装置の表示名（「E1 #2（モデル名）」：同モデルの設置順の連番）。設置されていなければ nil
+    private func causeToolName(_ toolId: UUID) -> String? {
+        let installed = Engine.installedTools(state: store.state)
+        guard let tool = installed.first(where: { $0.id == toolId }) else { return nil }
+        let sameModel = installed.filter { $0.modelId == tool.modelId }
+        let number = (sameModel.firstIndex(where: { $0.id == toolId }) ?? 0) + 1
+        let name = Catalog.model(id: tool.modelId)?.name ?? tool.modelId
+        return "\(tool.modelId) #\(number)（\(name)）"
     }
 
     // MARK: 対策
@@ -721,932 +941,6 @@ struct DefectAnalysisSheet: View {
     }
 }
 
-// MARK: - フロア平面図
-
-/// 4列×2行の蛇行配置。slot 0...6 が工程順、slot 7 が出荷・倉庫。
-struct FloorLayout {
-    static let columns = 4
-    static let padding: CGFloat = 10
-    static let spacing: CGFloat = 8
-    static let shippingSlot = 7
-
-    let size: CGSize
-
-    var cellSize: CGSize {
-        let width = (size.width - Self.padding * 2 - Self.spacing * 3) / 4
-        let height = (size.height - Self.padding * 2 - Self.spacing) / 2
-        return CGSize(width: max(width, 0), height: max(height, 0))
-    }
-
-    func rect(slot: Int) -> CGRect {
-        let row = slot / Self.columns
-        let index = slot % Self.columns
-        let column = row == 0 ? index : Self.columns - 1 - index
-        let cell = cellSize
-        let x = Self.padding + CGFloat(column) * (cell.width + Self.spacing)
-        let y = Self.padding + CGFloat(row) * (cell.height + Self.spacing)
-        return CGRect(x: x, y: y, width: cell.width, height: cell.height)
-    }
-
-    /// 工程順（露光→…→PKG→出荷）のベイ中心
-    var flowCenters: [CGPoint] {
-        (0...Self.shippingSlot).map { slot -> CGPoint in
-            let r = rect(slot: slot)
-            return CGPoint(x: r.midX, y: r.midY)
-        }
-    }
-
-    /// 搬入口（上部壁面のFOUPストッカー位置）
-    var entryPoint: CGPoint {
-        CGPoint(x: rect(slot: 0).midX, y: 7)
-    }
-
-    /// 搬入口＋工程順のベイ中心（9点・8区間。区間0=搬入、区間i=工程i-1から出る区間）
-    var flowPoints: [CGPoint] {
-        [entryPoint] + flowCenters
-    }
-}
-
-/// 滞留表示の対象工程と台数
-struct FloorQueue {
-    let process: ProcessType
-    let count: Int
-    let isBottleneck: Bool
-}
-
-struct FabFloorView: View {
-    @EnvironmentObject private var store: GameStore
-    @Binding var selection: FloorSelection
-
-    var body: some View {
-        let state = store.state
-        let derived = store.derived
-        GeometryReader { geo in
-            let layout = FloorLayout(size: geo.size)
-            ZStack(alignment: .topLeading) {
-                FloorBackground()
-                ForEach(ProcessType.allCases) { process in
-                    bayButton(process: process, layout: layout, state: state, derived: derived)
-                }
-                shippingButton(layout: layout, state: state)
-                FloorFlowLayer(
-                    points: layout.flowPoints,
-                    bottleneckRect: bottleneckRect(layout: layout, derived: derived),
-                    lineWPH: derived.lineWPH,
-                    flowing: state.fab.running && derived.lineWPH > 0,
-                    segmentWPH: ProcessType.allCases.map { derived.wph($0) },
-                    bottleneck: derived.bottleneck,
-                    secondBottleneck: derived.secondBottleneck,
-                    queues: floorQueues(derived: derived)
-                )
-                .frame(width: geo.size.width, height: geo.size.height)
-            }
-        }
-        .aspectRatio(1.2, contentMode: .fit)
-    }
-
-    private func installedModels(for process: ProcessType, state: GameState) -> [EquipmentModel] {
-        state.fab.equipment
-            .compactMap { Catalog.model(id: $0.modelId) }
-            .filter { $0.process == process }
-    }
-
-    private func bottleneckRect(layout: FloorLayout, derived: DerivedState) -> CGRect? {
-        guard let bottleneck = derived.bottleneck else { return nil }
-        return layout.rect(slot: bottleneck.order).insetBy(dx: -1.5, dy: -1.5)
-    }
-
-    /// 律速工程（＋次点）の手前に並べる滞留FOUP
-    private func floorQueues(derived: DerivedState) -> [FloorQueue] {
-        var result: [FloorQueue] = []
-        var total = 0
-        if let bn = derived.bottleneck {
-            let n = FloorVizMath.queueCount(lineWPH: derived.lineWPH, processWPH: derived.wph(bn))
-            if n > 0 {
-                result.append(FloorQueue(process: bn, count: n, isBottleneck: true))
-                total += n
-            }
-        }
-        if let second = derived.secondBottleneck, second != derived.bottleneck {
-            var n = FloorVizMath.queueCount(lineWPH: derived.lineWPH, processWPH: derived.wph(second))
-            n = min(n, max(9 - total, 0))
-            if n > 0 {
-                result.append(FloorQueue(process: second, count: n, isBottleneck: false))
-            }
-        }
-        return result
-    }
-
-    private func bayButton(process: ProcessType, layout: FloorLayout, state: GameState, derived: DerivedState) -> some View {
-        let rect = layout.rect(slot: process.order)
-        return Button {
-            selection = .process(process)
-        } label: {
-            let models = installedModels(for: process, state: state)
-            FloorBayView(
-                process: process,
-                models: models,
-                standbyModelIds: Set(models.filter { !$0.supports(nodeId: state.fab.currentNodeId) }.map { $0.id }),
-                wph: derived.wph(process),
-                isBottleneck: derived.bottleneck == process,
-                isSecond: derived.secondBottleneck == process,
-                isSelected: selection == .process(process),
-                size: rect.size,
-                showsExcursionBadge: (process == .inspection && state.activeExcursion != nil) || derived.excursionProcess == process,
-                isExcursionSource: derived.excursionProcess == process,
-                lineRunning: state.fab.running && derived.lineWPH > 0
-            )
-        }
-        .buttonStyle(.plain)
-        .frame(width: rect.width, height: rect.height)
-        .position(x: rect.midX, y: rect.midY)
-    }
-
-    private func shippingButton(layout: FloorLayout, state: GameState) -> some View {
-        let rect = layout.rect(slot: FloorLayout.shippingSlot)
-        return Button {
-            selection = .shipping
-        } label: {
-            FloorShippingView(
-                inventory: state.fab.inventoryChips,
-                cap: Engine.inventoryCap,
-                isSelected: selection == .shipping
-            )
-        }
-        .buttonStyle(.plain)
-        .frame(width: rect.width, height: rect.height)
-        .position(x: rect.midX, y: rect.midY)
-    }
-}
-
-// MARK: 床
-
-private struct FloorBackground: View {
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 16)
-                .fill(Color(.systemGray6))
-            Canvas { context, size in
-                let step: CGFloat = 16
-                var grid = Path()
-                var x: CGFloat = step
-                while x < size.width {
-                    grid.move(to: CGPoint(x: x, y: 0))
-                    grid.addLine(to: CGPoint(x: x, y: size.height))
-                    x += step
-                }
-                var y: CGFloat = step
-                while y < size.height {
-                    grid.move(to: CGPoint(x: 0, y: y))
-                    grid.addLine(to: CGPoint(x: size.width, y: y))
-                    y += step
-                }
-                context.stroke(grid, with: .color(Color.gray.opacity(0.18)), lineWidth: 0.5)
-
-                // 大タイルの継ぎ目
-                let tileStep: CGFloat = 64
-                var seams = Path()
-                var sx: CGFloat = tileStep
-                while sx < size.width {
-                    seams.move(to: CGPoint(x: sx, y: 0))
-                    seams.addLine(to: CGPoint(x: sx, y: size.height))
-                    sx += tileStep
-                }
-                var sy: CGFloat = tileStep
-                while sy < size.height {
-                    seams.move(to: CGPoint(x: 0, y: sy))
-                    seams.addLine(to: CGPoint(x: size.width, y: sy))
-                    sy += tileStep
-                }
-                context.stroke(seams, with: .color(Color.gray.opacity(0.28)), lineWidth: 1)
-
-                // 穴あきタイル風ドット
-                let holeStep: CGFloat = 32
-                var holes = Path()
-                var hy: CGFloat = holeStep / 2
-                while hy < size.height {
-                    var hx: CGFloat = holeStep / 2
-                    while hx < size.width {
-                        holes.addEllipse(in: CGRect(x: hx - 1, y: hy - 1, width: 2, height: 2))
-                        hx += holeStep
-                    }
-                    hy += holeStep
-                }
-                context.fill(holes, with: .color(Color.gray.opacity(0.10)))
-
-                // 通路ガイド（ベイ間の破線）
-                let layout = FloorLayout(size: size)
-                var aisles = Path()
-                for slot in 0..<3 {
-                    let ax = layout.rect(slot: slot).maxX + FloorLayout.spacing / 2
-                    aisles.move(to: CGPoint(x: ax, y: 0))
-                    aisles.addLine(to: CGPoint(x: ax, y: size.height))
-                }
-                let ay = layout.rect(slot: 0).maxY + FloorLayout.spacing / 2
-                aisles.move(to: CGPoint(x: 0, y: ay))
-                aisles.addLine(to: CGPoint(x: size.width, y: ay))
-                context.stroke(
-                    aisles,
-                    with: .color(Color.gray.opacity(0.13)),
-                    style: StrokeStyle(lineWidth: 1, dash: [4, 4])
-                )
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 16))
-            RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(Color.gray.opacity(0.3), lineWidth: 1)
-            // 壁（二重線）
-            RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(Color.gray.opacity(0.45), lineWidth: 3)
-            RoundedRectangle(cornerRadius: 13)
-                .strokeBorder(Color.gray.opacity(0.25), lineWidth: 1)
-                .padding(3)
-        }
-    }
-}
-
-// MARK: ベイ共通の外観
-
-private struct FloorBayStyle: ViewModifier {
-    let accent: Color
-    let isSelected: Bool
-    let isSecond: Bool
-
-    private var borderColor: Color {
-        if isSelected { return accent }
-        if isSecond { return .yellow }
-        return Color.gray.opacity(0.4)
-    }
-
-    private var borderWidth: CGFloat {
-        if isSelected { return 2.5 }
-        if isSecond { return 2 }
-        return 1
-    }
-
-    func body(content: Content) -> some View {
-        content
-            .background(
-                ZStack {
-                    Color(.secondarySystemGroupedBackground)
-                    accent.opacity(isSelected ? 0.14 : 0.05)
-                }
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .strokeBorder(borderColor, lineWidth: borderWidth)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 8))
-    }
-}
-
-private struct FloorBayHeader: View {
-    let title: String
-    let subtitle: String
-    let color: Color
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Text(title)
-                .font(.system(size: 10, weight: .bold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
-            Text(subtitle)
-                .font(.system(size: 8, weight: .medium))
-                .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
-        }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 3)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(color)
-    }
-}
-
-// MARK: 工程ベイ
-
-struct FloorBayView: View {
-    let process: ProcessType
-    let models: [EquipmentModel]
-    /// 現在のノードに非対応で待機中のモデルID
-    var standbyModelIds: Set<String> = []
-    let wph: Double
-    let isBottleneck: Bool
-    let isSecond: Bool
-    let isSelected: Bool
-    let size: CGSize
-    /// 歩留まり異常バッジ（検査ベイと原因工程ベイに出す）
-    var showsExcursionBadge: Bool = false
-    /// 歩留まり異常の原因工程（装置ランプを警報表示）
-    var isExcursionSource: Bool = false
-    /// ラインが稼働中（装置ランプを点滅）
-    var lineRunning: Bool = false
-
-    private let headerHeight: CGFloat = 26
-    private let footerHeight: CGFloat = 14
-
-    var body: some View {
-        VStack(spacing: 0) {
-            FloorBayHeader(
-                title: process.shortName,
-                subtitle: "\(MoneyFormat.decimal(wph, digits: 1)) WPH",
-                color: process.accent
-            )
-            .frame(height: headerHeight)
-            equipmentArea
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(.bottom, footerHeight)
-        }
-        .overlay(alignment: .bottom) { footer }
-        .modifier(FloorBayStyle(accent: process.accent, isSelected: isSelected, isSecond: isSecond))
-        .overlay(alignment: .topTrailing) {
-            if isBottleneck {
-                bottleneckTag
-                    .offset(x: 4, y: -7)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var equipmentArea: some View {
-        if models.isEmpty {
-            Text("装置なし")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-        } else {
-            let shown = Array(models.prefix(4))
-            let side = iconSide(count: shown.count)
-            VStack(spacing: 2) {
-                iconRow(Array(shown.prefix(2)), side: side)
-                if shown.count > 2 {
-                    iconRow(Array(shown.dropFirst(2)), side: side)
-                }
-            }
-        }
-    }
-
-    private func iconRow(_ row: [EquipmentModel], side: CGFloat) -> some View {
-        HStack(spacing: 2) {
-            ForEach(Array(row.enumerated()), id: \.offset) { item in
-                let isStandby = standbyModelIds.contains(item.element.id)
-                ZStack(alignment: .topTrailing) {
-                    EquipmentIllustration(model: item.element)
-                        .frame(width: side, height: side)
-                        .grayscale(isStandby ? 1 : 0)
-                        .opacity(isStandby ? 0.4 : 1)
-                    EquipmentStatusLamp(kind: lampKind(isStandby: isStandby))
-                        .offset(x: 2, y: -2)
-                }
-            }
-        }
-    }
-
-    private func lampKind(isStandby: Bool) -> EquipmentStatusLamp.Kind {
-        if isExcursionSource { return .alarm }
-        if isStandby { return .standby }
-        if lineRunning { return .running }
-        return .idle
-    }
-
-    private var standbyCount: Int {
-        models.filter { standbyModelIds.contains($0.id) }.count
-    }
-
-    private func iconSide(count: Int) -> CGFloat {
-        let width = size.width - 8
-        let height = size.height - headerHeight - footerHeight - 4
-        let side: CGFloat
-        if count <= 1 {
-            side = min(width, height) * 0.85
-        } else {
-            side = min((width - 2) / 2, (height - 2) / 2)
-        }
-        return max(side, 0)
-    }
-
-    private var footer: some View {
-        HStack(spacing: 2) {
-            if showsExcursionBadge {
-                Text("異常")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(Color.red))
-                    .fixedSize()
-            }
-            if models.count > 4 {
-                Text("+\(models.count - 4)")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(process.accent))
-            }
-            if standbyCount > 0 {
-                Text("待機\(standbyCount)")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(Color.gray))
-                    .fixedSize()
-            }
-            Spacer(minLength: 0)
-            Text("×\(models.count)台")
-                .font(.system(size: 9, weight: .semibold))
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 4)
-        .frame(height: footerHeight)
-    }
-
-    private var bottleneckTag: some View {
-        Text("ボトルネック")
-            .font(.system(size: 8, weight: .bold))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 4)
-            .padding(.vertical, 2)
-            .background(Capsule().fill(Color.red))
-            .fixedSize()
-    }
-}
-
-/// 装置の状態ランプ（稼働=緑点滅、アイドル=緑、待機=灰、警報=赤点滅）
-private struct EquipmentStatusLamp: View {
-    enum Kind { case running, idle, standby, alarm }
-    let kind: Kind
-
-    var body: some View {
-        switch kind {
-        case .standby:
-            dot(color: .gray, opacity: 0.75)
-        case .idle:
-            dot(color: .green, opacity: 0.85)
-        case .running:
-            TimelineView(.periodic(from: .now, by: 0.6)) { timeline in
-                let on = Int(timeline.date.timeIntervalSinceReferenceDate / 0.6) % 2 == 0
-                dot(color: .green, opacity: on ? 1.0 : 0.3)
-            }
-        case .alarm:
-            TimelineView(.periodic(from: .now, by: 0.45)) { timeline in
-                let on = Int(timeline.date.timeIntervalSinceReferenceDate / 0.45) % 2 == 0
-                dot(color: .red, opacity: on ? 1.0 : 0.25)
-            }
-        }
-    }
-
-    private func dot(color: Color, opacity: Double) -> some View {
-        Circle()
-            .fill(color.opacity(opacity))
-            .frame(width: 6, height: 6)
-            .overlay(Circle().stroke(Color.white, lineWidth: 0.8))
-    }
-}
-
-// MARK: 出荷・倉庫
-
-struct FloorShippingView: View {
-    let inventory: Double
-    let cap: Double
-    let isSelected: Bool
-
-    var body: some View {
-        VStack(spacing: 0) {
-            FloorBayHeader(title: "出荷・倉庫", subtitle: "完成チップ", color: .gray)
-                .frame(height: 26)
-            VStack(spacing: 2) {
-                Image(systemName: "shippingbox.fill")
-                    .font(.title3)
-                    .foregroundStyle(.gray)
-                Text(MoneyFormat.count(inventory))
-                    .font(.system(size: 13, weight: .bold))
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-                Text("/ \(MoneyFormat.count(cap))")
-                    .font(.system(size: 9))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-            }
-            .padding(.horizontal, 4)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .modifier(FloorBayStyle(accent: .gray, isSelected: isSelected, isSecond: false))
-    }
-}
-
-// MARK: 天井搬送レール＋FOUP＋ボトルネック脈動
-
-struct FloorFlowLayer: View {
-    /// 搬入口＋工程順のベイ中心（9点・8区間）
-    let points: [CGPoint]
-    let bottleneckRect: CGRect?
-    let lineWPH: Double
-    let flowing: Bool
-    /// ProcessType.allCases 順の実効WPH（区間 i+1 = 工程 i）
-    let segmentWPH: [Double]
-    let bottleneck: ProcessType?
-    let secondBottleneck: ProcessType?
-    let queues: [FloorQueue]
-
-    @State private var clock = FloorFlowClock()
-
-    private static let amber = Color(red: 1.0, green: 0.75, blue: 0.0)
-
-    var body: some View {
-        let clock = clock
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !flowing && bottleneckRect == nil)) { timeline in
-            Canvas { context, _ in
-                draw(in: context, time: timeline.date.timeIntervalSinceReferenceDate, clock: clock)
-            }
-        }
-        .allowsHitTesting(false)
-    }
-
-    /// 区間の色：区間0（搬入）→金色。区間 i>=1 は工程 i-1 で判定（ボトルネック→赤、負荷80%以上→橙、それ以外→金色）
-    private func segmentColor(_ segment: Int) -> Color {
-        guard segment >= 1 else { return Self.amber }
-        let processIndex = segment - 1
-        let processes = Array(ProcessType.allCases)
-        if processIndex < processes.count, let bottleneck, processes[processIndex] == bottleneck {
-            return .red
-        }
-        guard processIndex < segmentWPH.count else { return Self.amber }
-        let wph = segmentWPH[processIndex]
-        let load = wph > 0 ? min(lineWPH / wph, 1) : 1
-        return load >= 0.8 ? .orange : Self.amber
-    }
-
-    private func draw(in context: GraphicsContext, time: Double, clock: FloorFlowClock) {
-        // 1. ボトルネックの赤脈動枠
-        if let rect = bottleneckRect {
-            let pulse = 0.55 + 0.45 * sin(time * 2 * Double.pi / 1.2)
-            let border = Path(roundedRect: rect, cornerRadius: 9)
-            context.stroke(border, with: .color(Color.red.opacity(pulse)), lineWidth: 3)
-        }
-
-        guard points.count > 1 else { return }
-        // 2. 平滑化クロックを進める（停止中も時刻だけ更新して再開時のジャンプを防ぐ）
-        // 区間0（搬入）は先頭工程と同じWPHで重み付けする
-        let extendedWPH = [segmentWPH.first ?? 0] + segmentWPH
-        let targetWeights = FlowPathMath.segmentTimeWeights(processWPH: extendedWPH, segmentCount: points.count - 1)
-        clock.advance(now: time, targetWeights: targetWeights, targetPeriod: FloorVizMath.lapPeriod(lineWPH: lineWPH), flowing: flowing)
-
-        // 3. レール
-        drawRails(in: context)
-
-        // 4. ストッカー（搬入口）
-        drawStocker(in: context, center: points[0])
-
-        // 5. サイディングと滞留FOUP（停止中も表示）
-        for queue in queues {
-            let queuePoints = FloorVizMath.queuePoints(pathPoints: points, targetIndex: queue.process.order + 1, count: queue.count)
-            guard !queuePoints.isEmpty else { continue }
-            if queuePoints.count > 1 {
-                var siding = Path()
-                siding.move(to: queuePoints[0])
-                for p in queuePoints.dropFirst() {
-                    siding.addLine(to: p)
-                }
-                context.stroke(
-                    siding,
-                    with: .color(Color.gray.opacity(0.4)),
-                    style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round)
-                )
-            }
-            let ring: Color = queue.isBottleneck ? .red : .orange
-            for p in queuePoints {
-                drawFOUP(in: context, center: p, ring: ring)
-            }
-        }
-
-        // 6. 移動FOUP
-        guard flowing else { return }
-        guard FlowPathMath.totalLength(points) > 0 else { return }
-        let totalQueued = queues.reduce(0) { $0 + $1.count }
-        let count = FloorVizMath.movingFOUPCount(lineWPH: lineWPH, totalQueued: totalQueued)
-        guard count > 0 else { return }
-        let weights = clock.weights
-        for index in 0..<count {
-            let fraction = (clock.phase + Double(index) / Double(count)).truncatingRemainder(dividingBy: 1)
-            let point = FlowPathMath.point(on: points, atTimeFraction: fraction, segmentWeights: weights)
-            drawFOUP(in: context, center: point, ring: .white)
-        }
-    }
-
-    /// 天井搬送レール（土台→支柱→芯線→方向シェブロンの順に重ねる）
-    private func drawRails(in context: GraphicsContext) {
-        let segmentCount = points.count - 1
-        guard segmentCount > 0 else { return }
-
-        // 土台
-        for index in 0..<segmentCount {
-            var base = Path()
-            base.move(to: points[index])
-            base.addLine(to: points[index + 1])
-            context.stroke(
-                base,
-                with: .color(Color.white.opacity(0.5)),
-                style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round)
-            )
-        }
-
-        // 支柱ドット
-        var pillars = Path()
-        for index in 0..<segmentCount {
-            let a = points[index]
-            let b = points[index + 1]
-            let len = hypot(b.x - a.x, b.y - a.y)
-            guard len > 0.001 else { continue }
-            let dirX = (b.x - a.x) / len
-            let dirY = (b.y - a.y) / len
-            var d: CGFloat = 13
-            while d < len {
-                let px = a.x + dirX * d
-                let py = a.y + dirY * d
-                pillars.addEllipse(in: CGRect(x: px - 1.8, y: py - 1.8, width: 3.6, height: 3.6))
-                d += 26
-            }
-        }
-        context.fill(pillars, with: .color(Color.gray.opacity(0.55)))
-
-        // 芯線
-        for index in 0..<segmentCount {
-            var core = Path()
-            core.move(to: points[index])
-            core.addLine(to: points[index + 1])
-            context.stroke(
-                core,
-                with: .color(segmentColor(index).opacity(flowing ? 0.85 : 0.4)),
-                style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round)
-            )
-        }
-
-        // 方向シェブロン（座標を自前で回転）
-        var chevrons = Path()
-        for index in 0..<segmentCount {
-            let a = points[index]
-            let b = points[index + 1]
-            let len = hypot(b.x - a.x, b.y - a.y)
-            guard len > 0.001 else { continue }
-            let angle = atan2(b.y - a.y, b.x - a.x)
-            let cosA = cos(angle)
-            let sinA = sin(angle)
-            let fractions: [CGFloat] = len > 110 ? [1.0 / 3.0, 2.0 / 3.0] : [0.5]
-            for t in fractions {
-                let cx = a.x + (b.x - a.x) * t
-                let cy = a.y + (b.y - a.y) * t
-                let local: [CGPoint] = [CGPoint(x: -3, y: -4.5), CGPoint(x: 3.5, y: 0), CGPoint(x: -3, y: 4.5)]
-                let world = local.map { p -> CGPoint in
-                    CGPoint(x: cx + p.x * cosA - p.y * sinA, y: cy + p.x * sinA + p.y * cosA)
-                }
-                chevrons.move(to: world[0])
-                chevrons.addLine(to: world[1])
-                chevrons.addLine(to: world[2])
-            }
-        }
-        context.stroke(
-            chevrons,
-            with: .color(Color.gray.opacity(0.65)),
-            style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round)
-        )
-    }
-
-    /// 搬入口のFOUPストッカー
-    private func drawStocker(in context: GraphicsContext, center: CGPoint) {
-        let stockerColor = Color.gray.opacity(0.85)
-        // 上部の突起
-        let nub = Path(CGRect(x: center.x - 3, y: center.y - 9, width: 6, height: 3))
-        context.fill(nub, with: .color(stockerColor))
-        // 本体
-        let body = Path(roundedRect: CGRect(x: center.x - 8, y: center.y - 6, width: 16, height: 12), cornerRadius: 3)
-        context.fill(body, with: .color(stockerColor))
-        // スロット
-        var slots = Path()
-        slots.move(to: CGPoint(x: center.x - 5, y: center.y - 1.5))
-        slots.addLine(to: CGPoint(x: center.x + 5, y: center.y - 1.5))
-        slots.move(to: CGPoint(x: center.x - 5, y: center.y + 2.5))
-        slots.addLine(to: CGPoint(x: center.x + 5, y: center.y + 2.5))
-        context.stroke(slots, with: .color(Color.white.opacity(0.7)), lineWidth: 1)
-    }
-
-    /// FOUP（絶対座標で描画、回転なし。ハンガーは常に上向き）
-    private func drawFOUP(in context: GraphicsContext, center: CGPoint, ring: Color) {
-        // ハンガー（レールへ吊る）
-        var hanger = Path()
-        hanger.move(to: CGPoint(x: center.x, y: center.y - 7))
-        hanger.addLine(to: CGPoint(x: center.x, y: center.y - 3))
-        context.stroke(hanger, with: .color(Color.gray), lineWidth: 1.5)
-        // キャリア本体
-        let body = Path(roundedRect: CGRect(x: center.x - 6.5, y: center.y - 3.5, width: 13, height: 10), cornerRadius: 2.5)
-        context.fill(body, with: .color(Color(red: 0.98, green: 0.65, blue: 0.15)))
-        context.stroke(body, with: .color(ring), lineWidth: 1.5)
-        // ウェハスロット
-        var slots = Path()
-        slots.move(to: CGPoint(x: center.x - 4, y: center.y + 0.5))
-        slots.addLine(to: CGPoint(x: center.x + 4, y: center.y + 0.5))
-        slots.move(to: CGPoint(x: center.x - 4, y: center.y + 3.5))
-        slots.addLine(to: CGPoint(x: center.x + 4, y: center.y + 3.5))
-        context.stroke(slots, with: .color(Color.black.opacity(0.25)), lineWidth: 1)
-    }
-}
-
-/// フロー用の平滑化クロック。重み・周期を指数平滑し、位相を積分で進める。
-private final class FloorFlowClock {
-    private static let smoothingTime = 1.2
-    private static let maxStep = 0.1
-
-    private var lastTime: Double?
-    private(set) var phase: Double = 0
-    private(set) var weights: [Double] = []
-    private(set) var period: Double = 0
-
-    func advance(now: Double, targetWeights: [Double], targetPeriod: Double, flowing: Bool) {
-        // 初回・区間数変化時はターゲットにスナップ
-        guard let last = lastTime, weights.count == targetWeights.count, period > 0, period.isFinite else {
-            lastTime = now
-            weights = targetWeights
-            period = targetPeriod
-            return
-        }
-        let dt = min(max(now - last, 0), Self.maxStep)
-        lastTime = now
-        let alpha = 1 - exp(-dt / Self.smoothingTime)
-        for index in weights.indices {
-            weights[index] += (targetWeights[index] - weights[index]) * alpha
-        }
-        if targetPeriod.isFinite, targetPeriod > 0 {
-            period += (targetPeriod - period) * alpha
-        }
-        guard flowing, period > 0 else { return }
-        phase = (phase + dt / period).truncatingRemainder(dividingBy: 1)
-        if phase < 0 || !phase.isFinite { phase = 0 }
-    }
-}
-
-/// ポリライン上の位置計算（純粋関数）
-enum FlowPathMath {
-    static func segmentLengths(_ points: [CGPoint]) -> [CGFloat] {
-        guard points.count > 1 else { return [] }
-        return (1..<points.count).map { index -> CGFloat in
-            let a = points[index - 1]
-            let b = points[index]
-            return hypot(b.x - a.x, b.y - a.y)
-        }
-    }
-
-    static func totalLength(_ points: [CGPoint]) -> CGFloat {
-        segmentLengths(points).reduce(0, +)
-    }
-
-    /// 始点から distance だけ進んだ位置（全長で割った余りで周回）
-    static func point(on points: [CGPoint], at distance: CGFloat) -> CGPoint {
-        guard let first = points.first else { return .zero }
-        let lengths = segmentLengths(points)
-        let total = lengths.reduce(0, +)
-        guard total > 0 else { return first }
-        var remaining = distance.truncatingRemainder(dividingBy: total)
-        if remaining < 0 { remaining += total }
-        var cumulative: CGFloat = 0
-        for (index, length) in lengths.enumerated() {
-            if remaining <= cumulative + length {
-                let t = length > 0 ? (remaining - cumulative) / length : 0
-                let a = points[index]
-                let b = points[index + 1]
-                return CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t)
-            }
-            cumulative += length
-        }
-        return points[points.count - 1]
-    }
-
-    /// 各区間の時間シェア（WPH の逆数を正規化、合計1）。異常時は等重み。
-    /// segmentCount を省略すると processWPH の要素数を想定数とする。
-    static func segmentTimeWeights(processWPH: [Double], segmentCount: Int? = nil) -> [Double] {
-        let count = segmentCount ?? processWPH.count
-        guard count > 0 else { return [] }
-        let uniform = Array(repeating: 1.0 / Double(count), count: count)
-        guard processWPH.count == count, processWPH.contains(where: { $0.isFinite && $0 > 0 }) else {
-            return uniform
-        }
-        let inverses = processWPH.map { wph -> Double in
-            let safe = wph.isNaN ? 0 : wph
-            return 1.0 / max(safe, 0.05)
-        }
-        let total = inverses.reduce(0, +)
-        guard total.isFinite, total > 0 else { return uniform }
-        let weights = inverses.map { $0 / total }
-        guard weights.allSatisfy({ $0.isFinite }) else { return uniform }
-        return weights
-    }
-
-    /// 時間割合（0...1）が属する区間と、区間内の時間割合
-    private static func locate(timeFraction: Double, weights: [Double]) -> (index: Int, local: Double)? {
-        guard !weights.isEmpty else { return nil }
-        let total = weights.reduce(0) { $0 + max($1.isFinite ? $1 : 0, 0) }
-        guard total > 0, total.isFinite else { return nil }
-        var fraction = timeFraction.isFinite ? timeFraction.truncatingRemainder(dividingBy: 1) : 0
-        if fraction < 0 { fraction += 1 }
-        let target = fraction * total
-        var cumulative = 0.0
-        var lastPositive = 0
-        for (index, raw) in weights.enumerated() {
-            let weight = max(raw.isFinite ? raw : 0, 0)
-            guard weight > 0 else { continue }
-            lastPositive = index
-            if target < cumulative + weight {
-                return (index, min(max((target - cumulative) / weight, 0), 1))
-            }
-            cumulative += weight
-        }
-        return (lastPositive, 1)
-    }
-
-    /// 時間割合から位置を引く。区間内は「区間内時間割合 × 区間長」で線形補間。
-    static func point(on points: [CGPoint], atTimeFraction fraction: Double, segmentWeights: [Double]) -> CGPoint {
-        guard let first = points.first else { return .zero }
-        let lengths = segmentLengths(points)
-        let total = lengths.reduce(0, +)
-        guard total > 0 else { return first }
-        // 重みが区間数と合わない場合は距離等速にフォールバック
-        guard segmentWeights.count == lengths.count,
-              let located = locate(timeFraction: fraction, weights: segmentWeights) else {
-            let safe = fraction.isFinite ? fraction : 0
-            return point(on: points, at: CGFloat(safe) * total)
-        }
-        let a = points[located.index]
-        let b = points[located.index + 1]
-        let t = CGFloat(located.local)
-        return CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t)
-    }
-
-    /// 時間割合が属する区間の index
-    static func segmentIndex(atTimeFraction fraction: Double, segmentWeights: [Double]) -> Int {
-        locate(timeFraction: fraction, weights: segmentWeights)?.index ?? 0
-    }
-}
-
-/// フロア可視化用の純粋関数（WPH→FOUP数・滞留数・速度の写像）
-enum FloorVizMath {
-    /// FOUP 1台の間隔（pt）
-    static let queueSpacing: CGFloat = 11.5
-    /// 律速工程中心から手前に空ける距離（pt）
-    static let queueStandoff: CGFloat = 7
-    /// 本線からサイディングへの横オフセット（pt）
-    static let queueSideOffset: CGFloat = 9
-
-    /// 滞留FOUP数。負荷 = ラインWPH ÷ 工程WPH（0...1にクランプ）の6乗×6台。
-    /// 負荷1.0（ボトルネック）で6台、0.9で3台、0.8で2台、0.7で1台、それ以下は0台。
-    static func queueCount(lineWPH: Double, processWPH: Double) -> Int {
-        guard lineWPH > 0, processWPH > 0 else { return 0 }
-        let load = min(max(lineWPH / processWPH, 0), 1)
-        return min(Int((6.0 * pow(load, 6)).rounded()), 6)
-    }
-
-    /// 移動FOUP数。WPHが大きいほど多い（3〜6台）。移動+滞留の合計が12台を超えないよう制限する。
-    static func movingFOUPCount(lineWPH: Double, totalQueued: Int) -> Int {
-        guard lineWPH > 0 else { return 0 }
-        let base = Int((2.0 + lineWPH * 0.35).rounded())
-        let scaled = min(max(base, 3), 6)
-        let budget = max(12 - totalQueued, 2)
-        return min(scaled, budget)
-    }
-
-    /// FOUPがパスを1周する所要時間（秒）。WPHが大きいほど速い。
-    static func lapPeriod(lineWPH: Double) -> Double {
-        min(max(30.0 / max(lineWPH, 0.5), 4.0), 30.0)
-    }
-
-    /// targetIndex のベイ中心の手前に並ぶ滞留FOUPの位置（本線から進行方向右側へオフセットしたサイディング上）。
-    static func queuePoints(pathPoints: [CGPoint], targetIndex: Int, count: Int) -> [CGPoint] {
-        guard count > 0, targetIndex > 0, targetIndex < pathPoints.count else { return [] }
-        let lengths = FlowPathMath.segmentLengths(pathPoints)
-        guard lengths.count == pathPoints.count - 1 else { return [] }
-        var distTarget: CGFloat = 0
-        for i in 0..<targetIndex { distTarget += lengths[i] }
-        let a = pathPoints[targetIndex - 1]
-        let b = pathPoints[targetIndex]
-        let len = max(hypot(b.x - a.x, b.y - a.y), 0.001)
-        let dirX = (b.x - a.x) / len
-        let dirY = (b.y - a.y) / len
-        // 画面座標（y下向き）で進行方向の右側
-        let rightX = -dirY
-        let rightY = dirX
-        var result: [CGPoint] = []
-        for i in 0..<count {
-            let d = max(distTarget - queueStandoff - queueSpacing * CGFloat(i), 2)
-            let base = FlowPathMath.point(on: pathPoints, at: d)
-            result.append(CGPoint(x: base.x + rightX * queueSideOffset, y: base.y + rightY * queueSideOffset))
-        }
-        return result
-    }
-}
-
 // MARK: - 装置イラスト
 
 /// 見下ろし視点の装置イラスト。内部は 100×100 座標系で描き、正方形にスケーリングする。
@@ -1666,7 +960,8 @@ struct EquipmentIllustration: View {
     }
 }
 
-private struct EquipmentPainter {
+/// 装置グリフの描画（100×100 座標系）。EquipmentIllustration と FloorGridView の Canvas が共用する
+struct EquipmentPainter {
     let context: GraphicsContext
     let accent: Color
 
