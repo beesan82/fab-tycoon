@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "status": "gate2-body-only",
+  "modelId": "P1",
+  "footprint": {
+    "width": 2,
+    "depth": 2
+  },
+  "loadPorts": 2,
+  "orientations": {
+    "front": {
+      "body": {
+        "image": "eq_p1_front_body",
+        "drawScale": 1.25,
+        "anchor": "bottomCenter",
+        "pixelSize": {
+          "width": 576,
+          "height": 642
+        }
+      },
+      "lamp": {
+        "overlay": "code-drawn",
+        "note": "生成時にシグナルタワーを描かせていない。状態表示は従来のコード描画ランプ（フットプリント矩形の右上）を正とする。"
+      },
+      "layers": []
+    }
+  },
+  "knownIssues": [
+    "前面右下に小さなパネル図柄（文字ではない）がある。実機スケールでは判読不能な模様として扱う。",
+    "side 方向は未制作（front のみ）。",
+    "drawScale 1.25 は推定値。実機で調整する。"
+  ]
+}

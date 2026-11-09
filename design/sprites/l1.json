@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "status": "gate2-body-only",
+  "modelId": "L1",
+  "footprint": {
+    "width": 4,
+    "depth": 3
+  },
+  "loadPorts": 3,
+  "orientations": {
+    "front": {
+      "body": {
+        "image": "eq_l1_front_body",
+        "drawScale": 1.15,
+        "anchor": "bottomCenter",
+        "pixelSize": {
+          "width": 652,
+          "height": 578
+        }
+      },
+      "lamp": {
+        "overlay": "code-drawn",
+        "note": "生成時にシグナルタワーを描かせていない。状態表示は従来のコード描画ランプ（フットプリント矩形の右上）を正とする。"
+      },
+      "layers": []
+    }
+  },
+  "knownIssues": [
+    "生成画が対角線構図（左上→右下）のため、フットプリント内では斜め置きに見える可能性がある。実機で接地感を確認する。",
+    "side 方向は未制作（front のみ）。回転 90/270 でも front を使う暫定運用（C1 と同じ）。",
+    "drawScale 1.15 は推定値。実機で調整する。"
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "status": "gate2-body-only",
+  "modelId": "E1",
+  "footprint": {
+    "width": 2,
+    "depth": 2
+  },
+  "loadPorts": 2,
+  "orientations": {
+    "front": {
+      "body": {
+        "image": "eq_e1_front_body",
+        "drawScale": 1.2,
+        "anchor": "bottomCenter",
+        "pixelSize": {
+          "width": 576,
+          "height": 763
+        }
+      },
+      "lamp": {
+        "overlay": "code-drawn",
+        "note": "生成時にシグナルタワーを描かせていない。状態表示は従来のコード描画ランプ（フットプリント矩形の右上）を正とする。"
+      },
+      "layers": []
+    }
+  },
+  "knownIssues": [
+    "排気ダクト含め背が高い構図。drawScale 1.20 は推定値。実機で調整する。",
+    "side 方向は未制作（front のみ）。"
+  ]
+}

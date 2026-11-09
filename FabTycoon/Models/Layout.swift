@@ -91,6 +91,19 @@ struct FloorLayout: Codable, Equatable {
     var stocker: Stocker
     var entry: EntryPort
     var shipping: ShippingPort
+    /// 敷設費を支払ったレールセル（P6先行分）。撤去時の返金はこの集合に入っているセルだけが対象で、
+    /// テンプレート等の無償分は返金 0（無償レールの売却益の抜け穴対策）。
+    /// 旧セーブ（このキーを持たない β1 セーブ）では、テンプレート位置と一致しないレールを購入済みとみなす
+    var paidRailPoints: Set<GridPoint> = []
+
+    enum CodingKeys: String, CodingKey {
+        case parcels
+        case rails
+        case stocker
+        case entry
+        case shipping
+        case paidRailPoints
+    }
 
     // MARK: 区画
 
@@ -219,6 +232,7 @@ struct FloorLayout: Codable, Equatable {
     mutating func removeRail(at point: GridPoint) -> Bool {
         guard let index = rails.firstIndex(where: { $0.point == point }) else { return false }
         rails.remove(at: index)
+        paidRailPoints.remove(point)
         return true
     }
 
@@ -264,6 +278,26 @@ struct FloorLayout: Codable, Equatable {
         else { return false }
         shipping.origin = origin
         return true
+    }
+}
+
+// 旧セーブ互換：paidRailPoints を欠いていても読めるようにする。
+// extension に置くことで memberwise init を残す
+extension FloorLayout {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        parcels = try container.decode(Set<ParcelCoord>.self, forKey: .parcels)
+        rails = try container.decode([RailCell].self, forKey: .rails)
+        stocker = try container.decode(Stocker.self, forKey: .stocker)
+        entry = try container.decode(EntryPort.self, forKey: .entry)
+        shipping = try container.decode(ShippingPort.self, forKey: .shipping)
+        if let paid = try container.decodeIfPresent(Set<GridPoint>.self, forKey: .paidRailPoints) {
+            paidRailPoints = paid
+        } else {
+            // β1 セーブには購入記録が無いため、初期テンプレートのレール位置と一致しないものを
+            // プレイヤーが購入したレールとみなす（テンプレ位置の付け替えは記録が無いので無償扱いになる割り切り）
+            paidRailPoints = Set(rails.map { $0.point }).subtracting(LayoutTemplate.templateRailPoints)
+        }
     }
 }
 
@@ -538,6 +572,11 @@ struct LayoutAnalysis {
 // MARK: - デフォルト配置テンプレート（§2.6）
 
 enum LayoutTemplate {
+    /// 初期テンプレートのレールセルの位置集合（旧セーブの購入済み判定に使う。レール配置は装備に依存しない）
+    static var templateRailPoints: Set<GridPoint> {
+        Set(starter16(equipment: []).layout.rails.map { $0.point })
+    }
+
     /// 初期装備（L1×2, D1×2, E1×3, I1, C1, Q1, P1）の 16×16 テンプレート。
     /// 1本の時計回りリング（上段 y=5 を東へ、右端 x=15 を南へ、下段 y=9 を西へ、左端 x=0 を北へ）に
     /// 上段・下段の装置、上段直下のストッカー、下段の投入口、右端寄りの出荷口がポートで接する。

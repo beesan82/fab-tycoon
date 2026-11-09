@@ -87,12 +87,14 @@ struct GameState: Codable, Equatable {
             // 初期装置は累計設備投資に含めない
             subsidy: SubsidyState()
         )
-        // v4：初期装備を 16×16 テンプレート（§2.6）に配置し、ロットの流れていないシミュレーションを持たせる。
-        // SimCore の init は state を読むので、layout・placed を先に設定してから sim を作る
+        // v4：初期装備を 16×16 テンプレート（§2.6）に配置し、シミュレーションを持たせる。
+        // SimCore の init は state を読むので、layout・placed を先に設定してから sim を作る。
+        // P6先行分：新規ゲームだけ、仕掛かりロットをプリシードした warmedInitialSnapshot を使う
+        // （初回ロット完了までの短縮。既存セーブ・移行には使わない）
         let template = LayoutTemplate.starter16(equipment: equipment)
         state.fab.layout = template.layout
         state.fab.placed = template.placed
-        state.fab.sim = SimCore.freshSnapshot(state: state, tools: template.placed, layout: template.layout)
+        state.fab.sim = SimCore.warmedInitialSnapshot(state: state, tools: template.placed, layout: template.layout)
         return state
     }
 }

@@ -28,6 +28,8 @@ workflows:
     scripts:
       - name: Generate app icon (binary is not stored in the repo)
         script: bash Scripts/generate_icon.sh
+      - name: Generate equipment sprites (binaries are not stored in the repo)
+        script: bash Scripts/generate_sprites.sh
       - name: Apply signing profiles
         script: xcode-project use-profiles
       - name: Set build number (latest TestFlight build + 1)

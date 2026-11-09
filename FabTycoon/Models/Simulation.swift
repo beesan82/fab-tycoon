@@ -493,6 +493,28 @@ struct SimCore {
         return min(200, max(30, layout.rails.count + 5))
     }
 
+    /// 新規ゲーム開始時のプリシードにかけるウォームアップ（ゲーム分、P6先行分）。
+    /// 空のラインでは初回ロット完了まで実測 6,785 ゲーム分（約113ゲーム時間 ≒ 実11.3分）かかり、
+    /// 最初の売上体験が遠すぎる。創業時点で「既に流れていた仕掛かり」として 6,000 分進めた状態から始め、
+    /// 初回完了を残り約 785 ゲーム分（≒ 実78秒）まで縮める。6,785 分未満なのでウォームアップ中に完了は起きない
+    static let initialWarmUpGameMinutes = 6_000
+
+    /// 新規ゲーム専用の初期スナップショット（GameState.initial だけが使う。移行用の freshSnapshot は空のまま）。
+    /// ウォームアップで投入されたロットは実在の仕掛かりとして残すが、統計と学習 W には数えない：
+    /// SimStats をゼロに戻し、学習 W の起点も state の値（新規ゲームでは 0）のままにするため、
+    /// プレイヤーの実績（総投入・学習曲線）はゲーム開始時点から数え始める。
+    /// 仕掛かりロットの learningWafersAtRelease は投入時点の刻印（最大で WIP 上限 × 25 枚分）として残り、
+    /// 初回ロット（最初に投入されたロット）の刻印はほぼ 0 なので初回歩留まりは従来どおり 0.6983 になる
+    static func warmedInitialSnapshot(state: GameState, tools: [ToolInstance], layout: FloorLayout?) -> SimSnapshot {
+        var core = SimCore(state: state, snapshot: freshSnapshot(state: state, tools: tools, layout: layout))
+        for _ in 0..<initialWarmUpGameMinutes {
+            core.step()
+        }
+        core.stats = SimStats()
+        core.learningWafersBase = state.learningWafers[state.fab.currentNodeId] ?? 0
+        return core.snapshot()
+    }
+
     /// 1パスの処理時間（ゲーム分）。§1.3
     static func tPass(model: EquipmentModel, level: Int, throughputMultiplier: Double, uptimeAddition: Double) -> Double {
         let wph = model.nominalWPH * Engine.levelMultiplier(level) * throughputMultiplier

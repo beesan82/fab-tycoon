@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "status": "gate2-body-only",
+  "modelId": "Q1",
+  "footprint": {
+    "width": 2,
+    "depth": 2
+  },
+  "loadPorts": 2,
+  "orientations": {
+    "front": {
+      "body": {
+        "image": "eq_q1_front_body",
+        "drawScale": 1.0,
+        "anchor": "bottomCenter",
+        "pixelSize": {
+          "width": 576,
+          "height": 1028
+        }
+      },
+      "lamp": {
+        "overlay": "code-drawn",
+        "note": "生成時にシグナルタワーを描かせていない。状態表示は従来のコード描画ランプ（フットプリント矩形の右上）を正とする。"
+      },
+      "layers": []
+    }
+  },
+  "knownIssues": [
+    "顕微鏡コラムが高く、縦のオーバードローが大きい（drawScale 1.00 でも約3.6セル高）。上の装置との重なりを実機で確認する。",
+    "白いパネル面が背景色に近く、切り抜き時に穴埋め処理を適用した。前面下部にわずかな色むらが残る。",
+    "side 方向は未制作（front のみ）。"
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "status": "gate2-body-only",
+  "modelId": "I1",
+  "footprint": {
+    "width": 4,
+    "depth": 2
+  },
+  "loadPorts": 2,
+  "orientations": {
+    "front": {
+      "body": {
+        "image": "eq_i1_front_body",
+        "drawScale": 1.05,
+        "anchor": "bottomCenter",
+        "pixelSize": {
+          "width": 1152,
+          "height": 326
+        }
+      },
+      "lamp": {
+        "overlay": "code-drawn",
+        "note": "生成時にシグナルタワーを描かせていない。状態表示は従来のコード描画ランプ（フットプリント矩形の右上）を正とする。"
+      },
+      "layers": []
+    }
+  },
+  "knownIssues": [
+    "ペア生成では斜め構図が分割できず、単体生成で作り直した（生成2回目）。視点が他機種よりやや正面寄り。",
+    "横長のため drawScale 1.05（ほぼフットプリント幅いっぱい）。実機で調整する。",
+    "side 方向は未制作（front のみ）。"
+  ]
+}

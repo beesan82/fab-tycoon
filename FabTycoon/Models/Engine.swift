@@ -1066,10 +1066,22 @@ enum Engine {
 
     // MARK: レール編集（§3.1・§9-9）
 
-    /// レール1セルの敷設費（200万円）。撤去は全額返金。補助金の累計設備投資には数えない
+    /// レール1セルの敷設費（200万円）。撤去の返金は購入したセルだけ全額で、テンプレート等の
+    /// 無償セルは 0（P6先行分：無償レールの売却益の抜け穴対策）。補助金の累計設備投資には数えない
     static let railCellCostYen = 2_000_000.0
 
-    /// レールを敷く・描き替える。既存セルの描き替えは無償、新規セルは railCellCostYen
+    /// 撤去時の返金額。購入記録（layout.paidRailPoints）にあるセルだけ railCellCostYen、無償分は 0
+    static func railRefundYen(state: GameState, at point: GridPoint) -> Double {
+        guard let layout = state.fab.layout, layout.railIndex[point] != nil else { return 0 }
+        return layout.paidRailPoints.contains(point) ? railCellCostYen : 0
+    }
+
+    /// 複数セルの撤去時の返金額合計（ビューのプレビュー表示用）
+    static func railRefundYen(state: GameState, points: [GridPoint]) -> Double {
+        points.reduce(0) { $0 + railRefundYen(state: state, at: $1) }
+    }
+
+    /// レールを敷く・描き替える。既存セルの描き替えは無償（購入記録もそのまま）、新規セルは railCellCostYen
     @discardableResult
     static func setRail(state: inout GameState, cell: RailCell) -> Bool {
         guard var layout = state.fab.layout else { return false }
@@ -1078,6 +1090,9 @@ enum Engine {
         let isNew = existing == nil
         if isNew && state.cashYen < railCellCostYen { return false }
         guard layout.setRail(cell, among: state.fab.placed) else { return false }
+        if isNew {
+            layout.paidRailPoints.insert(cell.point)
+        }
         state.fab.layout = layout
         if isNew {
             state.cashYen -= railCellCostYen
@@ -1087,11 +1102,13 @@ enum Engine {
         return true
     }
 
-    /// レールを撤去して全額返金する。そのセルを通るレール上のロットはストッカーへ手運びし、
+    /// レールを撤去する。返金は購入したセルだけ全額、無償セルは 0。
+    /// そのセルを通るレール上のロットはストッカーへ手運びし、
     /// ストッカーに収まらなければ撤去できない（§3.1）
     @discardableResult
     static func removeRail(state: inout GameState, at point: GridPoint) -> Bool {
         guard var layout = state.fab.layout, layout.railIndex[point] != nil else { return false }
+        let refundYen = layout.paidRailPoints.contains(point) ? railCellCostYen : 0
         if var snapshot = state.fab.sim {
             let indices = snapshot.lots.indices.filter { index in
                 guard case .rail = snapshot.lots[index].location else { return false }
@@ -1107,7 +1124,7 @@ enum Engine {
         }
         layout.removeRail(at: point)
         state.fab.layout = layout
-        state.cashYen += railCellCostYen
+        state.cashYen += refundYen
         syncWipCap(state: &state)
         return true
     }

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit  // P5 スプライトの存在確認（UIImage）とメタデータ（NSDataAsset）用
 
 // MARK: - 1.0 フロア（グリッド描画＋配置編集）
 // 設計書 design/redesign-1.0.md §2・§3・§6。絵は暫定ベクタ（P5 で差し替え前提）。
@@ -70,6 +71,50 @@ final class FloorSimClock {
             changedAt = now
         }
         return max(0, now - changedAt)
+    }
+}
+
+/// P5 スプライトのメタデータ（design/redesign-1.0.md §5.1、`sprites/<modelId>.json` 相当）。
+/// 実体は Assets.xcassets の `eq_<id>_meta` データセットに同梱した JSON。
+/// 登録のある機種だけスプライト描画し、無い機種は従来のベクタ描画にフォールバックする。
+struct EquipmentSpriteMeta: Decodable {
+    struct Footprint: Decodable { let width: Int; let depth: Int }
+    struct PixelSize: Decodable { let width: Int; let height: Int }
+    struct Body: Decodable {
+        let image: String
+        let drawScale: Double
+        let anchor: String
+        let pixelSize: PixelSize
+    }
+    struct Layer: Decodable {
+        struct RectInBody: Decodable { let x: Double; let y: Double; let width: Double; let height: Double }
+        struct Animation: Decodable { let type: String; let periodSec: Double; let squashY: Double; let activeWhen: String }
+        let name: String
+        let image: String
+        let rectInBody: RectInBody
+        let animation: Animation
+    }
+    struct Front: Decodable { let body: Body; let layers: [Layer] }
+    struct Orientations: Decodable { let front: Front }
+    let modelId: String
+    let footprint: Footprint
+    let orientations: Orientations
+}
+
+enum EquipmentSprites {
+    private static var cache: [String: EquipmentSpriteMeta?] = [:]
+
+    /// メタデータが同梱され、かつ本体画像が実在する機種だけを返す（第2ゲートで初期7機種に拡大）
+    static func meta(modelId: String) -> EquipmentSpriteMeta? {
+        if let hit = cache[modelId] { return hit }
+        var result: EquipmentSpriteMeta?
+        if let asset = NSDataAsset(name: "eq_\(modelId.lowercased())_meta"),
+           let decoded = try? JSONDecoder().decode(EquipmentSpriteMeta.self, from: asset.data),
+           UIImage(named: decoded.orientations.front.body.image) != nil {
+            result = decoded
+        }
+        cache[modelId] = result
+        return result
     }
 }
 
@@ -874,12 +919,13 @@ struct FloorGridView: View {
             }
         case .erase:
             if railStroke.isEmpty {
-                Text("ドラッグでなぞったレールを撤去します（全額返金）")
+                Text("ドラッグでなぞったレールを撤去します（購入したレールは全額返金、最初からあるレールは返金なし）")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                let count = eraseTargets(layout: layout).count
-                Text("撤去 \(count)セル（+\(MoneyFormat.yen(Double(count) * Engine.railCellCostYen))）")
+                let targets = eraseTargets(layout: layout)
+                let refund = Engine.railRefundYen(state: store.state, points: targets)
+                Text("撤去 \(targets.count)セル（+\(MoneyFormat.yen(refund))）")
                     .font(.caption.bold())
                     .monospacedDigit()
             }
@@ -905,6 +951,8 @@ struct FloorGridView: View {
         // 2. 区画
         var gridLines = Path()
         var parcelBorders = Path()
+        var cellTints = Path()
+        var perfDots = Path()
         for py in 0...FloorLayout.maxParcel {
             for px in 0...FloorLayout.maxParcel {
                 let coord = ParcelCoord(x: px, y: py)
@@ -912,6 +960,18 @@ struct FloorGridView: View {
                 guard rect.intersects(bounds) else { continue }
                 if layout.parcels.contains(coord) {
                     context.fill(Path(rect), with: .color(Color(white: 0.95)))
+                    // クリーンルーム床（P5環境・第2ゲート）: パネルの市松＋グレーチング孔を手続き描画（アセット0KB）
+                    for cy in 0..<parcelSize {
+                        for cx in 0..<parcelSize {
+                            let cellRect = CGRect(x: rect.minX + CGFloat(cx) * cs, y: rect.minY + CGFloat(cy) * cs,
+                                                  width: cs, height: cs)
+                            guard cellRect.intersects(bounds) else { continue }
+                            if (cx + cy) % 2 == 0 { cellTints.addRect(cellRect) }
+                            let d = max(cs * 0.09, 1)
+                            perfDots.addEllipse(in: CGRect(x: cellRect.midX - d / 2, y: cellRect.maxY - d - cs * 0.08,
+                                                           width: d, height: d))
+                        }
+                    }
                     for i in 1..<parcelSize {
                         let x = rect.minX + CGFloat(i) * cs
                         gridLines.move(to: CGPoint(x: x, y: rect.minY))
@@ -926,6 +986,8 @@ struct FloorGridView: View {
                 }
             }
         }
+        context.fill(cellTints, with: .color(Color(white: 0.90)))
+        context.fill(perfDots, with: .color(Color.gray.opacity(0.35)))
         context.stroke(gridLines, with: .color(Color.gray.opacity(0.22)), lineWidth: 0.5)
         context.stroke(parcelBorders, with: .color(Color.gray.opacity(0.5)), lineWidth: 1)
         for coord in overlay.addableParcels {
@@ -973,9 +1035,34 @@ struct FloorGridView: View {
         let labelSize = max(cs * 0.42, 8)
         let stockerRect = g.rect(origin: layout.stocker.origin, width: FloorLayout.stockerSize.width,
                                  depth: FloorLayout.stockerSize.depth).insetBy(dx: cs * 0.06, dy: cs * 0.06)
-        context.fill(Path(roundedRect: stockerRect, cornerRadius: cs * 0.2), with: .color(Color(white: 0.38)))
-        context.draw(Text("ST").font(.system(size: labelSize * 1.2, weight: .heavy)).foregroundColor(.white),
-                     at: CGPoint(x: stockerRect.midX, y: stockerRect.midY))
+        // ストッカー（P5環境・第2ゲート）: ラック棚＋収納FOUPのスロットで見せる（手続き描画）
+        context.fill(Path(roundedRect: stockerRect, cornerRadius: cs * 0.2), with: .color(Color(white: 0.30)))
+        let rackInner = stockerRect.insetBy(dx: cs * 0.12, dy: cs * 0.12)
+        context.fill(Path(roundedRect: rackInner, cornerRadius: cs * 0.1), with: .color(Color(white: 0.45)))
+        let rackCols = 3, rackRows = 2
+        let slotW = rackInner.width / CGFloat(rackCols), slotH = rackInner.height / CGFloat(rackRows)
+        var shelf = Path()
+        for r in 1..<rackRows {
+            shelf.move(to: CGPoint(x: rackInner.minX, y: rackInner.minY + slotH * CGFloat(r)))
+            shelf.addLine(to: CGPoint(x: rackInner.maxX, y: rackInner.minY + slotH * CGFloat(r)))
+        }
+        for c in 1..<rackCols {
+            shelf.move(to: CGPoint(x: rackInner.minX + slotW * CGFloat(c), y: rackInner.minY))
+            shelf.addLine(to: CGPoint(x: rackInner.minX + slotW * CGFloat(c), y: rackInner.maxY))
+        }
+        context.stroke(shelf, with: .color(Color(white: 0.25)), lineWidth: max(cs * 0.05, 1))
+        for i in 0..<min(data.stockerLots, rackCols * rackRows) {
+            let slot = CGRect(x: rackInner.minX + slotW * CGFloat(i % rackCols),
+                              y: rackInner.minY + slotH * CGFloat(i / rackCols),
+                              width: slotW, height: slotH).insetBy(dx: slotW * 0.18, dy: slotH * 0.18)
+            let slotPath = Path(roundedRect: slot, cornerRadius: slot.height * 0.15)
+            context.fill(slotPath, with: .color(Color(red: 0.93, green: 0.86, blue: 0.70)))
+            context.stroke(slotPath, with: .color(Color.brown.opacity(0.8)), lineWidth: 1)
+        }
+        if data.stockerLots == 0 {
+            context.draw(Text("ST").font(.system(size: labelSize * 1.2, weight: .heavy)).foregroundColor(.white),
+                         at: CGPoint(x: stockerRect.midX, y: stockerRect.midY))
+        }
         if data.stockerLots > 0 {
             drawBadge(context, text: "×\(data.stockerLots)", at: CGPoint(x: stockerRect.maxX, y: stockerRect.minY),
                       color: .orange, fontSize: labelSize)
@@ -1005,19 +1092,25 @@ struct FloorGridView: View {
             toolRects[tool.id] = rect
             guard rect.intersects(bounds) else { continue }
             let accent = item.process?.accent ?? Color.gray
-            let body = Path(roundedRect: rect, cornerRadius: cs * 0.18)
-            context.fill(body, with: .color(Color(white: 0.98)))
-            context.fill(body, with: .color(accent.opacity(item.isStandby ? 0.06 : 0.16)))
-            context.stroke(body, with: .color(accent.opacity(item.isStandby ? 0.35 : 0.85)), lineWidth: 1.5)
+            if let sprite = EquipmentSprites.meta(modelId: tool.modelId) {
+                // P5 スプライト描画（状態ランプとモデル名ラベルは従来どおり後段で描く）
+                drawSpriteTool(context, item: item, rect: rect, sprite: sprite, now: now,
+                               zoom: cs / FloorGridGeometry.baseCellSize)
+            } else {
+                let body = Path(roundedRect: rect, cornerRadius: cs * 0.18)
+                context.fill(body, with: .color(Color(white: 0.98)))
+                context.fill(body, with: .color(accent.opacity(item.isStandby ? 0.06 : 0.16)))
+                context.stroke(body, with: .color(accent.opacity(item.isStandby ? 0.35 : 0.85)), lineWidth: 1.5)
 
-            // グリフ（EquipmentPainter の 100×100 座標系を矩形内の正方形へ）
-            if let process = item.process {
-                let side = min(rect.width, rect.height) * 0.8
-                var glyph = context
-                glyph.translateBy(x: rect.midX - side / 2, y: rect.midY - side / 2)
-                glyph.scaleBy(x: side / 100, y: side / 100)
-                glyph.opacity = item.isStandby ? 0.3 : 1
-                EquipmentPainter(context: glyph, accent: accent).draw(modelId: tool.modelId, process: process)
+                // グリフ（EquipmentPainter の 100×100 座標系を矩形内の正方形へ）
+                if let process = item.process {
+                    let side = min(rect.width, rect.height) * 0.8
+                    var glyph = context
+                    glyph.translateBy(x: rect.midX - side / 2, y: rect.midY - side / 2)
+                    glyph.scaleBy(x: side / 100, y: side / 100)
+                    glyph.opacity = item.isStandby ? 0.3 : 1
+                    EquipmentPainter(context: glyph, accent: accent).draw(modelId: tool.modelId, process: process)
+                }
             }
             context.draw(Text(tool.modelId).font(.system(size: max(cs * 0.34, 7), weight: .bold)).foregroundColor(accent),
                          at: CGPoint(x: rect.minX + cs * 0.12, y: rect.minY + cs * 0.06), anchor: .topLeading)
@@ -1100,11 +1193,64 @@ struct FloorGridView: View {
     }
 
     /// FOUP（暫定：ベージュの小矩形）
+    /// P5 スプライト描画（design/redesign-1.0.md §5）
+    /// 本体はフットプリント矩形に下端アンカーで重ね、上方向にオーバードローする。
+    /// 可動部（プラテン）は processing（ランプ緑）のときだけ、正円テクスチャを
+    /// 楕円に潰してから回す。輪郭のシルエットは回転不変で、表面の模様だけが回る。
+    /// ズーム 0.5 未満では LOD として回転を止める（§5.2）。
+    private func drawSpriteTool(_ context: GraphicsContext, item: FloorDrawData.ToolItem, rect: CGRect,
+                                sprite: EquipmentSpriteMeta, now: Double, zoom: CGFloat) {
+        let front = sprite.orientations.front
+        let body = front.body
+        let aspect = CGFloat(body.pixelSize.height) / CGFloat(body.pixelSize.width)
+        let drawW = rect.width * CGFloat(body.drawScale)
+        let drawRect = CGRect(x: rect.midX - drawW / 2, y: rect.maxY - drawW * aspect,
+                              width: drawW, height: drawW * aspect)
+        var base = context
+        base.opacity = item.isStandby ? 0.35 : 1
+        base.draw(base.resolve(Image(body.image)), in: drawRect)
+
+        guard zoom >= 0.5, item.lamp == .green, let layer = front.layers.first else { return }
+        let anim = layer.animation
+        guard anim.type == "rotate", anim.activeWhen == "processing" else { return }
+        let r = layer.rectInBody
+        let platen = CGRect(x: drawRect.minX + CGFloat(r.x) * drawRect.width,
+                            y: drawRect.minY + CGFloat(r.y) * drawRect.height,
+                            width: CGFloat(r.width) * drawRect.width,
+                            height: CGFloat(r.height) * drawRect.height)
+        var spin = context
+        spin.translateBy(x: platen.midX, y: platen.midY)
+        spin.scaleBy(x: 1, y: CGFloat(anim.squashY))
+        spin.rotate(by: .radians(-now * 2 * Double.pi / anim.periodSec))
+        let half = platen.width / 2
+        spin.draw(spin.resolve(Image(layer.image)),
+                  in: CGRect(x: -half, y: -half, width: platen.width, height: platen.width))
+    }
+
     private func drawFOUP(_ context: GraphicsContext, center: CGPoint, width: CGFloat, height: CGFloat) {
         let rect = CGRect(x: center.x - width / 2, y: center.y - height / 2, width: width, height: height)
+        // 接地影（P5環境・第2ゲート）
+        let shadow = CGRect(x: rect.minX + width * 0.06, y: rect.maxY - height * 0.18,
+                            width: width * 0.88, height: height * 0.3)
+        context.fill(Path(ellipseIn: shadow), with: .color(Color.black.opacity(0.18)))
         let path = Path(roundedRect: rect, cornerRadius: min(width, height) * 0.2)
         context.fill(path, with: .color(Color(red: 0.93, green: 0.86, blue: 0.70)))
         context.stroke(path, with: .color(Color.brown.opacity(0.8)), lineWidth: 1)
+        // 蓋の継ぎ目
+        var seam = Path()
+        seam.move(to: CGPoint(x: rect.minX + 1, y: rect.minY + height * 0.28))
+        seam.addLine(to: CGPoint(x: rect.maxX - 1, y: rect.minY + height * 0.28))
+        context.stroke(seam, with: .color(Color.brown.opacity(0.5)), lineWidth: 1)
+        // 前面の窓帯
+        let win = CGRect(x: rect.minX + width * 0.18, y: rect.minY + height * 0.45,
+                         width: width * 0.64, height: height * 0.3)
+        context.fill(Path(roundedRect: win, cornerRadius: height * 0.06),
+                     with: .color(Color(white: 0.35).opacity(0.55)))
+        // 上部の取っ手
+        let handle = CGRect(x: center.x - width * 0.14, y: rect.minY - height * 0.10,
+                            width: width * 0.28, height: height * 0.12)
+        context.stroke(Path(roundedRect: handle, cornerRadius: height * 0.05),
+                       with: .color(Color.brown.opacity(0.9)), lineWidth: 1)
     }
 
     /// 右上に重ねる数字バッジ

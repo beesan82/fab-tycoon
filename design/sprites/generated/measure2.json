@@ -1,0 +1,74 @@
+{
+  "l1": {
+    "src": "media-generation-eq-l1-i1-raw-0-71fc2e47-6999-4283-aecf-fd8a02f5b035.webp",
+    "crop_size": [
+      1008,
+      893
+    ],
+    "pixel_size": [
+      652,
+      578
+    ],
+    "bytes": 376816
+  },
+  "d1": {
+    "src": "media-generation-eq-d1-e1-raw-0-435fa41c-ba34-4569-8445-32b3eadd7a36.webp",
+    "crop_size": [
+      813,
+      837
+    ],
+    "pixel_size": [
+      576,
+      593
+    ],
+    "bytes": 385971
+  },
+  "e1": {
+    "src": "media-generation-eq-d1-e1-raw-0-435fa41c-ba34-4569-8445-32b3eadd7a36.webp",
+    "crop_size": [
+      787,
+      1042
+    ],
+    "pixel_size": [
+      576,
+      763
+    ],
+    "bytes": 355747
+  },
+  "q1": {
+    "src": "media-generation-eq-q1-p1-raw-0-e97a9ace-b012-48f3-a858-fbcd8606878e.webp",
+    "crop_size": [
+      616,
+      1099
+    ],
+    "pixel_size": [
+      576,
+      1028
+    ],
+    "bytes": 400564
+  },
+  "p1": {
+    "src": "media-generation-eq-q1-p1-raw-0-e97a9ace-b012-48f3-a858-fbcd8606878e.webp",
+    "crop_size": [
+      702,
+      783
+    ],
+    "pixel_size": [
+      576,
+      642
+    ],
+    "bytes": 316276
+  },
+  "i1": {
+    "src": "media-generation-eq-i1-single-raw-0-3e58cf90-756e-4c74-8d59-c61574117762.webp",
+    "crop_size": [
+      1804,
+      511
+    ],
+    "pixel_size": [
+      1152,
+      326
+    ],
+    "bytes": 401362
+  }
+}

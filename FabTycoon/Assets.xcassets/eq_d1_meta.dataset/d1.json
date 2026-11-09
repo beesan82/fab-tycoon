@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "status": "gate2-body-only",
+  "modelId": "D1",
+  "footprint": {
+    "width": 2,
+    "depth": 2
+  },
+  "loadPorts": 2,
+  "orientations": {
+    "front": {
+      "body": {
+        "image": "eq_d1_front_body",
+        "drawScale": 1.25,
+        "anchor": "bottomCenter",
+        "pixelSize": {
+          "width": 576,
+          "height": 593
+        }
+      },
+      "lamp": {
+        "overlay": "code-drawn",
+        "note": "生成時にシグナルタワーを描かせていない。状態表示は従来のコード描画ランプ（フットプリント矩形の右上）を正とする。"
+      },
+      "layers": []
+    }
+  },
+  "knownIssues": [
+    "本体下端に生成時の落ち影がわずかに残る（切り抜き許容差の範囲内）。実機で目立つ場合は再生成する。",
+    "side 方向は未制作（front のみ）。",
+    "drawScale 1.25 は推定値。実機で調整する。"
+  ]
+}

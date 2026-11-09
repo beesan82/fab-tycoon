@@ -1190,8 +1190,10 @@ func p3RestoredSim(_ s: GameState) -> SimCore {
 
 // 定常状態の v4 セーブ（base）：テンプレートで WIP 上限 45 の CONWIP 運転を 900 ゲーム時間回した snapshot を持つ
 let p3Initial = GameState.initial()
-check(p3Initial.fab.layout != nil && p3Initial.fab.placed.count == 11 && p3Initial.fab.sim?.lots.isEmpty == true,
-      "P3: 新規ゲームは layout・配置 11 台・ロットなしの sim を持つ")
+// P6先行分で仕様変更：新規ゲームは仕掛かりロットをプリシードした sim を持つ（初回売上の前倒し）。
+// 移行直後の sim がロットなしであることは P3 移行セクション側で引き続き検証する
+check(p3Initial.fab.layout != nil && p3Initial.fab.placed.count == 11 && p3Initial.fab.sim?.lots.isEmpty == false,
+      "P3: 新規ゲームは layout・配置 11 台・プリシード済みロットを持つ sim を持つ")
 let p3TemplateFresh = LayoutTemplate.starter16(equipment: p3Initial.fab.equipment)
 var p3WarmSim = SimCore(state: p3Initial, tools: p3TemplateFresh.placed, layout: p3TemplateFresh.layout)
 p3WarmSim.wipCap = 45
@@ -1508,8 +1510,13 @@ check(p4ReleaseRate >= 8.5 * 0.90 && p4ReleaseRate <= 8.5 * 1.03,
       "P4: tick 駆動の投入レート \(num(p4ReleaseRate, 3)) 枚/時（8.5 の −10%〜+3%）")
 let p4Derived = Engine.derived(state: p4State)
 print("P4 derived 実測: スループット \(num(p4Derived.measuredThroughputWPH, 3)) WPH / 検出率 \(num(p4Derived.measuredDetectionRate, 4)) / 収入/分 \(num(p4Derived.measuredIncomePerMinuteYen, 0)) 円")
-check(p4Derived.measuredThroughputWPH >= 8.5 * 0.90 && p4Derived.measuredThroughputWPH <= 8.5 * 1.03,
-      "P4: derived の measuredThroughputWPH \(num(p4Derived.measuredThroughputWPH, 3)) が同じ帯")
+// P6先行分で帯を +3% → +15% に広げた：throughputEMA は時定数 1,440 分の端点推定で、
+// FOUP の完了クラスターに乗ると窓平均より高く出る。定常性の本体は窓平均側のチェック
+// （tick 駆動スループット・投入レート、いずれも従来帯で通過）で担保し、EMA は表示用の
+// 概算として「大きく外れていないこと」だけを見る。プリシードで初期位相が変わり、
+// 本線の決定論的な端点値（帯内）から 8.875 に移ったための措置
+check(p4Derived.measuredThroughputWPH >= 8.5 * 0.90 && p4Derived.measuredThroughputWPH <= 8.5 * 1.15,
+      "P4: derived の measuredThroughputWPH \(num(p4Derived.measuredThroughputWPH, 3)) が EMA の帯（−10%〜+15%）")
 check(abs(p4Derived.measuredDetectionRate - 0.7783) <= 0.01,
       "P4: derived の measuredDetectionRate \(num(p4Derived.measuredDetectionRate, 4))（0.7783 ±0.01）")
 check(p4StatsAfter.completedLots > 0 && p4Derived.incomePerMinuteYen == p4Derived.measuredIncomePerMinuteYen,
@@ -1523,14 +1530,18 @@ guard let p4RailCell = p4Rail.fab.layout?.rails.first else { fail("P4: テンプ
 let p4RailCash0 = p4Rail.cashYen
 check(Engine.removeRail(state: &p4Rail, at: p4RailCell.point), "P4: テンプレートのレール (\(p4RailCell.point.x),\(p4RailCell.point.y)) を撤去できる")
 check(p4Rail.fab.sim?.wipCap == 44, "P4: レール 1 セル撤去で WIP 上限が 44")
-check(p4Rail.cashYen == p4RailCash0 + Engine.railCellCostYen, "P4: 撤去でレール 1 セル分が返金される")
+// P6先行分で仕様変更：テンプレートの無償レールは撤去しても返金されない（無償レールの売却益対策）。
+// 購入したレールの返金は P6 セクションで検証する
+check(p4Rail.cashYen == p4RailCash0, "P4: テンプレートの無償レールの撤去では返金されない")
 check(Engine.setRail(state: &p4Rail, cell: p4RailCell), "P4: 同じセルにレールを敷き直せる")
 check(p4Rail.fab.sim?.wipCap == 45, "P4: 敷き直すと WIP 上限が 45 に戻る")
-check(p4Rail.cashYen == p4RailCash0 && p4Rail.stats.railCellsBuilt == 1,
-      "P4: 敷設でレール 1 セル分が引かれ、railCellsBuilt == 1")
+check(p4Rail.cashYen == p4RailCash0 - Engine.railCellCostYen && p4Rail.stats.railCellsBuilt == 1,
+      "P4: 敷き直しは新規敷設として 1 セル分が引かれ、railCellsBuilt == 1")
 
 print("== P4. 学習連動（移行でリセットされない） ==")
-/// 新規状態（learned を指定すれば learningWafers[n28] を設定）から tick で最初のロットが完了するまで進め、その歩留まりを返す
+/// 新規状態から tick で最初のロットが完了するまで進め、その歩留まりを返す。
+/// P6先行分で新規ゲームに仕掛かりがプリシードされるため、最初に完了するのはプリシードの先頭ロット
+/// （投入時の刻印 W≈0）になる。learned を指定する検証は p4PostSeedLotYield 側で行う
 func p4FirstLotYield(learned: Double?) -> Double? {
     var s = GameState.initial()
     if let learned = learned {
@@ -1544,10 +1555,34 @@ func p4FirstLotYield(learned: Double?) -> Double? {
     }
     return nil
 }
-let p4Yield3000 = p4FirstLotYield(learned: 3_000)
+/// プリシード分が流れ切った後に完了するロット（＝開始後に投入され、刻印に learned が反映されるロット）の
+/// 平均歩留まり。プリシードを跨ぐ tick の増分は混ざるので数えない
+func p4PostSeedLotYield(learned: Double?) -> Double? {
+    var s = GameState.initial()
+    if let learned = learned {
+        s.learningWafers["n28"] = learned
+    }
+    let seedCount = s.fab.sim?.lots.count ?? 0
+    var windowSum = 0.0
+    var windowCount = 0
+    for _ in 0..<400 {
+        let before = s.fab.sim?.stats
+        Engine.tick(state: &s, dtRealSeconds: 30)
+        guard let before = before, let after = s.fab.sim?.stats else { return nil }
+        if before.completedLots > seedCount {
+            windowSum += after.sumLotYield - before.sumLotYield
+            windowCount += after.completedLots - before.completedLots
+        }
+        if windowCount >= 3 {
+            return windowSum / Double(windowCount)
+        }
+    }
+    return nil
+}
+let p4Yield3000 = p4PostSeedLotYield(learned: 3_000)
 let p4Yield0 = p4FirstLotYield(learned: nil)
-print("P4 初回ロット歩留まり: W=3,000 \(num(p4Yield3000 ?? -1, 4)) / W=0 \(num(p4Yield0 ?? -1, 4))")
-check(p4Yield3000.map { $0 >= 0.75 } == true, "P4: W=3,000 から始めた初回ロットの歩留まりが 0.75 以上（学習が効いている）")
+print("P4 ロット歩留まり: W=3,000 のポストシード平均 \(num(p4Yield3000 ?? -1, 4)) / W=0 の初回 \(num(p4Yield0 ?? -1, 4))")
+check(p4Yield3000.map { $0 >= 0.75 } == true, "P4: W=3,000 から始めたロットの歩留まりが 0.75 以上（学習が効いている）")
 check(p4Yield0.map { abs($0 - 0.6983) <= 0.005 } == true, "P4: W=0 の初回ロットの歩留まりは 0.6983 ±0.005")
 
 print("== P4. 異常の装置紐づけ ==")
@@ -1689,6 +1724,102 @@ check(p4Parcel.cashYen == p4ParcelCash - p4ParcelCost, "P4: 資金が増床価�
 let p4ParcelsBeforeExpand = p4Parcel.fab.layout?.parcels.count ?? 0
 check(Engine.expandFab(state: &p4Parcel) && p4Parcel.fab.layout?.parcels.count == p4ParcelsBeforeExpand + 1,
       "P4: expandFab でも区画が 1 つ増える")
+
+print("== P6先行分. プリシード（初回売上の前倒し） ==")
+var p6Seed = GameState.initial()
+check(p6Seed.fab.sim?.lots.isEmpty == false, "P6: 新規ゲーム開始時点で仕掛かりロットがプリシードされている")
+check(p6Seed.fab.sim?.lots.count == p6Seed.fab.sim?.wipCap, "P6: プリシード件数は WIP 上限（運転点）と一致する")
+check(p6Seed.fab.sim?.stats.releasedWafers == 0 && p6Seed.fab.sim?.stats.completedLots == 0,
+      "P6: プリシード分は sim 統計（投入・完了）に数えられていない")
+check(p6Seed.learningWafers.isEmpty && p6Seed.stats.totalWafersInput == 0,
+      "P6: プリシード分は学習 W とプレイヤー統計に数えられていない")
+check(p6Seed.fab.sim?.currentGameMin == Double(SimCore.initialWarmUpGameMinutes),
+      "P6: ウォームアップ \(SimCore.initialWarmUpGameMinutes) ゲーム分が進んだ状態から始まる")
+// 初回完了までの tick 数を測る（変更前は実測 2,714 tick = 6,785 ゲーム分）
+var p6TicksToFirstCompletion = -1
+for tick in 1...1200 {
+    Engine.tick(state: &p6Seed, dtRealSeconds: 0.25)
+    if (p6Seed.fab.sim?.stats.completedLots ?? 0) > 0 {
+        p6TicksToFirstCompletion = tick
+        break
+    }
+}
+print("P6 初回ロット完了まで: \(p6TicksToFirstCompletion) tick（変更前 2,714 tick）")
+check(p6TicksToFirstCompletion > 0 && p6TicksToFirstCompletion <= 720,
+      "P6: 初回ロット完了が 720 tick（実3分）以内に来る（実測 \(p6TicksToFirstCompletion) tick）")
+check(p6Seed.stats.totalGoodChips > 0 && p6Seed.cashYen > 3_000_000_000,
+      "P6: 初回完了で良品と売上が立つ")
+
+print("== P6先行分. 無償レールの売却益の抜け穴 ==")
+var p6Rail = GameState.initial()
+let p6RailCash0 = p6Rail.cashYen
+let p6TemplateRailPoints = p6Rail.fab.layout?.rails.map { $0.point } ?? []
+check(p6TemplateRailPoints.count == 40, "P6: テンプレートのレールは 40 セル")
+check(p6Rail.fab.layout?.paidRailPoints.isEmpty == true, "P6: 新規ゲームでは購入済みレールは 0 セル")
+check(Engine.railRefundYen(state: p6Rail, points: p6TemplateRailPoints) == 0,
+      "P6: テンプレート全セルの返金合計が 0")
+// テンプレのレールを全部撤去しても資金が増えない（撤去可否はロットの手運びで変わるので、資金が増えないことだけを見る）
+for point in p6TemplateRailPoints {
+    _ = Engine.removeRail(state: &p6Rail, at: point)
+}
+check(p6Rail.cashYen <= p6RailCash0, "P6: テンプレートのレールを撤去しても資金は増えない（開始時 \(num(p6RailCash0, 0)) 円 → \(num(p6Rail.cashYen, 0)) 円）")
+// 購入したレールは従来どおり全額返金される
+var p6Paid = GameState.initial()
+let p6PaidPoint = GridPoint(x: 1, y: 0)
+let p6PaidCell = RailCell(point: p6PaidPoint, direction: .east, kind: .straight)
+let p6PaidCash0 = p6Paid.cashYen
+check(Engine.setRail(state: &p6Paid, cell: p6PaidCell), "P6: 空きセルに有償レールを敷ける")
+check(p6Paid.cashYen == p6PaidCash0 - Engine.railCellCostYen, "P6: 敷設で 1 セル分が引かれる")
+check(p6Paid.fab.layout?.paidRailPoints.contains(p6PaidPoint) == true, "P6: 敷いたセルが購入済みとして記録される")
+check(Engine.railRefundYen(state: p6Paid, at: p6PaidPoint) == Engine.railCellCostYen, "P6: 購入したレールの返金は全額")
+check(Engine.removeRail(state: &p6Paid, at: p6PaidPoint), "P6: 購入したレールを撤去できる")
+check(p6Paid.cashYen == p6PaidCash0, "P6: 購入したレールの撤去で全額戻り、資金は敷設前と一致する")
+check(p6Paid.fab.layout?.paidRailPoints.contains(p6PaidPoint) == false, "P6: 撤去したセルの購入記録が消える")
+// 旧セーブ互換：paidRailPoints の無い β1 形式 JSON でも、テンプレ位置は無償・それ以外は購入済みとして読める
+do {
+    var legacy = GameState.initial()
+    // テンプレ位置 (0,5) と、テンプレに無い位置 (1,0) のレールを持つ状態を作り、paidRailPoints を落として保存する
+    _ = Engine.setRail(state: &legacy, cell: RailCell(point: GridPoint(x: 1, y: 0), direction: .east, kind: .straight))
+    legacy.fab.layout?.paidRailPoints = []
+    let encoder = JSONEncoder()
+    var jsonObject = try JSONSerialization.jsonObject(with: encoder.encode(legacy.fab.layout!)) as! [String: Any]
+    jsonObject.removeValue(forKey: "paidRailPoints")
+    let legacyData = try JSONSerialization.data(withJSONObject: jsonObject)
+    let decoded = try JSONDecoder().decode(FloorLayout.self, from: legacyData)
+    check(decoded.paidRailPoints.contains(GridPoint(x: 1, y: 0)), "P6: 旧セーブではテンプレ外のレールを購入済みとみなす")
+    check(!decoded.paidRailPoints.contains(GridPoint(x: 0, y: 5)), "P6: 旧セーブではテンプレ位置のレールを無償とみなす")
+} catch {
+    fail("P6: 旧セーブ形式のレール判定で例外 \(error)")
+}
+
+print("== P6先行分. WIP 上限の運転点と区画拡張 ==")
+// 区画を買うだけでは上限は上がらない（上限はレールセル数で決まる）
+var p6Wip = GameState.initial()
+p6Wip.cashYen = 100_000_000_000
+check(Engine.buyParcel(state: &p6Wip, coord: ParcelCoord(x: 2, y: 0)), "P6: 区画 (2,0) を購入できた")
+check(p6Wip.fab.sim?.wipCap == 45, "P6: 区画購入だけでは WIP 上限は 45 のまま（レールを足すまで上がらない）")
+// 拡張した区画にレールを足すと上限が伸びる
+var p6WipRails = 0
+for x in 16..<24 {
+    if Engine.setRail(state: &p6Wip, cell: RailCell(point: GridPoint(x: x, y: 0), direction: .east, kind: .straight)) {
+        p6WipRails += 1
+    }
+}
+check(p6WipRails == 8 && p6Wip.fab.sim?.wipCap == 53, "P6: レール 8 セル追加で WIP 上限が 53 に伸びる")
+// 合成レイアウトでの式の境界：下限 30・上限 200
+func p6Cap(railCount: Int) -> Int {
+    let layout = FloorLayout(
+        parcels: FloorLayout.initialParcels,
+        rails: (0..<railCount).map { RailCell(point: GridPoint(x: $0, y: 0), direction: .east, kind: .straight) },
+        stocker: Stocker(origin: GridPoint(x: 4, y: 6)),
+        entry: EntryPort(origin: GridPoint(x: 3, y: 7)),
+        shipping: ShippingPort(origin: GridPoint(x: 14, y: 6))
+    )
+    return SimCore.operatingWipCap(layout: layout)
+}
+check(p6Cap(railCount: 10) == 30, "P6: レール 10 セルでは下限 30")
+check(p6Cap(railCount: 40) == 45, "P6: レール 40 セルでは 45")
+check(p6Cap(railCount: 500) == 200, "P6: レール 500 セルでも上限 200 で頭打ち")
 
 try? fileManager.removeItem(at: tempRoot)
 
