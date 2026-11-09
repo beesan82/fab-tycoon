@@ -208,6 +208,32 @@ struct FloorLayout: Codable, Equatable {
         return result
     }
 
+    /// 配置ゴーストの近傍スナップ（β1 実機FB対応）：raw の周囲 radius セル以内で実際に置ける
+    /// origin のうち、raw に最も近いもの（マンハッタン距離。同点は y → x の順で決定的）を返す。
+    /// raw 自身が置ける場合は raw を返す。範囲内に置ける場所が無ければ nil（ゴーストは raw に出して赤表示）。
+    /// ドラッグ配置で指のブレを吸収し、タップ精度に依存しないための補助。
+    func snappedOrigin(for tool: ToolInstance, near raw: GridPoint, rotation: Int,
+                       among tools: [ToolInstance], radius: Int = 2) -> GridPoint? {
+        var candidates: [(point: GridPoint, distance: Int)] = []
+        for dy in -radius...radius {
+            for dx in -radius...radius {
+                let point = GridPoint(x: raw.x + dx, y: raw.y + dy)
+                candidates.append((point, abs(dx) + abs(dy)))
+            }
+        }
+        candidates.sort { a, b in
+            if a.distance != b.distance { return a.distance < b.distance }
+            if a.point.y != b.point.y { return a.point.y < b.point.y }
+            return a.point.x < b.point.x
+        }
+        for candidate in candidates {
+            if toolPlacementError(tool, origin: candidate.point, rotation: rotation, among: tools) == nil {
+                return candidate.point
+            }
+        }
+        return nil
+    }
+
     /// レールを point に置けない理由。既存レールの置き換えは可
     func railPlacementError(at point: GridPoint, among tools: [ToolInstance]) -> String? {
         if !isPurchased(cell: point) { return "購入済みの区画の外です" }
@@ -569,6 +595,21 @@ struct LayoutAnalysis {
     }
 }
 
+// MARK: - 工程順（可読性）
+
+enum RouteStepOrder {
+    /// ルート（RouteBuilder.routeSteps）で各工程が最初に現れる順位（1始まり）。
+    /// フロア上の工程順バッジ（①成膜 → ②露光 → …）と、テンプレートの並びが
+    /// 工程順に読めることの検証に使う。ルートに現れない工程は含まれない
+    static func ranks(node: NodeSpec, lithoClass: LithoClass?) -> [ProcessType: Int] {
+        var result: [ProcessType: Int] = [:]
+        for step in RouteBuilder.routeSteps(node: node, lithoClass: lithoClass) where result[step] == nil {
+            result[step] = result.count + 1
+        }
+        return result
+    }
+}
+
 // MARK: - デフォルト配置テンプレート（§2.6）
 
 enum LayoutTemplate {
@@ -581,7 +622,11 @@ enum LayoutTemplate {
     /// 1本の時計回りリング（上段 y=5 を東へ、右端 x=15 を南へ、下段 y=9 を西へ、左端 x=0 を北へ）に
     /// 上段・下段の装置、上段直下のストッカー、下段の投入口、右端寄りの出荷口がポートで接する。
     /// 装置はリングの流れ順に並べる：上段を西から東へ 成膜 → 露光、右端を回って下段を東から西へ
-    /// エッチング → CMP → 注入 → 検査 → パッケージ。工程間の移動がリングを周回せず短区間で済むようにする。
+    /// エッチング → 注入 → 検査 → CMP → パッケージ。これはルート（RouteBuilder.routeSteps）で
+    /// 各工程が最初に現れる順と一致させてあり、フロアを目で辿れば工程順に読める（β1 実機FB対応）。
+    /// 28nm では検査が層 5 で、CMP が層 11 で初出するため、この順になる。
+    /// 旧並びは下段が エッチング → CMP → 注入 → 検査 で、ルート順と 2 箇所で逆転していたため並べ替えた。
+    /// 工程間の移動がリングを周回せず短区間で済むようにする。
     /// ストッカーは西端の環（左端 x=0 の戻りレールと南西角）に交通を集めないよう内側の上段直下に置き、
     /// 両脇の北向きスパーから上段へ合流させる。西スパーから成膜のポートへ 2 セルで補充してバッファとして効かせる。
     /// 投入口は下段の西寄り（y=9 に接する）で、左端を北上して成膜へ向かう。
@@ -614,14 +659,15 @@ enum LayoutTemplate {
         )
 
         // 装置スロット（modelId ごとに出現順に割り当て、回転 0）。リングの流れ順：
-        // 上段は西→東（西端に D1、その東隣に L1）、下段は東→西（E1 → C1 → I1 → Q1 → P1）
+        // 上段は西→東（西端に D1、その東隣に L1）、下段は東→西（E1 → I1 → Q1 → C1 → P1）。
+        // I1 は 4×2 なので下段では E1 群（x10〜15）の西隣 x6〜9 に置き、Q1・C1（各 2×2）を x4〜5・x2〜3 に置く
         let slots: [String: [GridPoint]] = [
             "D1": [GridPoint(x: 0, y: 3), GridPoint(x: 2, y: 3)],
             "L1": [GridPoint(x: 4, y: 2), GridPoint(x: 8, y: 2)],
             "E1": [GridPoint(x: 14, y: 10), GridPoint(x: 12, y: 10), GridPoint(x: 10, y: 10)],
-            "C1": [GridPoint(x: 8, y: 10)],
-            "I1": [GridPoint(x: 4, y: 10)],
-            "Q1": [GridPoint(x: 2, y: 10)],
+            "I1": [GridPoint(x: 6, y: 10)],
+            "Q1": [GridPoint(x: 4, y: 10)],
+            "C1": [GridPoint(x: 2, y: 10)],
             "P1": [GridPoint(x: 0, y: 10)],
         ]
 

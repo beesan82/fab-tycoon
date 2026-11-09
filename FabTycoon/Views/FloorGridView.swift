@@ -134,6 +134,8 @@ struct FloorDrawData {
         let lamp: Color
         /// ポートにいるロット数
         let portLots: Int
+        /// ルートで工程が最初に現れる順位（①〜）。工程順バッジ用（β1 実機FB対応）
+        let stepRank: Int?
     }
 
     let layout: FloorLayout
@@ -179,6 +181,8 @@ struct FloorDrawData {
         }
 
         // 配置は placed、ポート・稼働率は sim の装置を正とする
+        let node = Catalog.node(id: nodeId) ?? Catalog.defaultNode
+        let stepRanks = RouteStepOrder.ranks(node: node, lithoClass: Engine.topLithoClass(state: state))
         let simTools = Dictionary((sim?.tools ?? []).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let lotsById = Dictionary((sim?.lots ?? []).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let causeToolId = state.activeExcursion?.causeToolId
@@ -216,7 +220,8 @@ struct FloorDrawData {
                 bottleneck = (tool.id, tool.busyEMA)
             }
             tools.append(ToolItem(tool: tool, process: model?.process, isStandby: isStandby, lamp: lamp,
-                                  portLots: tool.ports.filter { $0.lotId != nil }.count))
+                                  portLots: tool.ports.filter { $0.lotId != nil }.count,
+                                  stepRank: model.flatMap { stepRanks[$0.process] }))
         }
         self.tools = tools
         bottleneckToolId = bottleneck?.id
@@ -440,11 +445,14 @@ struct FloorGridView: View {
             }
     }
 
-    /// レール編集（敷設・消しゴム）ではセル列をなぞり、それ以外はパン
+    /// レール編集（敷設・消しゴム）ではセル列をなぞり、装置配置中はゴーストをドラッグで動かし、それ以外はパン。
+    /// 配置中のドラッグは確定しない（確定は「ここに置く」ボタンに分離。β1 実機FB対応）
     private func dragGesture(geometry: FloorGridGeometry, layout: FloorLayout) -> some Gesture {
         DragGesture(minimumDistance: 6)
             .onChanged { value in
-                if editMode == .rails && railTool != .pan {
+                if editMode == .tools && (paletteToolId != nil || isMoving) {
+                    updateGhost(to: geometry.cell(at: value.location), layout: layout)
+                } else if editMode == .rails && railTool != .pan {
                     if railStroke.isEmpty {
                         extendStroke(to: geometry.cell(at: value.startLocation))
                     }
@@ -505,29 +513,9 @@ struct FloorGridView: View {
                 highlightedToolId = nil
             }
         case .tools:
-            if let paletteId = paletteToolId {
-                if ghostOrigin == cell {
-                    if store.placeStoredTool(toolId: paletteId, origin: cell, rotation: ghostRotation) {
-                        paletteToolId = nil
-                        ghostOrigin = nil
-                        highlightedToolId = paletteId
-                    } else {
-                        editMessage = "ここには置けません"
-                    }
-                } else {
-                    ghostOrigin = cell
-                }
-            } else if isMoving, let toolId = highlightedToolId {
-                if ghostOrigin == cell {
-                    if store.movePlacedTool(toolId: toolId, origin: cell, rotation: ghostRotation) {
-                        isMoving = false
-                        ghostOrigin = nil
-                    } else {
-                        editMessage = "移動できません（置けない場所か、ストッカーが満杯です）"
-                    }
-                } else {
-                    ghostOrigin = cell
-                }
+            if paletteToolId != nil || isMoving {
+                // 配置中：タップはゴーストの移動だけ。確定は「ここに置く」ボタン（再タップ確定は廃止）
+                updateGhost(to: cell, layout: layout)
             } else {
                 highlightedToolId = hitTool?.id
             }
@@ -680,19 +668,56 @@ struct FloorGridView: View {
         editMessage = nil
     }
 
+    /// ゴーストの対象装置（パレット選択中／移動中。どちらでもなければ nil）
+    private func ghostTarget() -> ToolInstance? {
+        let fab = store.state.fab
+        if let paletteId = paletteToolId, let instance = fab.storedEquipment.first(where: { $0.id == paletteId }) {
+            return ToolInstance(instance: instance)
+        }
+        if isMoving, let toolId = highlightedToolId {
+            return fab.placed.first(where: { $0.id == toolId })
+        }
+        return nil
+    }
+
     /// ゴーストの対象装置と配置エラー（ゴーストが無ければ nil）
     private func ghostStatus(layout: FloorLayout) -> (tool: ToolInstance, origin: GridPoint, error: String?)? {
-        guard let origin = ghostOrigin else { return nil }
-        let fab = store.state.fab
-        var target: ToolInstance?
-        if let paletteId = paletteToolId, let instance = fab.storedEquipment.first(where: { $0.id == paletteId }) {
-            target = ToolInstance(instance: instance)
-        } else if isMoving, let toolId = highlightedToolId {
-            target = fab.placed.first(where: { $0.id == toolId })
-        }
-        guard let tool = target else { return nil }
-        let error = layout.toolPlacementError(tool, origin: origin, rotation: ghostRotation, among: fab.placed)
+        guard let origin = ghostOrigin, let tool = ghostTarget() else { return nil }
+        let error = layout.toolPlacementError(tool, origin: origin, rotation: ghostRotation, among: store.state.fab.placed)
         return (tool, origin, error)
+    }
+
+    /// タップ／ドラッグでゴーストを動かす。近傍に置けるセルがあればスナップし、
+    /// 無ければ指の位置そのまま（赤ゴーストで「置けない」ことが分かる）
+    private func updateGhost(to raw: GridPoint, layout: FloorLayout) {
+        guard let tool = ghostTarget() else { return }
+        editMessage = nil
+        ghostOrigin = layout.snappedOrigin(for: tool, near: raw, rotation: ghostRotation,
+                                           among: store.state.fab.placed) ?? raw
+    }
+
+    /// 「ここに置く」ボタンからの確定（配置／移動の共通処理）
+    private func confirmPlacement(layout: FloorLayout) {
+        guard let ghost = ghostStatus(layout: layout), ghost.error == nil else {
+            editMessage = "ここには置けません"
+            return
+        }
+        if let paletteId = paletteToolId {
+            if store.placeStoredTool(toolId: paletteId, origin: ghost.origin, rotation: ghostRotation) {
+                paletteToolId = nil
+                ghostOrigin = nil
+                highlightedToolId = paletteId
+            } else {
+                editMessage = "ここには置けません"
+            }
+        } else if isMoving, let toolId = highlightedToolId {
+            if store.movePlacedTool(toolId: toolId, origin: ghost.origin, rotation: ghostRotation) {
+                isMoving = false
+                ghostOrigin = nil
+            } else {
+                editMessage = "移動できません（置けない場所か、ストッカーが満杯です）"
+            }
+        }
     }
 
     private func editOverlay(layout: FloorLayout) -> FloorEditOverlay {
@@ -783,35 +808,46 @@ struct FloorGridView: View {
         let fab = store.state.fab
         if paletteToolId != nil || isMoving {
             let ghost = ghostStatus(layout: layout)
-            HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
+                // 状態テキスト：ゴースト未表示／置けない理由／置ける
                 if let ghost {
                     if let error = ghost.error {
                         Text(error)
                             .font(.caption)
                             .foregroundStyle(.red)
                     } else {
-                        Text("同じ場所をもう一度タップで確定")
+                        Text("置ける場所です。ドラッグで微調整できます")
                             .font(.caption)
                             .foregroundStyle(.green)
                     }
                 } else {
-                    Text(isMoving ? "移動先のセル（左上）をタップ" : "置きたいセル（左上）をタップ")
+                    Text(isMoving ? "移動先をドラッグ／タップで選んでください" : "置きたい場所をドラッグ／タップで選んでください")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Spacer()
-                Button {
-                    ghostRotation = (ghostRotation + 90) % 360
-                } label: {
-                    Label("回転", systemImage: "rotate.right")
+                HStack(spacing: 8) {
+                    // 確定はこのボタンだけ（再タップ確定は廃止。β1 実機FB対応）
+                    Button {
+                        confirmPlacement(layout: layout)
+                    } label: {
+                        Label(isMoving ? "ここへ移動" : "ここに置く", systemImage: "checkmark.circle.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(ghost == nil || ghost?.error != nil)
+                    Button {
+                        ghostRotation = (ghostRotation + 90) % 360
+                    } label: {
+                        Label("回転", systemImage: "rotate.right")
+                    }
+                    .buttonStyle(.bordered)
+                    Button("キャンセル") {
+                        paletteToolId = nil
+                        isMoving = false
+                        ghostOrigin = nil
+                    }
+                    .buttonStyle(.bordered)
+                    Spacer()
                 }
-                .buttonStyle(.bordered)
-                Button("やめる") {
-                    paletteToolId = nil
-                    isMoving = false
-                    ghostOrigin = nil
-                }
-                .buttonStyle(.bordered)
             }
         } else if let toolId = highlightedToolId, let tool = fab.placed.first(where: { $0.id == toolId }) {
             let name = Catalog.model(id: tool.modelId)?.name ?? tool.modelId
@@ -822,7 +858,8 @@ struct FloorGridView: View {
                     Button("移動") {
                         isMoving = true
                         ghostRotation = tool.rotation
-                        ghostOrigin = nil
+                        // 現在位置からゴーストを出す（ドラッグでそのまま動かせる）
+                        ghostOrigin = tool.origin
                     }
                     Button("回転") {
                         if !store.rotatePlacedTool(toolId: tool.id) {
@@ -1031,6 +1068,22 @@ struct FloorGridView: View {
         context.stroke(chevrons, with: .color(Color(white: 0.25)),
                        style: StrokeStyle(lineWidth: max(cs * 0.07, 1), lineCap: .round, lineJoin: .round))
 
+        // 進行方向の流れドット（β1 実機FB対応）：各レールセルに 1 個、出口方向へ流れる光点。
+        // 静止シェブロンだけでは向きが伝わらないための補強。1 パスにまとめて 1 回の fill で描くので
+        // セル数が増えても描画コールは増えない（0.9 秒周期でセル 1 個分を移動）
+        var flowDots = Path()
+        let flowPhase = now.truncatingRemainder(dividingBy: 0.9) / 0.9 - 0.5
+        let dotR = max(cs * 0.085, 1.2)
+        for rail in data.rails {
+            let c = g.center(rail.point)
+            guard bounds.insetBy(dx: -cs, dy: -cs).contains(c) else { continue }
+            let f = rail.direction.delta
+            let p = CGPoint(x: c.x + CGFloat(f.dx) * CGFloat(flowPhase) * cs,
+                            y: c.y + CGFloat(f.dy) * CGFloat(flowPhase) * cs)
+            flowDots.addEllipse(in: CGRect(x: p.x - dotR, y: p.y - dotR, width: dotR * 2, height: dotR * 2))
+        }
+        context.fill(flowDots, with: .color(Color.cyan.opacity(0.5)))
+
         // 4. 固定設備（ストッカー・投入口・出荷口）
         let labelSize = max(cs * 0.42, 8)
         let stockerRect = g.rect(origin: layout.stocker.origin, width: FloorLayout.stockerSize.width,
@@ -1082,6 +1135,19 @@ struct FloorGridView: View {
         context.draw(Text("OUT").font(.system(size: labelSize * 0.8, weight: .heavy)).foregroundColor(.white),
                      at: CGPoint(x: shippingRect.midX, y: shippingRect.midY))
 
+        // 投入口・出荷口の大きな明示（β1 実機FB対応）：脈動する枠＋日本語ラベルプレートで
+        // 「どこから入ってどこへ出るか」を一目で分かるようにする
+        let portPulse = 0.45 + 0.3 * sin(now * 2 * Double.pi / 1.6)
+        context.stroke(Path(roundedRect: entryRect.insetBy(dx: -cs * 0.10, dy: -cs * 0.10), cornerRadius: cs * 0.22),
+                       with: .color(Color.green.opacity(portPulse)), lineWidth: 2.5)
+        context.stroke(Path(roundedRect: shippingRect.insetBy(dx: -cs * 0.10, dy: -cs * 0.10), cornerRadius: cs * 0.22),
+                       with: .color(Color.blue.opacity(portPulse)), lineWidth: 2.5)
+        let portLabelSize = max(cs * 0.52, 10)
+        drawPortLabel(context, text: "投入口 IN", above: entryRect,
+                      color: Color.green.opacity(0.92), fontSize: portLabelSize)
+        drawPortLabel(context, text: "出荷口 OUT", above: shippingRect,
+                      color: Color.blue.opacity(0.92), fontSize: portLabelSize)
+
         // 5. 装置
         var toolRects: [UUID: CGRect] = [:]
         for item in data.tools {
@@ -1120,6 +1186,23 @@ struct FloorGridView: View {
             let lamp = Path(ellipseIn: CGRect(x: rect.maxX - r * 2 - cs * 0.1, y: rect.minY + cs * 0.1, width: r * 2, height: r * 2))
             context.fill(lamp, with: .color(item.lamp))
             context.stroke(lamp, with: .color(item.lamp == FloorDrawData.idleLamp ? Color.gray : Color.white), lineWidth: 1)
+
+            // 工程順バッジ（左下。β1 実機FB対応）：番号は常時、工程名はズームが十分なときだけ併記し、
+            // 引いた表示では番号だけにして邪魔にならないようにする
+            if let step = item.stepRank, let process = item.process {
+                let br = max(cs * 0.30, 6)
+                let badgeCenter = CGPoint(x: rect.minX + br + cs * 0.05, y: rect.maxY - br - cs * 0.05)
+                let badge = Path(ellipseIn: CGRect(x: badgeCenter.x - br, y: badgeCenter.y - br, width: br * 2, height: br * 2))
+                context.fill(badge, with: .color(accent))
+                context.stroke(badge, with: .color(Color.white), lineWidth: 1.2)
+                context.draw(Text("\(step)").font(.system(size: br * 1.02, weight: .heavy)).foregroundColor(.white),
+                             at: badgeCenter)
+                if cs >= 20 {
+                    context.draw(Text(process.shortName).font(.system(size: max(cs * 0.32, 8), weight: .bold))
+                                    .foregroundColor(Color(white: 0.22)),
+                                 at: CGPoint(x: badgeCenter.x + br + cs * 0.09, y: badgeCenter.y), anchor: .leading)
+                }
+            }
         }
 
         // 6. ボトルネック（赤の脈動枠）・選択枠
@@ -1251,6 +1334,29 @@ struct FloorGridView: View {
                             width: width * 0.28, height: height * 0.12)
         context.stroke(Path(roundedRect: handle, cornerRadius: height * 0.05),
                        with: .color(Color.brown.opacity(0.9)), lineWidth: 1)
+    }
+
+    /// 投入口／出荷口の大きなラベルプレート（施設の上に、三角のポインタつきで描く。β1 実機FB対応）
+    private func drawPortLabel(_ context: GraphicsContext, text: String, above rect: CGRect, color: Color, fontSize: CGFloat) {
+        // 幅の見積もり：全角は fontSize 相当、半角（ASCII）は 0.55 倍
+        var width: CGFloat = fontSize * 0.9
+        for ch in text {
+            width += ch.isASCII ? fontSize * 0.55 : fontSize
+        }
+        let height = fontSize * 1.5
+        let plate = CGRect(x: rect.midX - width / 2, y: max(rect.minY - height - 3, 2), width: width, height: height)
+        let path = Path(roundedRect: plate, cornerRadius: height / 2)
+        context.fill(path, with: .color(color))
+        context.stroke(path, with: .color(Color.white.opacity(0.85)), lineWidth: 1.2)
+        context.draw(Text(text).font(.system(size: fontSize, weight: .heavy)).foregroundColor(.white),
+                     at: CGPoint(x: plate.midX, y: plate.midY))
+        // 施設へつなぐ小さな三角ポインタ
+        var tri = Path()
+        tri.move(to: CGPoint(x: rect.midX - fontSize * 0.28, y: plate.maxY))
+        tri.addLine(to: CGPoint(x: rect.midX + fontSize * 0.28, y: plate.maxY))
+        tri.addLine(to: CGPoint(x: rect.midX, y: min(rect.minY, plate.maxY + fontSize * 0.4)))
+        tri.closeSubpath()
+        context.fill(tri, with: .color(color))
     }
 
     /// 右上に重ねる数字バッジ

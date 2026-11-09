@@ -1,1 +1,33 @@
-{"footprint":{"depth":2,"width":2},"knownIssues":["mov1 はヒーローショットからの切り抜きのため、研磨ヘッド基部とその影がテクスチャに含まれ、回転時に一緒に回る（gate1-log.md 参照）。本番ではプラテン単体のクリーンなテクスチャを別途生成する。","ロボットアーム（mov2 想定）は未分離。本体に含まれる。","side 方向は未制作（front のみ）。回転 90/270 でも front を使う暫定運用。","drawScale 1.28 は推定値。実機でフットプリントとの接地感を見て調整する。"],"loadPorts":2,"modelId":"C1","orientations":{"front":{"body":{"anchor":"bottomCenter","drawScale":1.28,"image":"eq_c1_front_body","pixelSize":{"height":549,"width":576}},"lamp":{"bakedTowerInBody":{"x":0.9867,"y":0.1528},"note":"本体画像にタワー（全色点灯）が焼き込み済みのため、状態表示は従来のコード描画ランプ（フットプリント矩形の右上）を正とする。本番スプライトではタワー無しで再生成し、本座標へ共通ランプ部品を重ねる。","overlay":"code-drawn"},"layers":[{"animation":{"activeWhen":"processing","periodSec":1.5,"squashY":0.6203,"type":"rotate"},"image":"eq_c1_front_mov1","name":"mov1","pivotInTexture":{"x":0.5,"y":0.5},"pixelSize":{"height":320,"width":320},"rectInBody":{"height":0.4306,"width":0.6944,"x":0.1042,"y":0.2975},"role":"platen"}]}},"status":"gate1-prototype","version":1}
+{
+  "version": 1,
+  "status": "gate3-dot",
+  "modelId": "C1",
+  "footprint": {
+    "width": 2,
+    "depth": 2
+  },
+  "loadPorts": 2,
+  "orientations": {
+    "front": {
+      "body": {
+        "image": "eq_c1_front_body",
+        "drawScale": 1.28,
+        "anchor": "bottomCenter",
+        "pixelSize": {
+          "width": 576,
+          "height": 560
+        }
+      },
+      "lamp": {
+        "overlay": "code-drawn",
+        "note": "ドット絵版ではシグナルタワーを描いていない。状態表示は従来のコード描画ランプ（フットプリント矩形の右上）を正とする。"
+      },
+      "layers": []
+    }
+  },
+  "knownIssues": [
+    "ドット絵版（第3ゲート、gate3-dot-log.md）。side 方向は未制作（front のみ）。回転 90/270 でも front を使う暫定運用。",
+    "drawScale はセミリアル版（第2ゲート）からの据え置き推定値。ドット絵シルエットの接地感・はみ出しは実機（β3）で確認する。",
+    "可動部 mov1（プラテン回転レイヤー）はドット絵版では外した（layers 空配列）。セミリアル版 mov1 はドット絵本体と質感が合わず不採用。プラテンは本体に描き込み済みで、回転アニメなしでも工程表現は成立する。ドット絵 mov1 の試作は将来課題（gate3-dot-log.md §4）。"
+  ]
+}

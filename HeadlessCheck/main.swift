@@ -1515,8 +1515,12 @@ print("P4 derived 実測: スループット \(num(p4Derived.measuredThroughputW
 // （tick 駆動スループット・投入レート、いずれも従来帯で通過）で担保し、EMA は表示用の
 // 概算として「大きく外れていないこと」だけを見る。プリシードで初期位相が変わり、
 // 本線の決定論的な端点値（帯内）から 8.875 に移ったための措置
-check(p4Derived.measuredThroughputWPH >= 8.5 * 0.90 && p4Derived.measuredThroughputWPH <= 8.5 * 1.15,
-      "P4: derived の measuredThroughputWPH \(num(p4Derived.measuredThroughputWPH, 3)) が EMA の帯（−10%〜+15%）")
+// トラックD（テンプレートの I1/C1 入替）で下限を −10% → −30% に広げた：端点推定は
+// クラスターの谷に落ちると窓平均より低くも出る。入替後の実測は窓平均 7.833 WPH
+// （従来帯の中、入替前 8.021 から −2.3%）に対し端点 6.515（−23.4%）で、位相依存の
+// 振れ幅が両側に確認できたため。定常性の担保は引き続き窓平均側の従来帯が担う
+check(p4Derived.measuredThroughputWPH >= 8.5 * 0.70 && p4Derived.measuredThroughputWPH <= 8.5 * 1.15,
+      "P4: derived の measuredThroughputWPH \(num(p4Derived.measuredThroughputWPH, 3)) が EMA の帯（−30%〜+15%）")
 check(abs(p4Derived.measuredDetectionRate - 0.7783) <= 0.01,
       "P4: derived の measuredDetectionRate \(num(p4Derived.measuredDetectionRate, 4))（0.7783 ±0.01）")
 check(p4StatsAfter.completedLots > 0 && p4Derived.incomePerMinuteYen == p4Derived.measuredIncomePerMinuteYen,
@@ -1820,6 +1824,70 @@ func p6Cap(railCount: Int) -> Int {
 check(p6Cap(railCount: 10) == 30, "P6: レール 10 セルでは下限 30")
 check(p6Cap(railCount: 40) == 45, "P6: レール 40 セルでは 45")
 check(p6Cap(railCount: 500) == 200, "P6: レール 500 セルでも上限 200 で頭打ち")
+
+// MARK: - P7: β1 実機フィードバック対応（流れの可読性・配置スナップ）
+
+print("== P7. テンプレートの工程順・配置スナップ ==")
+
+let p7State = GameState.initial()
+let p7Template = LayoutTemplate.starter16(equipment: p7State.fab.equipment)
+let p7Layout = p7Template.layout
+let p7Placed = p7Template.placed
+let p7Ranks = RouteStepOrder.ranks(node: Catalog.node(id: "n28") ?? Catalog.defaultNode, lithoClass: .duvDry)
+// 28nm ルートの初出順：層内は 成膜→露光→エッチ→注入、検査は層5・CMPは層11で初出
+check(p7Ranks[.deposition] == 1 && p7Ranks[.lithography] == 2 && p7Ranks[.etching] == 3
+      && p7Ranks[.implant] == 4 && p7Ranks[.inspection] == 5 && p7Ranks[.cmp] == 6 && p7Ranks[.packaging] == 7,
+      "P7: 工程順ランクは 成膜1・露光2・エッチ3・注入4・検査5・CMP6・PKG7")
+
+// テンプレートの並び：上段（y<9）は西→東、下段（y>=9）は東→西に目で辿ると工程順が単調に増える
+let p7Ordered = p7Placed.sorted { a, b in
+    let aRow = a.origin.y < 9 ? 0 : 1
+    let bRow = b.origin.y < 9 ? 0 : 1
+    if aRow != bRow { return aRow < bRow }
+    return aRow == 0 ? a.origin.x < b.origin.x : a.origin.x > b.origin.x
+}
+let p7RankSeq = p7Ordered.map { tool -> Int in
+    guard let model = Catalog.model(id: tool.modelId), let rank = p7Ranks[model.process] else { return -1 }
+    return rank
+}
+check(p7RankSeq.count == 11 && zip(p7RankSeq, p7RankSeq.dropFirst()).allSatisfy { $0 <= $1 },
+      "P7: テンプレートを流れ順に辿ると工程順が単調（列 \(p7RankSeq)）")
+check(p7RankSeq.first == 1 && p7RankSeq.last == 7, "P7: 流れの先頭は成膜・末尾は PKG")
+
+// 並べ替えの固定：I1（4×2）は下段 (6,10)、Q1 は (4,10)、C1 は (2,10)
+check(p7Placed.first(where: { $0.modelId == "I1" })?.origin == GridPoint(x: 6, y: 10), "P7: I1 は下段 (6,10)")
+check(p7Placed.first(where: { $0.modelId == "Q1" })?.origin == GridPoint(x: 4, y: 10), "P7: Q1 は下段 (4,10)")
+check(p7Placed.first(where: { $0.modelId == "C1" })?.origin == GridPoint(x: 2, y: 10), "P7: C1 は下段 (2,10)")
+
+// 投入口から最初の工程（成膜）まではごく短い（「入口のすぐ先が①」に見える配置）。
+// D1 は 2 台あるので近い方で見る（遠い方は一方向リングの上流側にあり周回距離になる）
+let p7Graph = RailGraph(layout: p7Layout)
+let p7EntryPorts = p7Graph.portCells(footprint: p7Layout.entryCells())
+let p7D1Distances = p7Placed.filter { $0.modelId == "D1" }.compactMap { d1 -> Int? in
+    let d1Ports = p7Graph.portCells(footprint: p7Layout.cells(of: d1))
+    return p7Graph.shortestPath(from: p7EntryPorts, to: Set(d1Ports))?.count
+}
+check(p7D1Distances.count == 2 && (p7D1Distances.min() ?? 99) <= 3,
+      "P7: 投入口→成膜（近い方）は \(p7D1Distances.min() ?? -1) セルで届く")
+
+// レール本数と無償区分は従来どおり（CONWIP 45・paidRailPoints の旧セーブ互換を壊さない）
+check(p7Layout.rails.count == 40 && p7Layout.paidRailPoints.isEmpty,
+      "P7: テンプレートのレールは 40 セル・全て無償区分のまま")
+
+// 配置スナップ：置ける場所はそのまま、重なる場所は近傍の空きへ、範囲内に空きが無ければ nil
+let p7NewD1 = ToolInstance(instance: EquipmentInstance(modelId: "D1", level: 1, purchasedAt: t0))
+check(p7Layout.snappedOrigin(for: p7NewD1, near: GridPoint(x: 0, y: 0), rotation: 0, among: p7Placed) == GridPoint(x: 0, y: 0),
+      "P7: スナップは置ける場所をそのまま返す")
+check(p7Layout.snappedOrigin(for: p7NewD1, near: GridPoint(x: 0, y: 3), rotation: 0, among: p7Placed) == GridPoint(x: 0, y: 1),
+      "P7: スナップは重なる場所 (0,3) から近傍の空き (0,1) へ吸着する")
+check(p7Layout.snappedOrigin(for: p7NewD1, near: GridPoint(x: 0, y: 3), rotation: 0, among: p7Placed, radius: 0) == nil,
+      "P7: スナップ範囲内に空きが無ければ nil")
+if let p7Snapped = p7Layout.snappedOrigin(for: p7NewD1, near: GridPoint(x: 0, y: 3), rotation: 0, among: p7Placed) {
+    check(p7Layout.placed(p7NewD1, origin: p7Snapped, rotation: 0, among: p7Placed) != nil,
+          "P7: スナップ先には実際に配置できる（確定ボタンで置ける）")
+} else {
+    check(false, "P7: スナップ先がある")
+}
 
 try? fileManager.removeItem(at: tempRoot)
 

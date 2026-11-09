@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "status": "gate2-body-only",
+  "status": "gate3-dot",
   "modelId": "E1",
   "footprint": {
     "width": 2,
@@ -15,18 +15,19 @@
         "anchor": "bottomCenter",
         "pixelSize": {
           "width": 576,
-          "height": 763
+          "height": 760
         }
       },
       "lamp": {
         "overlay": "code-drawn",
-        "note": "生成時にシグナルタワーを描かせていない。状態表示は従来のコード描画ランプ（フットプリント矩形の右上）を正とする。"
+        "note": "ドット絵版ではシグナルタワーを描いていない。状態表示は従来のコード描画ランプ（フットプリント矩形の右上）を正とする。"
       },
       "layers": []
     }
   },
   "knownIssues": [
-    "排気ダクト含め背が高い構図。drawScale 1.20 は推定値。実機で調整する。",
-    "side 方向は未制作（front のみ）。"
+    "ドット絵版（第3ゲート、gate3-dot-log.md）。side 方向は未制作（front のみ）。回転 90/270 でも front を使う暫定運用。",
+    "drawScale はセミリアル版（第2ゲート）からの据え置き推定値。ドット絵シルエットの接地感・はみ出しは実機（β3）で確認する。",
+    "排気ダクト含め背が高い構図（セミリアル版とほぼ同じ縦横比）。上方向のオーバードローを実機で確認する。"
   ]
 }
