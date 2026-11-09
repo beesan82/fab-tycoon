@@ -93,6 +93,10 @@ struct SaveManager {
                 // v2 → v3：補助金の時刻をゲーム内時間基準から実時刻へ移す
                 Engine.migrateSubsidyTimeline(state: &state, now: Date())
             }
+            if originalVersion < 4 {
+                // v3 → v4：フロアをテンプレートで再構成し、シミュレーション状態を作る（§7.2）
+                Engine.migrateToLayout(state: &state)
+            }
             state.schemaVersion = GameState.currentSchemaVersion
         }
         return state

@@ -38,6 +38,7 @@ HeadlessCheck/main.swift    エンジンのヘッドレス検証（Xcode ター�
 ```sh
 swiftc FabTycoon/Models/Catalog.swift FabTycoon/Models/GameState.swift \
        FabTycoon/Models/Engine.swift FabTycoon/Models/MoneyFormat.swift \
+       FabTycoon/Models/Simulation.swift FabTycoon/Models/Layout.swift FabTycoon/Models/OfflineProgress.swift \
        FabTycoon/Persistence/SaveManager.swift HeadlessCheck/main.swift -o /tmp/fab-headless
 /tmp/fab-headless   # 最後に "HEADLESS CHECK PASSED" が出れば成功、失敗時は exit 1
 ```

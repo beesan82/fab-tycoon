@@ -998,6 +998,72 @@ enum Engine {
         }
     }
 
+    /// v3 → v4：フロアをテンプレートで再構成する（設計書 §7.2）。
+    /// 設置済み装置はテンプレート → 貪欲配置 → 倉庫の順で置き、Lv・購入日・id は保持する。
+    /// 増床回数ぶんの区画は無償付与する。仕掛かりの端数（wipWafers）と発生中の異常は破棄する
+    static func migrateToLayout(state: inout GameState) {
+        let template = LayoutTemplate.starter16(equipment: state.fab.equipment)
+        var layout = template.layout
+        var placed = template.placed
+        var stored = template.stored
+
+        // 増床回数ぶんの区画を無償付与する。6×6 の区画グリッドを読み順（y が外側、x が内側）で走査し、
+        // 追加できる区画（既存区画と辺で接する）を順に足す。「右 → 下」の順に広げる近似として読み順を使う
+        var granted = 0
+        while granted < state.fab.expansionCount {
+            var added = false
+            scan: for y in 0...FloorLayout.maxParcel {
+                for x in 0...FloorLayout.maxParcel {
+                    guard granted < state.fab.expansionCount else { break scan }
+                    let coord = ParcelCoord(x: x, y: y)
+                    if layout.canAddParcel(coord) {
+                        layout.addParcel(coord)
+                        granted += 1
+                        added = true
+                    }
+                }
+            }
+            if !added { break }   // 6×6 を使い切った
+        }
+
+        // 区画が増えたら、倉庫行きになった装置を y → x の走査順で最初に置ける空きへ（回転 0）
+        if granted > 0 && !stored.isEmpty {
+            let maxX = ((layout.parcels.map { $0.x }.max() ?? 0) + 1) * FloorLayout.parcelSize
+            let maxY = ((layout.parcels.map { $0.y }.max() ?? 0) + 1) * FloorLayout.parcelSize
+            var remaining: [ToolInstance] = []
+            for tool in stored {
+                var result: ToolInstance?
+                scan: for y in 0..<maxY {
+                    for x in 0..<maxX {
+                        if let candidate = layout.placed(tool, origin: GridPoint(x: x, y: y), rotation: 0, among: placed) {
+                            result = candidate
+                            break scan
+                        }
+                    }
+                }
+                if let result = result {
+                    placed.append(result)
+                } else {
+                    remaining.append(tool)
+                }
+            }
+            stored = remaining
+        }
+
+        func instance(_ tool: ToolInstance) -> EquipmentInstance {
+            EquipmentInstance(id: tool.id, modelId: tool.modelId, level: tool.level, purchasedAt: tool.purchasedAt)
+        }
+        state.fab.layout = layout
+        state.fab.placed = placed
+        state.fab.equipment = placed.map(instance)
+        state.fab.storedEquipment += stored.map(instance)
+        // 移行時点ではロットは流れていない（wipWafers の端数は破棄、§7.2）。
+        // SimCore の init は state を読むので、layout・placed を設定した後に作る
+        state.fab.sim = SimCore.freshSnapshot(state: state, tools: placed, layout: layout)
+        // 発生中の異常は装置への紐づけが無いため解除する（nextExcursionEarliestGameHours は据え置き）
+        state.activeExcursion = nil
+    }
+
     // 緊急救済枠：工程の装置がなくなりラインが止まり、買い戻す資金もない詰み状態からの救済
 
     static let emergencyMarginRate = 0.2   // 緊急交付の余裕分（最安機種価格の20%）

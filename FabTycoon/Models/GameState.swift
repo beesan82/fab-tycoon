@@ -1,7 +1,7 @@
 import Foundation
 
 struct GameState: Codable, Equatable {
-    static let currentSchemaVersion = 3
+    static let currentSchemaVersion = 4
 
     var schemaVersion: Int
     var cashYen: Double
@@ -60,22 +60,23 @@ struct GameState: Codable, Equatable {
                 equipment.append(EquipmentInstance(modelId: modelId, level: 1, purchasedAt: now))
             }
         }
-        return GameState(
+        let fab = Fab(
+            id: UUID(),
+            name: "第1ファブ",
+            currentNodeId: Catalog.startingNodeId,
+            slots: 12,
+            equipment: equipment,
+            wipWafers: 0,
+            inventoryChips: 0,
+            autoSellEnabled: true,
+            running: true,
+            storedEquipment: [],
+            expansionCount: 0
+        )
+        var state = GameState(
             schemaVersion: currentSchemaVersion,
             cashYen: 3_000_000_000,
-            fab: Fab(
-                id: UUID(),
-                name: "第1ファブ",
-                currentNodeId: Catalog.startingNodeId,
-                slots: 12,
-                equipment: equipment,
-                wipWafers: 0,
-                inventoryChips: 0,
-                autoSellEnabled: true,
-                running: true,
-                storedEquipment: [],
-                expansionCount: 0
-            ),
+            fab: fab,
             market: MarketState(),
             learningWafers: [:],
             stats: Stats(),
@@ -86,6 +87,13 @@ struct GameState: Codable, Equatable {
             // 初期装置は累計設備投資に含めない
             subsidy: SubsidyState()
         )
+        // v4：初期装備を 16×16 テンプレート（§2.6）に配置し、ロットの流れていないシミュレーションを持たせる。
+        // SimCore の init は state を読むので、layout・placed を先に設定してから sim を作る
+        let template = LayoutTemplate.starter16(equipment: equipment)
+        state.fab.layout = template.layout
+        state.fab.placed = template.placed
+        state.fab.sim = SimCore.freshSnapshot(state: state, tools: template.placed, layout: template.layout)
+        return state
     }
 }
 
@@ -124,12 +132,15 @@ struct ActiveExcursion: Codable, Equatable {
     var hintsRevealed: Int = 0
     /// 対策を外した回数
     var wrongGuesses: Int = 0
+    /// 原因装置（v4 で追加。nil なら工程全体＝互換）
+    var causeToolId: UUID? = nil
 
     enum CodingKeys: String, CodingKey {
         case specId
         case startedAtGameHours
         case hintsRevealed
         case wrongGuesses
+        case causeToolId
     }
 }
 
@@ -142,7 +153,22 @@ extension ActiveExcursion {
         startedAtGameHours = try container.decodeIfPresent(Double.self, forKey: .startedAtGameHours) ?? 0
         hintsRevealed = try container.decodeIfPresent(Int.self, forKey: .hintsRevealed) ?? 0
         wrongGuesses = try container.decodeIfPresent(Int.self, forKey: .wrongGuesses) ?? 0
+        causeToolId = try container.decodeIfPresent(UUID.self, forKey: .causeToolId) ?? nil
     }
+}
+
+/// ノード移行の方式（v4。P4 の排出モード用）
+enum NodeSwitchMode: String, Codable, Equatable {
+    /// 仕掛かりを流し切ってから切り替える
+    case drain
+    /// 即時に切り替える
+    case immediate
+}
+
+/// 予約中のノード移行（v4）
+struct NodeSwitchState: Codable, Equatable {
+    var pendingNodeId: String? = nil
+    var mode: NodeSwitchMode = .drain
 }
 
 /// 研究の進行状況
@@ -231,6 +257,14 @@ struct Fab: Codable, Equatable, Identifiable {
     var storedEquipment: [EquipmentInstance]
     /// 増床回数
     var expansionCount: Int
+    /// 配置済み装置（v4 で追加。equipment はこれと同じ装置を EquipmentInstance で持つ：当面の Engine 互換）
+    var placed: [ToolInstance] = []
+    /// 区画・レール・ストッカー・投入口・出荷口（v4 で追加）
+    var layout: FloorLayout? = nil
+    /// シミュレーション状態（v4 で追加）
+    var sim: SimSnapshot? = nil
+    /// 予約中のノード移行（v4 で追加）
+    var nodeSwitch: NodeSwitchState = NodeSwitchState()
 
     /// 倉庫の装置は枠を消費しない
     var freeSlots: Int { max(0, slots - equipment.count) }
@@ -247,6 +281,10 @@ struct Fab: Codable, Equatable, Identifiable {
         case running
         case storedEquipment
         case expansionCount
+        case placed
+        case layout
+        case sim
+        case nodeSwitch
     }
 }
 
@@ -267,6 +305,11 @@ extension Fab {
         storedEquipment = try container.decodeIfPresent([EquipmentInstance].self, forKey: .storedEquipment) ?? []
         // 増床回数導入前のセーブは、初期12枠からの増分（1回 +4枠）で推定する
         expansionCount = try container.decodeIfPresent(Int.self, forKey: .expansionCount) ?? max(0, (slots - 12) / 4)
+        // v3 以前のセーブには無い。Engine.migrateToLayout が埋める
+        placed = try container.decodeIfPresent([ToolInstance].self, forKey: .placed) ?? []
+        layout = try container.decodeIfPresent(FloorLayout.self, forKey: .layout) ?? nil
+        sim = try container.decodeIfPresent(SimSnapshot.self, forKey: .sim) ?? nil
+        nodeSwitch = try container.decodeIfPresent(NodeSwitchState.self, forKey: .nodeSwitch) ?? NodeSwitchState()
     }
 }
 
@@ -315,6 +358,14 @@ struct Stats: Codable, Equatable {
     var readGlossaryIds: Set<String> = []
     /// 解決した歩留まり異常の件数
     var excursionsResolved: Int = 0
+    /// 出荷したロット数（v4 で追加）
+    var completedLots: Int = 0
+    /// 廃棄したロット数（v4 で追加）
+    var scrappedLots: Int = 0
+    /// 敷設したレールの累計セル数（v4 で追加）
+    var railCellsBuilt: Int = 0
+    /// 購入した区画数（v4 で追加）
+    var parcelsBought: Int = 0
 
     enum CodingKeys: String, CodingKey {
         case totalRevenueYen
@@ -331,6 +382,10 @@ struct Stats: Codable, Equatable {
         case achievedMilestones
         case readGlossaryIds
         case excursionsResolved
+        case completedLots
+        case scrappedLots
+        case railCellsBuilt
+        case parcelsBought
     }
 }
 
@@ -353,5 +408,9 @@ extension Stats {
         achievedMilestones = try container.decodeIfPresent([String: Double].self, forKey: .achievedMilestones) ?? defaults.achievedMilestones
         readGlossaryIds = try container.decodeIfPresent(Set<String>.self, forKey: .readGlossaryIds) ?? defaults.readGlossaryIds
         excursionsResolved = try container.decodeIfPresent(Int.self, forKey: .excursionsResolved) ?? defaults.excursionsResolved
+        completedLots = try container.decodeIfPresent(Int.self, forKey: .completedLots) ?? defaults.completedLots
+        scrappedLots = try container.decodeIfPresent(Int.self, forKey: .scrappedLots) ?? defaults.scrappedLots
+        railCellsBuilt = try container.decodeIfPresent(Int.self, forKey: .railCellsBuilt) ?? defaults.railCellsBuilt
+        parcelsBought = try container.decodeIfPresent(Int.self, forKey: .parcelsBought) ?? defaults.parcelsBought
     }
 }

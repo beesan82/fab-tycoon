@@ -12,6 +12,7 @@ import Foundation
 // その中からスコア選択し、出発ではストッカー経由を往路 ＋ 取り扱い ＋ 最良候補の待ちで比較して混雑時の圧力逃がしにする。
 // 到着時の収容は ポート →（処理済みポートがある場合はドライブスルー）→ 待つ。
 // layout が nil なら従来の仮想搬送のまま（P1 の検証値はこの分岐に依存する）。
+// P3: SimSnapshot でセーブ（Fab.sim）と相互変換する。EMA 等の観測専用フィールドはシミュレーションの判断に使わない。
 
 // MARK: - エンティティ
 
@@ -253,7 +254,7 @@ struct LotSettlement: Codable, Equatable {
     var netYen: Double
 }
 
-struct SimStats: Equatable {
+struct SimStats: Codable, Equatable {
     /// 学習 W への加算累計（現行 learningWafers に対応）
     var releasedWafers: Double = 0
     var releasedLots: Int = 0
@@ -267,6 +268,28 @@ struct SimStats: Equatable {
     var sumNetYen: Double = 0
     /// 先頭16件だけ保持
     var firstCompletions: [LotSettlement] = []
+    /// 総売上・原価・市場不良ペナルティの累計（P3。オフライン精算で Stats へ反映する観測値）
+    var sumGrossYen: Double = 0
+    var sumCogsYen: Double = 0
+    var sumPenaltyYen: Double = 0
+}
+
+/// SimCore のセーブ用スナップショット（P3、§7.1 の Fab.sim）。lots は投入順
+struct SimSnapshot: Codable, Equatable {
+    var tools: [ToolInstance]
+    var lots: [Lot]
+    var stocker: Stocker
+    var currentGameMin: Double
+    var lastProgressGameMin: Double
+    var pendingMinutes: Double
+    var wipCap: Int
+    var nextLotSerial: Int
+    var stats: SimStats
+    var throughputEMA: Double
+    var yieldEMA: Double
+    var detectionEMA: Double
+    var incomeEMA: Double
+    var cycleTimeEMA: Double
 }
 
 // MARK: - SimCore
@@ -292,7 +315,26 @@ struct SimCore {
     var settlementPriceYen: Double
     var wipCap: Int = 200
     var stats = SimStats()
-    private var nextLotSerial: Int = 0
+    var nextLotSerial: Int = 0
+
+    // MARK: 観測専用（P3。シミュレーションの判断には使わない）
+
+    /// 実時間から換算したゲーム分の端数繰越（1 ステップ未満の残り）
+    var pendingMinutes: Double = 0
+    /// 完了ウェハ/時（時定数 24 ゲーム時間）
+    var throughputEMA: Double = 0
+    /// 完了ロットの歩留まり（ロット単位、alpha 0.1）
+    var yieldEMA: Double = 0
+    /// 完了ロットの検出率（ロット単位、alpha 0.1）
+    var detectionEMA: Double = 0
+    /// 純収入/時（時定数 24 ゲーム時間）
+    var incomeEMA: Double = 0
+    /// 投入から出荷までのゲーム分（ロット単位、alpha 0.1）
+    var cycleTimeEMA: Double = 0
+    /// ロット単位の EMA の重み
+    static let lotEMAAlpha: Double = 0.1
+    /// 時間 EMA（throughputEMA・incomeEMA）の時定数（ゲーム分）
+    static let rateEMATimeConstantGameMin: Double = 1_440
 
     // MARK: レール搬送（P2）
 
@@ -354,6 +396,53 @@ struct SimCore {
             stockerPortCells = graph.portCells(footprint: layout.stockerCells())
             shippingPortCells = graph.portCells(footprint: layout.shippingCells())
         }
+    }
+
+    // MARK: スナップショット（P3、§7.1）
+
+    /// セーブから復元する。レイアウトは state.fab.layout、装置はスナップショットのもの。
+    /// 経路キャッシュ等の派生値は init で作り直す（レイアウトから決定的に決まるので結果は変わらない）
+    init(state: GameState, snapshot: SimSnapshot) {
+        self.init(state: state, tools: snapshot.tools, layout: state.fab.layout)
+        lots = Dictionary(snapshot.lots.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+        lotReleaseOrder = snapshot.lots.map { $0.id }
+        stocker = snapshot.stocker
+        currentGameMin = snapshot.currentGameMin
+        lastProgressGameMin = snapshot.lastProgressGameMin
+        pendingMinutes = snapshot.pendingMinutes
+        wipCap = snapshot.wipCap
+        nextLotSerial = snapshot.nextLotSerial
+        stats = snapshot.stats
+        throughputEMA = snapshot.throughputEMA
+        yieldEMA = snapshot.yieldEMA
+        detectionEMA = snapshot.detectionEMA
+        incomeEMA = snapshot.incomeEMA
+        cycleTimeEMA = snapshot.cycleTimeEMA
+    }
+
+    /// 現在の状態のスナップショット（lots は投入順）
+    func snapshot() -> SimSnapshot {
+        SimSnapshot(
+            tools: tools,
+            lots: lotReleaseOrder.compactMap { lots[$0] },
+            stocker: stocker,
+            currentGameMin: currentGameMin,
+            lastProgressGameMin: lastProgressGameMin,
+            pendingMinutes: pendingMinutes,
+            wipCap: wipCap,
+            nextLotSerial: nextLotSerial,
+            stats: stats,
+            throughputEMA: throughputEMA,
+            yieldEMA: yieldEMA,
+            detectionEMA: detectionEMA,
+            incomeEMA: incomeEMA,
+            cycleTimeEMA: cycleTimeEMA
+        )
+    }
+
+    /// ロットの流れていない初期スナップショット（新規ゲーム・v3 → v4 移行用）
+    static func freshSnapshot(state: GameState, tools: [ToolInstance], layout: FloorLayout?) -> SimSnapshot {
+        SimCore(state: state, tools: tools, layout: layout).snapshot()
     }
 
     /// 1パスの処理時間（ゲーム分）。§1.3
@@ -454,6 +543,9 @@ struct SimCore {
     mutating func step() {
         let models = tools.map { Catalog.model(id: $0.modelId) }
         var routes: [String: RouteInfo] = [:]
+        // 観測 EMA 用（ステップ内の増分を測る）
+        let completedWafersBefore = stats.completedWafers
+        let netYenBefore = stats.sumNetYen
 
         // 0. このステップ開始時点の稼働フラグ
         let busy = tools.map { tool in tool.ports.contains { $0.state == .processing } }
@@ -511,6 +603,11 @@ struct SimCore {
                 }
             }
         }
+
+        // 8. 観測 EMA（スループット・純収入。1ステップの増分 × 60 を時/単位に直す）
+        let rateAlpha = 1 - exp(-1 / Self.rateEMATimeConstantGameMin)
+        throughputEMA += ((stats.completedWafers - completedWafersBefore) * 60 - throughputEMA) * rateAlpha
+        incomeEMA += ((stats.sumNetYen - netYenBefore) * 60 - incomeEMA) * rateAlpha
     }
 
     // MARK: 仮想搬送（P1）
@@ -1121,8 +1218,23 @@ struct SimCore {
         stats.sumDetectedDefectChips += r.detectedDefectChips
         stats.sumShippedDefectChips += r.shippedDefectChips
         stats.sumNetYen += r.netYen
+        stats.sumGrossYen += r.grossYen
+        stats.sumCogsYen += r.cogsYen
+        stats.sumPenaltyYen += r.penaltyYen
         if stats.firstCompletions.count < Self.firstCompletionsLimit {
             stats.firstCompletions.append(settlement)
+        }
+
+        // 観測 EMA（ロット単位）。最初の完了ロットでは 0 からのバイアスを避けてその値で初期化する
+        let cycleTime = currentGameMin - lot.releasedAtGameMin
+        if stats.completedLots == 1 {
+            yieldEMA = lotYield
+            detectionEMA = detectionRate
+            cycleTimeEMA = cycleTime
+        } else {
+            yieldEMA += (lotYield - yieldEMA) * Self.lotEMAAlpha
+            detectionEMA += (detectionRate - detectionEMA) * Self.lotEMAAlpha
+            cycleTimeEMA += (cycleTime - cycleTimeEMA) * Self.lotEMAAlpha
         }
     }
 }
