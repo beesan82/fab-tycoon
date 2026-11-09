@@ -1,13 +1,11 @@
 import Foundation
 import SwiftUI
 
-enum AppTab: Hashable {
-    case line
+enum BuildDrawerTab: Hashable {
     case shop
-    case products
-    case research
-    case glossary
-    case stats
+    case storage
+    case rail
+    case remove
 }
 
 /// ゲーム状態の保持・時間進行・セーブを担う。メインスレッドからのみ使う。
@@ -15,9 +13,12 @@ final class GameStore: ObservableObject {
     @Published var state: GameState
     @Published private(set) var derived: DerivedState
     @Published var offlineReport: OfflineReport?
-    @Published var selectedTab: AppTab = .line
     /// ショップの工程フィルタ（nil = 全て）
     @Published var shopProcessFilter: ProcessType?
+    /// マップ上で選択中の装置
+    @Published var selectedToolId: UUID?
+    @Published var buildDrawerTab: BuildDrawerTab = .shop
+    @Published var railMode: Bool = false
 
     static let tickInterval: TimeInterval = 0.25
     static let maxTickDelta: TimeInterval = 2
@@ -160,6 +161,13 @@ final class GameStore: ObservableObject {
     @discardableResult
     func buy(_ modelId: String) -> Bool {
         let ok = Engine.buy(state: &state, modelId: modelId)
+        refresh()
+        return ok
+    }
+
+    @discardableResult
+    func buyAndPlace(modelId: String, origin: GridPoint, rotation: Int) -> Bool {
+        let ok = Engine.buyAndPlace(state: &state, modelId: modelId, origin: origin, rotation: rotation)
         refresh()
         return ok
     }
@@ -323,15 +331,15 @@ final class GameStore: ObservableObject {
         return ok
     }
 
-    /// 研究タブを開いたら完了バッジを消す
+    /// 研究棟を開いたら完了バッジを消す
     func markResearchCompletionSeen() {
         guard state.research.hasUnseenCompletion else { return }
         state.research.hasUnseenCompletion = false
     }
 
-    func openShop(for process: ProcessType?) {
+    func openBuild(process: ProcessType?) {
         shopProcessFilter = process
-        selectedTab = .shop
+        buildDrawerTab = .shop
     }
 
     func dismissOfflineReport() {
@@ -354,6 +362,16 @@ final class GameStore: ObservableObject {
 
     func dismissScaleNotice() {
         state.didShowScaleChangeNotice = true
+        save()
+    }
+
+    /// 旧セーブを読み込み、マップ中心化のようこそカードをまだ閉じていない
+    var shouldShowWelcomeCard: Bool {
+        loadedOriginalVersion != nil && !state.didShowMapRebuildNotice
+    }
+
+    func dismissWelcomeCard() {
+        state.didShowMapRebuildNotice = true
         save()
     }
 

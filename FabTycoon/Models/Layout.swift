@@ -320,9 +320,12 @@ extension FloorLayout {
         if let paid = try container.decodeIfPresent(Set<GridPoint>.self, forKey: .paidRailPoints) {
             paidRailPoints = paid
         } else {
-            // β1 セーブには購入記録が無いため、初期テンプレートのレール位置と一致しないものを
-            // プレイヤーが購入したレールとみなす（テンプレ位置の付け替えは記録が無いので無償扱いになる割り切り）
-            paidRailPoints = Set(rails.map { $0.point }).subtracting(LayoutTemplate.templateRailPoints)
+            // β1 セーブには購入記録が無いため、β1 当時の初期テンプレート（リング型）のレール位置と
+            // 一致しないものをプレイヤーが購入したレールとみなす（テンプレ位置の付け替えは記録が
+            // 無いので無償扱いになる割り切り）。照合に使うのは現行テンプレートではなく
+            // LayoutTemplate.legacyTemplateRailPoints（β1〜β3 のリング位置で固定）：
+            // テンプレートを差し替えても旧セーブの復元結果が変わらないようにするため
+            paidRailPoints = Set(rails.map { $0.point }).subtracting(LayoutTemplate.legacyTemplateRailPoints)
         }
     }
 }
@@ -613,62 +616,100 @@ enum RouteStepOrder {
 // MARK: - デフォルト配置テンプレート（§2.6）
 
 enum LayoutTemplate {
-    /// 初期テンプレートのレールセルの位置集合（旧セーブの購入済み判定に使う。レール配置は装備に依存しない）
+    /// 現行テンプレート（蛇行型）のレールセルの位置集合（レール配置は装備に依存しない）
     static var templateRailPoints: Set<GridPoint> {
         Set(starter16(equipment: []).layout.rails.map { $0.point })
     }
 
-    /// 初期装備（L1×2, D1×2, E1×3, I1, C1, Q1, P1）の 16×16 テンプレート。
-    /// 1本の時計回りリング（上段 y=5 を東へ、右端 x=15 を南へ、下段 y=9 を西へ、左端 x=0 を北へ）に
-    /// 上段・下段の装置、上段直下のストッカー、下段の投入口、右端寄りの出荷口がポートで接する。
-    /// 装置はリングの流れ順に並べる：上段を西から東へ 成膜 → 露光、右端を回って下段を東から西へ
-    /// エッチング → 注入 → 検査 → CMP → パッケージ。これはルート（RouteBuilder.routeSteps）で
-    /// 各工程が最初に現れる順と一致させてあり、フロアを目で辿れば工程順に読める（β1 実機FB対応）。
-    /// 28nm では検査が層 5 で、CMP が層 11 で初出するため、この順になる。
-    /// 旧並びは下段が エッチング → CMP → 注入 → 検査 で、ルート順と 2 箇所で逆転していたため並べ替えた。
-    /// 工程間の移動がリングを周回せず短区間で済むようにする。
-    /// ストッカーは西端の環（左端 x=0 の戻りレールと南西角）に交通を集めないよう内側の上段直下に置き、
-    /// 両脇の北向きスパーから上段へ合流させる。西スパーから成膜のポートへ 2 セルで補充してバッファとして効かせる。
-    /// 投入口は下段の西寄り（y=9 に接する）で、左端を北上して成膜へ向かう。
+    /// β1〜β3 の初期テンプレート（リング型）のレールセルの位置集合（40 セル、スパー 2 セル含む）。
+    /// 旧セーブ（paidRailPoints を欠く β1 セーブ）の購入済み判定専用に、位置を固定して保持する。
+    /// 現行テンプレートを差し替えても、この集合は絶対に変更しないこと（旧セーブの復元結果が変わる）。
+    /// リング形状：上段 y=5 を x=0→15、右端 x=15 を y=6→9、下段 y=9 を x=14→0、左端 x=0 を y=8→6、
+    /// ストッカー両脇のスパー (3,6)・(6,6)
+    static let legacyTemplateRailPoints: Set<GridPoint> = {
+        var points = Set<GridPoint>()
+        for x in 0...15 { points.insert(GridPoint(x: x, y: 5)) }
+        for y in 6...9 { points.insert(GridPoint(x: 15, y: y)) }
+        for x in 0...14 { points.insert(GridPoint(x: x, y: 9)) }
+        for y in 6...8 { points.insert(GridPoint(x: 0, y: y)) }
+        points.insert(GridPoint(x: 3, y: 6))
+        points.insert(GridPoint(x: 6, y: 6))
+        return points
+    }()
+
+    /// 初期装備（L1×2, D1×2, E1×3, I1, C1, Q1, P1）の 16×16 テンプレート（トラックE：蛇行型）。
+    /// β1〜β3 のリング型は「流れが読めない（くるくる回ってるだけに見える）」という実機FBへの対応で、
+    /// S 字に蛇行する川型レイアウトへ組み替えた。トポロジーは従来どおり 1 本の有向循環路のまま
+    /// （一方向・1セル1ロット搬送では循環路が無いと上流へ戻るロットと正面衝突して凍結するため）で、
+    /// 見た目だけを「輪」から「川」に変えている。構成は本流 35 セル＋戻りレーン 19 セルの計 54 セル：
+    /// - 第1レーン（y=5、東向き）：北側に D1 (0,3)・(2,3) と L1 (4,2)・(8,2) を西から東へ並べ、
+    ///   ポートは全て y=5 に接する
+    /// - 東端 (11,5) で南へ折れ、第2レーン（y=8、西向き）：南側に E1×3 → I1（東から西へ工程順）
+    /// - 西端 (1,8) で南へ折れ、第3レーン（y=11、東向き）：南側に Q1 → C1 → P1（西から東へ工程順）
+    /// - 第3レーン東端 (8,11) から南端 y=14 を西へ、西端 x=0 を北上して第1レーン始端 (0,5) へ戻る
+    ///   細い戻りレーン（再入＝次層の成膜へ戻る循環専用。装置は接しない）
+    /// 工程の並び順は RouteStepOrder（ルート定義から算出：①成膜 ②露光 ③エッチング ④注入
+    /// ⑤検査 ⑥CMP ⑦PKG）を正とし、レーンを目で辿れば工程順に読める。28nm では検査が層 5、
+    /// CMP が層 11 で初出するためこの順になる。
+    /// レールが 40 → 54 セルに増えたため、運転点（operatingWipCap = レール数 + 5）は 45 → 59 に移る。
+    /// 投入口は第1レーン西端の直下 (1,6) で、ポート (1,5) がそのまま成膜 D1 のポートと重なり、
+    /// 「入口のすぐ先が①成膜」に見える。ストッカー (3,6) は第1・第2レーンの間に置き両レーンに
+    /// ポートを持たせる。出荷口は第3レーン東端の北 (9,11) で、ポートは (8,11)。
     /// 固定設備の位置は §2.6 の概念図から精密化した
     static func starter16(equipment: [EquipmentInstance]) -> (layout: FloorLayout, placed: [ToolInstance], stored: [ToolInstance]) {
         var rails: [RailCell] = []
         func rail(_ x: Int, _ y: Int, _ direction: RailDirection, _ kind: RailCellKind) {
             rails.append(RailCell(point: GridPoint(x: x, y: y), direction: direction, kind: kind))
         }
-        for x in 0...14 { rail(x, 5, .east, x == 0 ? .corner : .straight) }
-        rail(15, 5, .south, .corner)
-        for y in 6...8 { rail(15, y, .south, .straight) }
-        rail(15, 9, .west, .corner)
-        for x in stride(from: 14, through: 1, by: -1) { rail(x, 9, .west, .straight) }
-        rail(0, 9, .north, .corner)
-        for y in stride(from: 8, through: 6, by: -1) { rail(0, y, .north, .straight) }
-        // ストッカー両脇のスパー（上段へ北向きに合流する払い出し専用の短いレール）
-        rail(3, 6, .north, .straight)
-        rail(6, 6, .north, .straight)
+        // 第1レーン（y=5、東向き）。(0,5) は戻りレーンから北上して入る角、(11,5) は南への折れ角
+        rail(0, 5, .east, .corner)
+        for x in 1...10 { rail(x, 5, .east, .straight) }
+        rail(11, 5, .south, .corner)
+        // 東端の折れ（南下）
+        rail(11, 6, .south, .straight)
+        rail(11, 7, .south, .straight)
+        // 第2レーン（y=8、西向き）。(11,8) は西への折れ角、(1,8) は南への折れ角
+        rail(11, 8, .west, .corner)
+        for x in stride(from: 10, through: 2, by: -1) { rail(x, 8, .west, .straight) }
+        rail(1, 8, .south, .corner)
+        // 西端の折れ（南下）
+        rail(1, 9, .south, .straight)
+        rail(1, 10, .south, .straight)
+        // 第3レーン（y=11、東向き）。(1,11) は東への折れ角、(8,11) は戻りレーンへの折れ角
+        rail(1, 11, .east, .corner)
+        for x in 2...7 { rail(x, 11, .east, .straight) }
+        rail(8, 11, .south, .corner)
+        // 戻りレーン：第3レーン東端から南下し、南端 y=14 を西へ、西端 x=0 を北上して (0,5) へ戻る
+        rail(8, 12, .south, .straight)
+        rail(8, 13, .south, .straight)
+        rail(8, 14, .west, .corner)
+        for x in stride(from: 7, through: 1, by: -1) { rail(x, 14, .west, .straight) }
+        rail(0, 14, .north, .corner)
+        for y in stride(from: 13, through: 7, by: -1) { rail(0, y, .north, .straight) }
+        rail(0, 6, .north, .straight)
 
         let layout = FloorLayout(
             parcels: FloorLayout.initialParcels,
             rails: rails,
-            // ストッカー (4,6)〜(5,7)：ポートセル (4,5),(5,5)（上段）,(3,6),(6,6)（スパー）。
-            // 西端の環から離し、西スパー (3,6) → (3,5) で成膜 D1 のポートへ 2 セルで補充する
-            stocker: Stocker(origin: GridPoint(x: 4, y: 6)),
-            // 投入口 (3,7)〜(3,8)：ポートセル (3,9)・(3,6)（西スパーと共有）
-            entry: EntryPort(origin: GridPoint(x: 3, y: 7)),
-            shipping: ShippingPort(origin: GridPoint(x: 14, y: 6))
+            // ストッカー (3,6)〜(4,7)：ポートセル (3,5),(4,5)（第1レーン）,(3,8),(4,8)（第2レーン）
+            stocker: Stocker(origin: GridPoint(x: 3, y: 6)),
+            // 投入口 (1,6)〜(1,7)：ポートセル (1,5)（第1レーン＝成膜ポートと共有）,(0,6),(0,7)（戻りレーン）,(1,8)（第2レーン）
+            entry: EntryPort(origin: GridPoint(x: 1, y: 6)),
+            // 出荷口 (9,11)〜(9,12)：ポートセル (8,11)（第3レーン東端）
+            shipping: ShippingPort(origin: GridPoint(x: 9, y: 11))
         )
 
-        // 装置スロット（modelId ごとに出現順に割り当て、回転 0）。リングの流れ順：
-        // 上段は西→東（西端に D1、その東隣に L1）、下段は東→西（E1 → I1 → Q1 → C1 → P1）。
-        // I1 は 4×2 なので下段では E1 群（x10〜15）の西隣 x6〜9 に置き、Q1・C1（各 2×2）を x4〜5・x2〜3 に置く
+        // 装置スロット（modelId ごとに出現順に割り当て、回転 0）。蛇行の流れ順：
+        // 第1レーン北側は西→東（D1 → L1）、第2レーン南側は東→西（E1 → I1）、第3レーン南側は西→東（Q1 → C1 → P1）。
+        // I1 は 4×2 なので第2レーン南側では E1 群（x6〜11）の西隣 x2〜5 に置く
         let slots: [String: [GridPoint]] = [
             "D1": [GridPoint(x: 0, y: 3), GridPoint(x: 2, y: 3)],
             "L1": [GridPoint(x: 4, y: 2), GridPoint(x: 8, y: 2)],
-            "E1": [GridPoint(x: 14, y: 10), GridPoint(x: 12, y: 10), GridPoint(x: 10, y: 10)],
-            "I1": [GridPoint(x: 6, y: 10)],
-            "Q1": [GridPoint(x: 4, y: 10)],
-            "C1": [GridPoint(x: 2, y: 10)],
-            "P1": [GridPoint(x: 0, y: 10)],
+            "E1": [GridPoint(x: 10, y: 9), GridPoint(x: 8, y: 9), GridPoint(x: 6, y: 9)],
+            "I1": [GridPoint(x: 2, y: 9)],
+            "Q1": [GridPoint(x: 1, y: 12)],
+            "C1": [GridPoint(x: 3, y: 12)],
+            "P1": [GridPoint(x: 5, y: 12)],
         ]
 
         let tools = equipment.map { ToolInstance(instance: $0) }

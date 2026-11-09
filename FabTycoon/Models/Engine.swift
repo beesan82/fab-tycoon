@@ -128,11 +128,13 @@ enum BuyBlockReason: Equatable {
     case locked([String])
     case noFreeSlot
     case insufficientCash(shortfallYen: Double)
+    /// 指定位置に置けない（理由の文言）
+    case cannotPlace(String)
 
     var isLock: Bool {
         switch self {
         case .unknownModel, .locked: return true
-        case .noFreeSlot, .insufficientCash: return false
+        case .noFreeSlot, .insufficientCash, .cannotPlace: return false
         }
     }
 }
@@ -873,6 +875,17 @@ enum Engine {
         return nil
     }
 
+    /// 指定位置に買って置けない理由。購入自体の可否を先に見て、可能なら配置可否（§2.4）を検証する
+    static func buyBlockReason(state: GameState, modelId: String, origin: GridPoint, rotation: Int) -> BuyBlockReason? {
+        if let reason = buyBlockReason(state: state, modelId: modelId) { return reason }
+        guard let layout = state.fab.layout else { return .cannotPlace("レイアウトがありません") }
+        let tool = ToolInstance(instance: EquipmentInstance(modelId: modelId, level: 1, purchasedAt: Date()))
+        if let error = layout.toolPlacementError(tool, origin: origin, rotation: rotation, among: state.fab.placed) {
+            return .cannotPlace(error)
+        }
+        return nil
+    }
+
     static func canBuy(state: GameState, modelId: String) -> Bool {
         buyBlockReason(state: state, modelId: modelId) == nil
     }
@@ -895,6 +908,24 @@ enum Engine {
         } else {
             state.fab.placed.append(tool)
         }
+        state.subsidy.totalInvestedYen += model.priceYen
+        return true
+    }
+
+    /// 購入して指定位置に置く。購入・配置の可否は課金前にすべて判定し、置けなければ state を変えずに false
+    @discardableResult
+    static func buyAndPlace(state: inout GameState, modelId: String, origin: GridPoint, rotation: Int,
+                            now: Date = Date()) -> Bool {
+        guard buyBlockReason(state: state, modelId: modelId, origin: origin, rotation: rotation) == nil,
+              let model = Catalog.model(id: modelId),
+              let layout = state.fab.layout
+        else { return false }
+        let instance = EquipmentInstance(modelId: modelId, level: 1, purchasedAt: now)
+        guard let placedTool = layout.placed(ToolInstance(instance: instance), origin: origin, rotation: rotation,
+                                             among: state.fab.placed)
+        else { return false }
+        state.cashYen -= model.priceYen
+        state.fab.placed.append(placedTool)
         state.subsidy.totalInvestedYen += model.priceYen
         return true
     }
@@ -2198,21 +2229,21 @@ extension Engine {
                 let nodeName = currentNode(state: state).displayName
                 return "ラインが止まっています。\(stopped.displayName)の装置が\(nodeName)では稼働しません（待機中）。\(nodeName)対応の装置を購入するか、ノードを戻しましょう。"
             }
-            var message = "ラインが止まっています。\(stopped?.displayName ?? "いずれかの工程")の装置がありません。装置タブで最安の装置を設置しましょう。"
+            var message = "ラインが止まっています。\(stopped?.displayName ?? "いずれかの工程")の装置がありません。建設（＋）で最安の装置を置きましょう。"
             if emergencyGrantYen(state: state) != nil {
-                message += " 統計タブの緊急補助金で立て直せます。"
+                message += " 事務所の緊急補助金で立て直せます。"
             }
             return message
         }
 
         // 2. 歩留まり異常が発生中
         if state.activeExcursion != nil {
-            return "歩留まり異常が発生しています。フロアの検査ベイから欠陥分析を開いて、原因工程を特定しましょう。"
+            return "歩留まり異常が発生しています。検査装置をタップして欠陥分析を開いて、原因工程を特定しましょう。"
         }
 
         // 3. 補助金を申請できる
         if canApplySubsidy(state: state) {
-            return "国庫補助金を申請できます（交付予定 \(MoneyFormat.yen(subsidyCapYen(state: state)))）。統計タブから申請しましょう。"
+            return "国庫補助金を申請できます（交付予定 \(MoneyFormat.yen(subsidyCapYen(state: state)))）。事務所から申請しましょう。"
         }
 
         // 4. 在庫が上限間近

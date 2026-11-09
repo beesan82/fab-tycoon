@@ -805,7 +805,7 @@ var q3State = GameState.initial()
 // 位置は指示案の D3 (0,0)・Q3 (4,0) ではなく D3 (0,3)・Q3 (4,3) にする：テンプレートのレールは y=5 から下にあり、
 // y=0〜1 に置くとポートが無く未接続になって derived（接続フィルタ付き）の成膜が 0 台になり、
 // forceStartExcursion（derived.units(.deposition) > 0 と接続済みの原因装置が必要）が失敗するため。
-// (0,3)・(4,3) は上段レール y=5 に接し、投入口・出荷口とリングで繋がる（テンプレートの D1 (0,3)・L1 (4,2) と同じ並び）
+// (0,3)・(4,3) は第1レーン y=5 に接し、投入口・出荷口と循環路で繋がる（テンプレートの D1 (0,3)・L1 (4,2) と同じ並び）
 q3State.fab.currentNodeId = "n5"
 guard let q3Layout = q3State.fab.layout,
       let q3D3 = q3Layout.placed(ToolInstance(instance: EquipmentInstance(modelId: "D3", level: 1, purchasedAt: t0)),
@@ -1007,7 +1007,7 @@ let p2Placed = p2Template.placed
 check(p2Placed.count == 11 && p2Template.stored.isEmpty,
       "P2: テンプレートに初期装置 11 台がすべて配置される（配置 \(p2Placed.count) 台・倉庫 \(p2Template.stored.count) 台）")
 check(p2Layout.parcels == FloorLayout.initialParcels, "P2: テンプレートの区画は初期 2×2")
-check(p2Layout.rails.count == 40, "P2: テンプレートのレールは 38 セルのリング＋スパー 2 セル（\(p2Layout.rails.count) セル）")
+check(p2Layout.rails.count == 54, "P2: テンプレートのレールは蛇行の本流 35 セル＋戻りレーン 19 セル（\(p2Layout.rails.count) セル）")
 let p2PlacementErrors = p2Placed.compactMap { tool -> String? in
     guard let error = p2Layout.toolPlacementError(tool, origin: tool.origin, rotation: tool.rotation, among: p2Placed)
     else { return nil }
@@ -1054,7 +1054,7 @@ let p2AnalysisDetail = p2Analysis.problems.map { $0.message }.joined(separator: 
 check(p2Analysis.problems.isEmpty && p2Analysis.lineConnected,
       "P2: テンプレートは全ルートペア接続済み・未接続装置なし（問題 \(p2Analysis.problems.count) 件）\(p2AnalysisDetail)")
 
-// 寸断検出: 左端の戻りレール（x=0 の y=6〜9）を切る
+// 寸断検出: 戻りレーンの西柱（x=0 の y=6〜9）を切る
 var p2BrokenLayout = p2Layout
 for y in 6...9 {
     p2BrokenLayout.removeRail(at: GridPoint(x: 0, y: y))
@@ -1062,24 +1062,26 @@ for y in 6...9 {
 let p2BrokenAnalysis = LayoutAnalysis.analyze(layout: p2BrokenLayout, tools: p2Placed, nodeId: "n28", lithoClass: p2LithoClass)
 var p2BreakCount = 0
 var p2BreakToDeposition = false
-var p2BreakToShipping = false
+var p2UnconnectedInputs = 0
 var p2UnconnectedOutputs = 0
 for problem in p2BrokenAnalysis.problems {
     switch problem {
-    case .lineBreak(let from, let to):
+    case .lineBreak(_, let to):
         p2BreakCount += 1
         if to == .deposition { p2BreakToDeposition = true }
-        if from == .packaging && to == nil { p2BreakToShipping = true }
     case .unconnectedOutput:
         p2UnconnectedOutputs += 1
     case .unconnectedInput:
-        break
+        p2UnconnectedInputs += 1
     }
 }
 check(p2BreakCount >= 1 && !p2BrokenAnalysis.lineConnected, "P2: 戻りレールを切るとライン寸断を検出（\(p2BreakCount) 件）")
 check(p2BreakToDeposition, "P2: 寸断に「→ 成膜」のペアが含まれる")
-check(p2BreakToShipping, "P2: 寸断に「PKG → 出荷口」が含まれる")
-check(p2UnconnectedOutputs >= 1, "P2: 出口が未接続の装置を検出（\(p2UnconnectedOutputs) 台）")
+// トラックE（蛇行化）で期待値を変更：出荷口は第3レーンの流れの下流にあるため、戻りレーンを切っても
+// 装置の入出力は切れず（未接続 0 台）、切れるのは次層へ戻る再入ペア（検査→成膜・CMP→成膜）だけになる。
+// 旧リング型では出荷口が戻りの先にあったため「PKG → 出荷口」の寸断と未接続出口が併せて出ていた
+check(p2UnconnectedInputs == 0 && p2UnconnectedOutputs == 0,
+      "P2: 戻りレーン切断では装置の入出力は切れない（入口 \(p2UnconnectedInputs) 台・出口 \(p2UnconnectedOutputs) 台）")
 
 // デッドロック検出: ストッカー・出荷口に繋がらない 12 セルの閉リングに D1 だけを置く
 func p2Rail(_ x: Int, _ y: Int, _ direction: RailDirection, _ kind: RailCellKind = .straight) -> RailCell {
@@ -1125,17 +1127,18 @@ if p2Placed.count >= 3 {
           "P2: 既存の L1 と同じ場所には置けない（重なり）")
     check(p2Layout.toolPlacementError(firstD1, origin: GridPoint(x: 20, y: 20), rotation: 0, among: p2Placed) != nil,
           "P2: 未購入区画 (20,20) には置けない")
-    check(p2Layout.toolPlacementError(firstD1, origin: GridPoint(x: 5, y: 13), rotation: 0, among: p2Placed) == nil,
-          "P2: 空き地 (5,13) には D1 を置ける")
+    check(p2Layout.toolPlacementError(firstD1, origin: GridPoint(x: 10, y: 13), rotation: 0, among: p2Placed) == nil,
+          "P2: 空き地 (10,13) には D1 を置ける")
 } else {
     check(false, "P2: 配置バリデーション用の装置がテンプレートにある")
 }
 
 // 定常運転: P1 と同じプロトコル（ウォームアップ 900 ゲーム時間 → 計測 1200 ゲーム時間）をレール搬送で。
-// WIP 上限は 16×16 テンプレートの CONWIP 運転点として実測で安定な 45 を使う（設計上限は 200。
-// 環の物理容量から 52 以上では凍結する。根拠は設計書 付録 C.5）
+// WIP 上限はテンプレートの運転点（operatingWipCap = レールセル数 + 5）を使う。トラックE（蛇行化）で
+// レール 54 セル → 運転点 59 に移った（旧リング型は 40 セル → 45。設計上限は 200）。
+// 蛇行でも運転点で凍結しないことを、この測定のデッドロック監視で確認する
 var p2Sim = SimCore(state: p2State, tools: p2Placed, layout: p2Layout)
-p2Sim.wipCap = 45
+p2Sim.wipCap = SimCore.operatingWipCap(layout: p2Layout)
 var p2EverDeadlocked = false
 for _ in 0..<(900 * 60) {
     p2Sim.step()
@@ -1165,12 +1168,15 @@ for lot in p2Sim.lots.values {
 print("P2 定常（レール搬送）: ストッカー最大 \(p2MaxStocker) / 終了時レール上ロット \(p2RailLotsAtEnd) / 停止セル \(p2Sim.deadlockCells.count) / デッドロック \(p2EverDeadlocked)")
 // P2 の帯: 実レール＋ブロッキング搬送では行き先の陳腐化による台間偏りで律速（成膜）の稼働率が約 93.5% に留まり、
 // 実測 7.92 WPH（P1 比 −6.8%）が物理的な着地点。予約・ゲート・リルート等は凍結または滞留で不採用（付録 C.5）
-check(p2Throughput >= 8.5 * 0.90 && p2Throughput <= 8.5 * 1.03,
-      "P2: テンプレートの定常スループット \(String(format: "%.3f", p2Throughput)) WPH（P1 基準 8.5 の −10%〜+3%。実レール搬送では律速・成膜の稼働率が上限、付録 C.5 参照）")
-check(p2ReleaseRate >= 8.5 * 0.90 && p2ReleaseRate <= 8.5 * 1.03,
-      "P2: 学習 W の加算 \(String(format: "%.3f", p2ReleaseRate)) 枚/時（P1 基準 8.5 の −10%〜+3%。実レール搬送では律速・成膜の稼働率が上限、付録 C.5 参照）")
-check(p2WindowLots > 0 && abs(p2MeanDetection - 0.775) <= 0.005,
-      "P2: 定常検出率 \(String(format: "%.4f", p2MeanDetection))（77.5% ±0.5pt、完了 \(p2WindowLots) ロット）")
+// トラックE（蛇行化）で帯の基準をリング実測 7.917 の −10%〜+3% に変更：蛇行は循環路が長く再入の搬送が
+// 伸びる分、定常は 7.4 台に移る（運転点 59 での実測。WIP 45 に固定すると 6.73 で、−10% を割り込む。
+// 詳細は design/template-serpentine-log.md）
+check(p2Throughput >= 7.917 * 0.90 && p2Throughput <= 7.917 * 1.03,
+      "P2: テンプレートの定常スループット \(String(format: "%.3f", p2Throughput)) WPH（リング実測 7.917 の −10%〜+3%。実レール搬送では律速・成膜の稼働率が上限、付録 C.5 参照）")
+check(p2ReleaseRate >= 7.917 * 0.90 && p2ReleaseRate <= 7.917 * 1.03,
+      "P2: 学習 W の加算 \(String(format: "%.3f", p2ReleaseRate)) 枚/時（リング実測 7.917 の −10%〜+3%。実レール搬送では律速・成膜の稼働率が上限、付録 C.5 参照）")
+check(p2WindowLots > 0 && abs(p2MeanDetection - 0.7783) <= 0.005,
+      "P2: 定常検出率 \(String(format: "%.4f", p2MeanDetection))（77.83% ±0.5pt、完了 \(p2WindowLots) ロット）")
 check(p2MaxLots <= 200, "P2: 計測中の WIP は常に 200 ロット以下（最大 \(p2MaxLots)）")
 check(!p2EverDeadlocked, "P2: テンプレート定常運転（2100 ゲーム時間）を通してデッドロックなし")
 
@@ -1188,7 +1194,7 @@ func p3RestoredSim(_ s: GameState) -> SimCore {
     return sim
 }
 
-// 定常状態の v4 セーブ（base）：テンプレートで WIP 上限 45 の CONWIP 運転を 900 ゲーム時間回した snapshot を持つ
+// 定常状態の v4 セーブ（base）：テンプレートで運転点（59）の CONWIP 運転を 900 ゲーム時間回した snapshot を持つ
 let p3Initial = GameState.initial()
 // P6先行分で仕様変更：新規ゲームは仕掛かりロットをプリシードした sim を持つ（初回売上の前倒し）。
 // 移行直後の sim がロットなしであることは P3 移行セクション側で引き続き検証する
@@ -1196,7 +1202,10 @@ check(p3Initial.fab.layout != nil && p3Initial.fab.placed.count == 11 && p3Initi
       "P3: 新規ゲームは layout・配置 11 台・プリシード済みロットを持つ sim を持つ")
 let p3TemplateFresh = LayoutTemplate.starter16(equipment: p3Initial.fab.equipment)
 var p3WarmSim = SimCore(state: p3Initial, tools: p3TemplateFresh.placed, layout: p3TemplateFresh.layout)
-p3WarmSim.wipCap = 45
+// WIP 上限は運転点に合わせる（OfflineProgress.advance が sim.wipCap を運転点に強制するため、
+// フィクスチャも運転点で作らないと全量シミュレーションとの完全一致が崩れる。旧リング型では
+// 運転点 45 と手動指定 45 が一致していたため表面化しなかった。トラックE で運転点は 59）
+p3WarmSim.wipCap = SimCore.operatingWipCap(layout: p3TemplateFresh.layout)
 for _ in 0..<(900 * 60) { p3WarmSim.step() }
 var p3Base = p3Initial
 p3Base.fab.layout = p3TemplateFresh.layout
@@ -1294,22 +1303,23 @@ print("P3 オフライン外挿（予算 30,000・参考計測（設計予算外
 check(abs(p3Long30kReport.extrapolatedGameMinutes - 99_600) <= 1, "P3: 予算 30,000 では外挿 99,600 ゲーム分")
 
 // 設計エンベロープ内の別パターン：テンプレートに D1 を 1 台追加した 12 台構成で、WIP 上限 45 で 300 ゲーム時間回した定常 state。
-// 追加の D1 はリング内側 (1,6) に明示配置して上段レール (1,5) に接させる（starter16 の貪欲配置に任せると (0,0) に置かれて
-// レール未接続になり、実質不参加の台になってしまうため）
+// 追加の D1 はレーン間 (6,6) に明示配置して第1レーン (6,5)・第2レーン (6,8) の両方に接させる（starter16 の貪欲配置に任せると (0,0) に置かれて
+// レール未接続になり、実質不参加の台になってしまうため。旧リング型では (1,6) だったが、蛇行型では (1,6) は投入口になる）
 var p3AltInitial = GameState.initial()
 let p3AltExtraD1 = EquipmentInstance(modelId: "D1", level: 1, purchasedAt: t0)
 p3AltInitial.fab.equipment.append(p3AltExtraD1)
 let p3AltTemplate = LayoutTemplate.starter16(equipment: GameState.initial().fab.equipment)
 guard let p3AltPlacedD1 = p3AltTemplate.layout.placed(ToolInstance(instance: p3AltExtraD1),
-                                                      origin: GridPoint(x: 1, y: 6), rotation: 0,
+                                                      origin: GridPoint(x: 6, y: 6), rotation: 0,
                                                       among: p3AltTemplate.placed)
-else { fail("P3: 別ラインの追加 D1 を (1,6) に配置できない") }
+else { fail("P3: 別ラインの追加 D1 を (6,6) に配置できない") }
 let p3AltTools = p3AltTemplate.placed + [p3AltPlacedD1]
 let p3AltAnalysis = LayoutAnalysis.analyze(layout: p3AltTemplate.layout, tools: p3AltTools, nodeId: "n28",
                                            lithoClass: Engine.topLithoClass(state: p3AltInitial) ?? .duvDry)
 check(p3AltAnalysis.problems.isEmpty, "P3: 別ライン（D1×3）は全装置が接続されている")
 var p3AltWarmSim = SimCore(state: p3AltInitial, tools: p3AltTools, layout: p3AltTemplate.layout)
-p3AltWarmSim.wipCap = 45
+// WIP 上限は運転点に合わせる（p3WarmSim と同じ理由：OfflineProgress.advance の強制と揃える）
+p3AltWarmSim.wipCap = SimCore.operatingWipCap(layout: p3AltTemplate.layout)
 for _ in 0..<(300 * 60) { p3AltWarmSim.step() }
 var p3AltBase = p3AltInitial
 p3AltBase.fab.layout = p3AltTemplate.layout
@@ -1500,14 +1510,14 @@ let p4MeanDetection = p4WindowLots > 0
 let p4LearnDelta = (p4State.learningWafers["n28"] ?? 0) - p4LearnBefore
 // 設計書 付録 C.7 に転記する実測値（判定より先に出力する）
 print("P4 定常（tick 駆動）: スループット \(num(p4Throughput, 3)) WPH / 投入 \(num(p4ReleaseRate, 3)) 枚/時 / 検出率 \(num(p4MeanDetection, 4)) / 完了 \(p4WindowLots) ロット")
-check(p4Throughput >= 8.5 * 0.90 && p4Throughput <= 8.5 * 1.03,
-      "P4: tick 駆動の定常スループット \(num(p4Throughput, 3)) WPH（P2 と同じ帯 8.5 の −10%〜+3%）")
+check(p4Throughput >= 7.917 * 0.90 && p4Throughput <= 7.917 * 1.03,
+      "P4: tick 駆動の定常スループット \(num(p4Throughput, 3)) WPH（P2 と同じ帯 リング実測 7.917 の −10%〜+3%）")
 check(p4WindowLots > 0 && abs(p4MeanDetection - 0.7783) <= 0.005,
       "P4: tick 駆動の平均検出率 \(num(p4MeanDetection, 4))（0.7783 ±0.005、完了 \(p4WindowLots) ロット）")
 check(p4ReleasedDelta > 0 && p4LearnDelta == p4ReleasedDelta,
       "P4: learningWafers[n28] の増分 \(num(p4LearnDelta, 0)) が sim の投入増分 \(num(p4ReleasedDelta, 0)) と一致")
-check(p4ReleaseRate >= 8.5 * 0.90 && p4ReleaseRate <= 8.5 * 1.03,
-      "P4: tick 駆動の投入レート \(num(p4ReleaseRate, 3)) 枚/時（8.5 の −10%〜+3%）")
+check(p4ReleaseRate >= 7.917 * 0.90 && p4ReleaseRate <= 7.917 * 1.03,
+      "P4: tick 駆動の投入レート \(num(p4ReleaseRate, 3)) 枚/時（リング実測 7.917 の −10%〜+3%）")
 let p4Derived = Engine.derived(state: p4State)
 print("P4 derived 実測: スループット \(num(p4Derived.measuredThroughputWPH, 3)) WPH / 検出率 \(num(p4Derived.measuredDetectionRate, 4)) / 収入/分 \(num(p4Derived.measuredIncomePerMinuteYen, 0)) 円")
 // P6先行分で帯を +3% → +15% に広げた：throughputEMA は時定数 1,440 分の端点推定で、
@@ -1527,34 +1537,49 @@ check(p4StatsAfter.completedLots > 0 && p4Derived.incomePerMinuteYen == p4Derive
       "P4: 完了ロットがあれば incomePerMinuteYen は実測（measuredIncomePerMinuteYen）")
 
 print("== P4. WIP 上限の運転点 ==")
-check(GameState.initial().fab.sim?.wipCap == 45, "P4: 新規ゲームの sim の WIP 上限は 45")
-check(SimCore.operatingWipCap(layout: GameState.initial().fab.layout) == 45, "P4: テンプレートの運転点は 45（レール 40 セル ＋ 5）")
+check(GameState.initial().fab.sim?.wipCap == 59, "P4: 新規ゲームの sim の WIP 上限は 59")
+check(SimCore.operatingWipCap(layout: GameState.initial().fab.layout) == 59, "P4: テンプレートの運転点は 59（レール 54 セル ＋ 5）")
 var p4Rail = GameState.initial()
-guard let p4RailCell = p4Rail.fab.layout?.rails.first else { fail("P4: テンプレートにレールが無い") }
+// 撤去対象は「経路にそのセルを含むロットをストッカーへ手運びしきれるセル」から決定的に選ぶ。
+// トラックE（蛇行化）で変更：旧リング型では先頭セル (0,5) がそのまま撤去できたが、蛇行では (0,5) が
+// 戻りレーンの合流点で大半のロットの経路に含まれ、手運びがストッカー容量を超えて撤去できない
+guard let p4RailCell = p4Rail.fab.layout?.rails.first(where: { candidate in
+    var trial = p4Rail
+    return Engine.removeRail(state: &trial, at: candidate.point)
+}) else { fail("P4: 撤去できるテンプレートのレールが無い") }
 let p4RailCash0 = p4Rail.cashYen
 check(Engine.removeRail(state: &p4Rail, at: p4RailCell.point), "P4: テンプレートのレール (\(p4RailCell.point.x),\(p4RailCell.point.y)) を撤去できる")
-check(p4Rail.fab.sim?.wipCap == 44, "P4: レール 1 セル撤去で WIP 上限が 44")
+check(p4Rail.fab.sim?.wipCap == 58, "P4: レール 1 セル撤去で WIP 上限が 58")
 // P6先行分で仕様変更：テンプレートの無償レールは撤去しても返金されない（無償レールの売却益対策）。
 // 購入したレールの返金は P6 セクションで検証する
 check(p4Rail.cashYen == p4RailCash0, "P4: テンプレートの無償レールの撤去では返金されない")
 check(Engine.setRail(state: &p4Rail, cell: p4RailCell), "P4: 同じセルにレールを敷き直せる")
-check(p4Rail.fab.sim?.wipCap == 45, "P4: 敷き直すと WIP 上限が 45 に戻る")
+check(p4Rail.fab.sim?.wipCap == 59, "P4: 敷き直すと WIP 上限が 59 に戻る")
 check(p4Rail.cashYen == p4RailCash0 - Engine.railCellCostYen && p4Rail.stats.railCellsBuilt == 1,
       "P4: 敷き直しは新規敷設として 1 セル分が引かれ、railCellsBuilt == 1")
 
 print("== P4. 学習連動（移行でリセットされない） ==")
-/// 新規状態から tick で最初のロットが完了するまで進め、その歩留まりを返す。
-/// P6先行分で新規ゲームに仕掛かりがプリシードされるため、最初に完了するのはプリシードの先頭ロット
-/// （投入時の刻印 W≈0）になる。learned を指定する検証は p4PostSeedLotYield 側で行う
+/// 刻印 W=0 のロット（serial 1）が完了したときの歩留まりを返す。
+/// P6先行分で新規ゲームに仕掛かりがプリシードされるため、当初は「最初に完了するのはプリシードの
+/// 先頭ロット（刻印 W≈0）」という前提だったが、トラックE（蛇行化）で前提が崩れた：蛇行では
+/// プリシード先頭ロットがストッカーで長く滞留し、最初に完了するのは刻印の進んだロット
+/// （実測では serial 40・刻印 975・歩留まり 0.7251）になる。完了順はレイアウト依存の創発的な
+/// 性質なので、歩留まり自体はプリシードを外した空のラインで、serial 1 の完了を直接追って測る。
+/// WIP 上限を 8 に絞るのは、serial 1 が firstCompletions の記録範囲（先頭 16 件）の内側で
+/// 完了するようにするため（実測では 4 番目・歩留まり 0.6983 で完了する）。
+/// Engine.tick は sim.wipCap を運転点に強制するため、この検証だけは SimCore を直接駆動する
 func p4FirstLotYield(learned: Double?) -> Double? {
     var s = GameState.initial()
     if let learned = learned {
         s.learningWafers["n28"] = learned
     }
-    for _ in 0..<200 {
-        Engine.tick(state: &s, dtRealSeconds: 30)
-        if let first = s.fab.sim?.stats.firstCompletions.first {
-            return first.lotYield
+    var sim = SimCore(state: s, snapshot: SimCore.freshSnapshot(state: s, tools: s.fab.placed, layout: s.fab.layout))
+    sim.wipCap = 8
+    let targetId = SimCore.lotId(serial: 1)
+    for _ in 0..<20_000 {
+        sim.step()
+        if let hit = sim.stats.firstCompletions.first(where: { $0.lotId == targetId }) {
+            return hit.lotYield
         }
     }
     return nil
@@ -1758,7 +1783,7 @@ print("== P6先行分. 無償レールの売却益の抜け穴 ==")
 var p6Rail = GameState.initial()
 let p6RailCash0 = p6Rail.cashYen
 let p6TemplateRailPoints = p6Rail.fab.layout?.rails.map { $0.point } ?? []
-check(p6TemplateRailPoints.count == 40, "P6: テンプレートのレールは 40 セル")
+check(p6TemplateRailPoints.count == 54, "P6: テンプレートのレールは 54 セル")
 check(p6Rail.fab.layout?.paidRailPoints.isEmpty == true, "P6: 新規ゲームでは購入済みレールは 0 セル")
 check(Engine.railRefundYen(state: p6Rail, points: p6TemplateRailPoints) == 0,
       "P6: テンプレート全セルの返金合計が 0")
@@ -1801,7 +1826,7 @@ print("== P6先行分. WIP 上限の運転点と区画拡張 ==")
 var p6Wip = GameState.initial()
 p6Wip.cashYen = 100_000_000_000
 check(Engine.buyParcel(state: &p6Wip, coord: ParcelCoord(x: 2, y: 0)), "P6: 区画 (2,0) を購入できた")
-check(p6Wip.fab.sim?.wipCap == 45, "P6: 区画購入だけでは WIP 上限は 45 のまま（レールを足すまで上がらない）")
+check(p6Wip.fab.sim?.wipCap == 59, "P6: 区画購入だけでは WIP 上限は 59 のまま（レールを足すまで上がらない）")
 // 拡張した区画にレールを足すと上限が伸びる
 var p6WipRails = 0
 for x in 16..<24 {
@@ -1809,7 +1834,7 @@ for x in 16..<24 {
         p6WipRails += 1
     }
 }
-check(p6WipRails == 8 && p6Wip.fab.sim?.wipCap == 53, "P6: レール 8 セル追加で WIP 上限が 53 に伸びる")
+check(p6WipRails == 8 && p6Wip.fab.sim?.wipCap == 67, "P6: レール 8 セル追加で WIP 上限が 67 に伸びる")
 // 合成レイアウトでの式の境界：下限 30・上限 200
 func p6Cap(railCount: Int) -> Int {
     let layout = FloorLayout(
@@ -1839,12 +1864,13 @@ check(p7Ranks[.deposition] == 1 && p7Ranks[.lithography] == 2 && p7Ranks[.etchin
       && p7Ranks[.implant] == 4 && p7Ranks[.inspection] == 5 && p7Ranks[.cmp] == 6 && p7Ranks[.packaging] == 7,
       "P7: 工程順ランクは 成膜1・露光2・エッチ3・注入4・検査5・CMP6・PKG7")
 
-// テンプレートの並び：上段（y<9）は西→東、下段（y>=9）は東→西に目で辿ると工程順が単調に増える
+// テンプレートの並び：蛇行の流れ順（第1レーン北側は西→東、第2レーン南側は東→西、第3レーン南側は西→東）に
+// 目で辿ると工程順が単調に増える
 let p7Ordered = p7Placed.sorted { a, b in
-    let aRow = a.origin.y < 9 ? 0 : 1
-    let bRow = b.origin.y < 9 ? 0 : 1
+    let aRow = a.origin.y < 9 ? 0 : (a.origin.y < 12 ? 1 : 2)
+    let bRow = b.origin.y < 9 ? 0 : (b.origin.y < 12 ? 1 : 2)
     if aRow != bRow { return aRow < bRow }
-    return aRow == 0 ? a.origin.x < b.origin.x : a.origin.x > b.origin.x
+    return aRow == 1 ? a.origin.x > b.origin.x : a.origin.x < b.origin.x
 }
 let p7RankSeq = p7Ordered.map { tool -> Int in
     guard let model = Catalog.model(id: tool.modelId), let rank = p7Ranks[model.process] else { return -1 }
@@ -1854,13 +1880,13 @@ check(p7RankSeq.count == 11 && zip(p7RankSeq, p7RankSeq.dropFirst()).allSatisfy 
       "P7: テンプレートを流れ順に辿ると工程順が単調（列 \(p7RankSeq)）")
 check(p7RankSeq.first == 1 && p7RankSeq.last == 7, "P7: 流れの先頭は成膜・末尾は PKG")
 
-// 並べ替えの固定：I1（4×2）は下段 (6,10)、Q1 は (4,10)、C1 は (2,10)
-check(p7Placed.first(where: { $0.modelId == "I1" })?.origin == GridPoint(x: 6, y: 10), "P7: I1 は下段 (6,10)")
-check(p7Placed.first(where: { $0.modelId == "Q1" })?.origin == GridPoint(x: 4, y: 10), "P7: Q1 は下段 (4,10)")
-check(p7Placed.first(where: { $0.modelId == "C1" })?.origin == GridPoint(x: 2, y: 10), "P7: C1 は下段 (2,10)")
+// 並べ替えの固定：I1（4×2）は第2レーン南側 (2,9)、Q1 は第3レーン南側 (1,12)、C1 は (3,12)
+check(p7Placed.first(where: { $0.modelId == "I1" })?.origin == GridPoint(x: 2, y: 9), "P7: I1 は第2レーン南側 (2,9)")
+check(p7Placed.first(where: { $0.modelId == "Q1" })?.origin == GridPoint(x: 1, y: 12), "P7: Q1 は第3レーン南側 (1,12)")
+check(p7Placed.first(where: { $0.modelId == "C1" })?.origin == GridPoint(x: 3, y: 12), "P7: C1 は第3レーン南側 (3,12)")
 
 // 投入口から最初の工程（成膜）まではごく短い（「入口のすぐ先が①」に見える配置）。
-// D1 は 2 台あるので近い方で見る（遠い方は一方向リングの上流側にあり周回距離になる）
+// D1 は 2 台あるので近い方で見る（遠い方は一方向循環路の上流側にあり周回距離になる）
 let p7Graph = RailGraph(layout: p7Layout)
 let p7EntryPorts = p7Graph.portCells(footprint: p7Layout.entryCells())
 let p7D1Distances = p7Placed.filter { $0.modelId == "D1" }.compactMap { d1 -> Int? in
@@ -1870,9 +1896,12 @@ let p7D1Distances = p7Placed.filter { $0.modelId == "D1" }.compactMap { d1 -> In
 check(p7D1Distances.count == 2 && (p7D1Distances.min() ?? 99) <= 3,
       "P7: 投入口→成膜（近い方）は \(p7D1Distances.min() ?? -1) セルで届く")
 
-// レール本数と無償区分は従来どおり（CONWIP 45・paidRailPoints の旧セーブ互換を壊さない）
-check(p7Layout.rails.count == 40 && p7Layout.paidRailPoints.isEmpty,
-      "P7: テンプレートのレールは 40 セル・全て無償区分のまま")
+// レール本数と無償区分：蛇行化で 54 セルに増えたが、全て無償区分のまま。
+// paidRailPoints の旧セーブ互換は、照合先を旧リング位置（legacyTemplateRailPoints）に固定することで保つ
+check(p7Layout.rails.count == 54 && p7Layout.paidRailPoints.isEmpty,
+      "P7: テンプレートのレールは 54 セル・全て無償区分のまま")
+check(LayoutTemplate.legacyTemplateRailPoints.count == 40,
+      "P7: 旧セーブ照合用のリング位置は 40 セルで固定されている")
 
 // 配置スナップ：置ける場所はそのまま、重なる場所は近傍の空きへ、範囲内に空きが無ければ nil
 let p7NewD1 = ToolInstance(instance: EquipmentInstance(modelId: "D1", level: 1, purchasedAt: t0))
@@ -1890,5 +1919,111 @@ if let p7Snapped = p7Layout.snappedOrigin(for: p7NewD1, near: GridPoint(x: 0, y:
 }
 
 try? fileManager.removeItem(at: tempRoot)
+
+// R1. 位置指定購入（buyAndPlace）：成功・資金不足・配置不可・不明モデル。失敗時は state を一切変えない
+print("== R1. buyAndPlace ==")
+let r1Initial = GameState.initial(now: t0)
+// 対象：初期状態で購入可能な成膜モデルの最安（同額なら id 昇順）。決定的に選ぶ
+guard let r1Model = Catalog.models(for: .deposition)
+    .filter({ Engine.buyBlockReason(state: r1Initial, modelId: $0.id) == nil })
+    .min(by: { ($0.priceYen, $0.id) < ($1.priceYen, $1.id) })
+else { fail("R1: 初期状態で購入可能な成膜モデルが無い") }
+print("  対象モデル: \(r1Model.id)（\(num(r1Model.priceYen, 0))円）")
+guard let r1Layout = r1Initial.fab.layout else { fail("R1: 初期状態にレイアウトが無い") }
+// 原点：購入済み区画を含む矩形を y→x、各原点で回転 0→90 の順に走査し、最初に置ける位置
+let r1Tool = ToolInstance(instance: EquipmentInstance(modelId: r1Model.id, level: 1, purchasedAt: t0))
+let r1Width = ((r1Layout.parcels.map { $0.x }.max() ?? 0) + 1) * FloorLayout.parcelSize
+let r1Height = ((r1Layout.parcels.map { $0.y }.max() ?? 0) + 1) * FloorLayout.parcelSize
+var r1Spot: (origin: GridPoint, rotation: Int)? = nil
+r1Scan: for y in 0..<r1Height {
+    for x in 0..<r1Width {
+        for rotation in [0, 90] {
+            let origin = GridPoint(x: x, y: y)
+            if r1Layout.toolPlacementError(r1Tool, origin: origin, rotation: rotation, among: r1Initial.fab.placed) == nil {
+                r1Spot = (origin: origin, rotation: rotation)
+                break r1Scan
+            }
+        }
+    }
+}
+guard let r1Origin = r1Spot?.origin, let r1Rotation = r1Spot?.rotation else { fail("R1: 置ける原点が無い") }
+print("  配置原点: (\(r1Origin.x),\(r1Origin.y)) 回転 \(r1Rotation)")
+
+// 成功ケース
+var r1Success = r1Initial
+check(Engine.buyBlockReason(state: r1Success, modelId: r1Model.id, origin: r1Origin, rotation: r1Rotation) == nil,
+      "R1: 走査で見つけた原点では buyBlockReason が nil")
+let r1CashBefore = r1Success.cashYen
+let r1PlacedBefore = r1Success.fab.placed.count
+let r1InvestedBefore = r1Success.subsidy.totalInvestedYen
+check(Engine.buyAndPlace(state: &r1Success, modelId: r1Model.id, origin: r1Origin, rotation: r1Rotation, now: t0),
+      "R1: buyAndPlace が成功する")
+check(abs(r1CashBefore - r1Success.cashYen - r1Model.priceYen) < 1e-6, "R1: 資金が価格分だけ減る")
+check(r1Success.fab.placed.count == r1PlacedBefore + 1, "R1: placed が1件増える")
+check(r1Success.fab.placed.last?.origin == r1Origin, "R1: 追加された装置の origin が指定どおり")
+check(r1Success.fab.placed.last?.modelId == r1Model.id, "R1: 追加された装置の modelId が指定どおり")
+check(abs(r1Success.subsidy.totalInvestedYen - r1InvestedBefore - r1Model.priceYen) < 1e-6,
+      "R1: 累計投資額（補助金の基準）が価格分だけ増える")
+
+// 資金不足ケース：価格−1円
+var r1Poor = r1Initial
+r1Poor.cashYen = r1Model.priceYen - 1
+let r1PoorBefore = r1Poor
+if case .insufficientCash(let shortfall)? = Engine.buyBlockReason(state: r1Poor, modelId: r1Model.id,
+                                                                  origin: r1Origin, rotation: r1Rotation) {
+    check(abs(shortfall - 1) < 1e-6, "R1: 資金不足では buyBlockReason が .insufficientCash（不足 1円）")
+} else {
+    check(false, "R1: 資金不足では buyBlockReason が .insufficientCash")
+}
+check(!Engine.buyAndPlace(state: &r1Poor, modelId: r1Model.id, origin: r1Origin, rotation: r1Rotation, now: t0),
+      "R1: 資金不足では buyAndPlace が false")
+check(r1Poor == r1PoorBefore, "R1: 資金不足で失敗しても state は不変")
+
+// 配置不可ケース：既存装置（placed の先頭）の origin
+guard let r1Occupied = r1Initial.fab.placed.first?.origin else { fail("R1: 初期状態に配置済み装置が無い") }
+var r1Blocked = r1Initial
+if case .cannotPlace? = Engine.buyBlockReason(state: r1Blocked, modelId: r1Model.id, origin: r1Occupied, rotation: 0) {
+    check(true, "R1: 既存装置の位置では buyBlockReason が .cannotPlace")
+} else {
+    check(false, "R1: 既存装置の位置では buyBlockReason が .cannotPlace")
+}
+check(!Engine.buyAndPlace(state: &r1Blocked, modelId: r1Model.id, origin: r1Occupied, rotation: 0, now: t0),
+      "R1: 既存装置の位置では buyAndPlace が false")
+check(r1Blocked == r1Initial, "R1: 配置不可で失敗しても state は不変")
+
+// 不明モデルケース
+var r1Unknown = r1Initial
+check(Engine.buyBlockReason(state: r1Unknown, modelId: "NO_SUCH_MODEL", origin: r1Origin, rotation: r1Rotation) == .unknownModel,
+      "R1: 存在しない modelId では buyBlockReason が .unknownModel")
+check(!Engine.buyAndPlace(state: &r1Unknown, modelId: "NO_SUCH_MODEL", origin: r1Origin, rotation: r1Rotation, now: t0),
+      "R1: 存在しない modelId では buyAndPlace が false")
+check(r1Unknown == r1Initial, "R1: 不明モデルで失敗しても state は不変")
+
+// R1. β3 時点（R1 変更前）の v4 セーブを固定 JSON で読み、新キー didShowMapRebuildNotice の既定値と往復一致を確かめる
+print("== R1. v4 固定 JSON 往復 ==")
+let r1FixtureURL = URL(fileURLWithPath: #file).deletingLastPathComponent().appendingPathComponent("fixture-v4.json")
+guard let r1FixtureData = try? Data(contentsOf: r1FixtureURL) else { fail("R1: fixture-v4.json を読めない（\(r1FixtureURL.path)）") }
+let r1Decoder = JSONDecoder()
+r1Decoder.dateDecodingStrategy = .iso8601
+let r1FixtureState: GameState
+do {
+    r1FixtureState = try r1Decoder.decode(GameState.self, from: r1FixtureData)
+} catch {
+    fail("R1: fixture-v4.json を GameState にデコードできない: \(error)")
+}
+check(true, "R1: fixture-v4.json を GameState にデコードできる")
+check(r1FixtureState.schemaVersion == 4, "R1: fixture の schemaVersion は 4")
+check(r1FixtureState.didShowMapRebuildNotice == false, "R1: 新キーが無い fixture でも didShowMapRebuildNotice は既定値 false")
+check(!r1FixtureState.fab.placed.isEmpty, "R1: fixture の placed は空でない")
+
+let r1Encoder = JSONEncoder()
+r1Encoder.dateEncodingStrategy = .iso8601
+r1Encoder.outputFormatting = [.sortedKeys]
+guard let r1Reencoded = try? r1Encoder.encode(r1FixtureState) else { fail("R1: fixture の再エンコードに失敗") }
+let r1ReencodedObject = (try? JSONSerialization.jsonObject(with: r1Reencoded)) as? [String: Any]
+check((r1ReencodedObject?["didShowMapRebuildNotice"] as? Bool) == false,
+      "R1: 再エンコード結果に didShowMapRebuildNotice が false で書き出される")
+let r1RoundTrip = try? r1Decoder.decode(GameState.self, from: r1Reencoded)
+check(r1RoundTrip == r1FixtureState, "R1: 再エンコード→再デコードで最初のデコード結果と一致する")
 
 print("HEADLESS CHECK PASSED")

@@ -20,6 +20,8 @@ struct GameState: Codable, Equatable {
     var subsidy: SubsidyState = SubsidyState()
     /// 数値バランス変更の告知を表示済みか（旧セーブ向け）
     var didShowScaleChangeNotice: Bool = false
+    /// マップ再構築の告知を表示済みか（旧セーブ向け）
+    var didShowMapRebuildNotice: Bool = false
     /// 研究の進行状況
     var research: ResearchState = ResearchState()
     /// 発生中の歩留まり異常（なければ nil）
@@ -40,6 +42,7 @@ struct GameState: Codable, Equatable {
         case currentProductId
         case subsidy
         case didShowScaleChangeNotice
+        case didShowMapRebuildNotice
         case research
         case activeExcursion
         case nextExcursionEarliestGameHours
@@ -118,6 +121,7 @@ extension GameState {
         subsidy = try container.decodeIfPresent(SubsidyState.self, forKey: .subsidy)
             ?? SubsidyState(totalInvestedYen: GameState.equipmentPurchaseTotalYen(fab.equipment))
         didShowScaleChangeNotice = try container.decodeIfPresent(Bool.self, forKey: .didShowScaleChangeNotice) ?? false
+        didShowMapRebuildNotice = try container.decodeIfPresent(Bool.self, forKey: .didShowMapRebuildNotice) ?? false
         research = try container.decodeIfPresent(ResearchState.self, forKey: .research) ?? ResearchState()
         activeExcursion = try container.decodeIfPresent(ActiveExcursion.self, forKey: .activeExcursion) ?? nil
         nextExcursionEarliestGameHours = try container.decodeIfPresent(Double.self, forKey: .nextExcursionEarliestGameHours) ?? 240

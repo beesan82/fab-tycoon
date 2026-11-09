@@ -34,7 +34,7 @@ struct StatsView: View {
             }
             Section("歩留まり") {
                 if store.state.activeExcursion != nil, let excursionProcess = derived.excursionProcess {
-                    Label("歩留まり異常が発生中です（原因工程：\(excursionProcess.displayName)）。フロアの検査ベイから欠陥分析を開けます。", systemImage: "exclamationmark.triangle.fill")
+                    Label("歩留まり異常が発生中です（原因工程：\(excursionProcess.displayName)）。検査装置をタップして欠陥分析を開けます。", systemImage: "exclamationmark.triangle.fill")
                         .font(.subheadline.bold())
                         .foregroundStyle(.red)
                         .fixedSize(horizontal: false, vertical: true)

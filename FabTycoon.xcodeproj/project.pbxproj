@@ -15,15 +15,18 @@
 		B10000000000000000000006 /* SaveManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000006 /* SaveManager.swift */; };
 		B10000000000000000000007 /* GameStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000007 /* GameStore.swift */; };
 		B10000000000000000000008 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000008 /* ContentView.swift */; };
-		B10000000000000000000009 /* LineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000009 /* LineView.swift */; };
-		B10000000000000000000010 /* ProcessDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000010 /* ProcessDetailView.swift */; };
-		B10000000000000000000011 /* ShopView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* ShopView.swift */; };
 		B10000000000000000000012 /* StatsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* StatsView.swift */; };
 		B10000000000000000000013 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* Assets.xcassets */; };
 		B10000000000000000000015 /* Simulation.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000015 /* Simulation.swift */; };
 		B10000000000000000000016 /* Layout.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* Layout.swift */; };
 		B10000000000000000000017 /* OfflineProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* OfflineProgress.swift */; };
-		B10000000000000000000018 /* FloorGridView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* FloorGridView.swift */; };
+		B10000000000000000000019 /* MapScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000019 /* MapScene.swift */; };
+		B1000000000000000000001A /* HUDView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001A /* HUDView.swift */; };
+		B1000000000000000000001B /* DockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001B /* DockView.swift */; };
+		B1000000000000000000001C /* BuildDrawer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001C /* BuildDrawer.swift */; };
+		B1000000000000000000001D /* ToolCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001D /* ToolCard.swift */; };
+		B1000000000000000000001E /* ProblemsPopover.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001E /* ProblemsPopover.swift */; };
+		B1000000000000000000001F /* FacilitySheets.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001F /* FacilitySheets.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -35,16 +38,19 @@
 		A10000000000000000000006 /* SaveManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SaveManager.swift; sourceTree = "<group>"; };
 		A10000000000000000000007 /* GameStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameStore.swift; sourceTree = "<group>"; };
 		A10000000000000000000008 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
-		A10000000000000000000009 /* LineView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LineView.swift; sourceTree = "<group>"; };
-		A10000000000000000000010 /* ProcessDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessDetailView.swift; sourceTree = "<group>"; };
-		A10000000000000000000011 /* ShopView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShopView.swift; sourceTree = "<group>"; };
 		A10000000000000000000012 /* StatsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatsView.swift; sourceTree = "<group>"; };
 		A10000000000000000000013 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A10000000000000000000014 /* FabTycoon.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FabTycoon.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000015 /* Simulation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Simulation.swift; sourceTree = "<group>"; };
 		A10000000000000000000016 /* Layout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Layout.swift; sourceTree = "<group>"; };
 		A10000000000000000000017 /* OfflineProgress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineProgress.swift; sourceTree = "<group>"; };
-		A10000000000000000000018 /* FloorGridView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloorGridView.swift; sourceTree = "<group>"; };
+		A10000000000000000000019 /* MapScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapScene.swift; sourceTree = "<group>"; };
+		A1000000000000000000001A /* HUDView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HUDView.swift; sourceTree = "<group>"; };
+		A1000000000000000000001B /* DockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DockView.swift; sourceTree = "<group>"; };
+		A1000000000000000000001C /* BuildDrawer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildDrawer.swift; sourceTree = "<group>"; };
+		A1000000000000000000001D /* ToolCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolCard.swift; sourceTree = "<group>"; };
+		A1000000000000000000001E /* ProblemsPopover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProblemsPopover.swift; sourceTree = "<group>"; };
+		A1000000000000000000001F /* FacilitySheets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FacilitySheets.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -113,11 +119,14 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000008 /* ContentView.swift */,
-				A10000000000000000000009 /* LineView.swift */,
-				A10000000000000000000010 /* ProcessDetailView.swift */,
-				A10000000000000000000011 /* ShopView.swift */,
+				A10000000000000000000019 /* MapScene.swift */,
+				A1000000000000000000001A /* HUDView.swift */,
+				A1000000000000000000001B /* DockView.swift */,
+				A1000000000000000000001C /* BuildDrawer.swift */,
+				A1000000000000000000001D /* ToolCard.swift */,
+				A1000000000000000000001E /* ProblemsPopover.swift */,
+				A1000000000000000000001F /* FacilitySheets.swift */,
 				A10000000000000000000012 /* StatsView.swift */,
-				A10000000000000000000018 /* FloorGridView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -208,14 +217,17 @@
 				B10000000000000000000006 /* SaveManager.swift in Sources */,
 				B10000000000000000000007 /* GameStore.swift in Sources */,
 				B10000000000000000000008 /* ContentView.swift in Sources */,
-				B10000000000000000000009 /* LineView.swift in Sources */,
-				B10000000000000000000010 /* ProcessDetailView.swift in Sources */,
-				B10000000000000000000011 /* ShopView.swift in Sources */,
+				B10000000000000000000019 /* MapScene.swift in Sources */,
+				B1000000000000000000001A /* HUDView.swift in Sources */,
+				B1000000000000000000001B /* DockView.swift in Sources */,
+				B1000000000000000000001C /* BuildDrawer.swift in Sources */,
+				B1000000000000000000001D /* ToolCard.swift in Sources */,
+				B1000000000000000000001E /* ProblemsPopover.swift in Sources */,
+				B1000000000000000000001F /* FacilitySheets.swift in Sources */,
 				B10000000000000000000012 /* StatsView.swift in Sources */,
 				B10000000000000000000015 /* Simulation.swift in Sources */,
 				B10000000000000000000016 /* Layout.swift in Sources */,
 				B10000000000000000000017 /* OfflineProgress.swift in Sources */,
-				B10000000000000000000018 /* FloorGridView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
