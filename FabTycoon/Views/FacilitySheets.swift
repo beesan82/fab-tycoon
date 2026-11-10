@@ -92,6 +92,12 @@ private struct LibrarySheet: View {
 
     @State private var detailTarget: FacilityStringTarget?
     @State private var didOpenTarget = false
+    /// このセッションで開いた現場ノート（未読バッジ用）。
+    /// 割り切り：保存はしない。seenFieldNoteIds は「トーストで出た＝棚に並ぶ」の意味で使い、
+    /// 「資料室で読んだか」はセーブに持たないため、アプリを再起動すると棚の全ノートが未読に戻る
+    @State private var openedNoteIds: Set<String> = []
+    /// 展開して本文を表示中のノート
+    @State private var expandedNoteId: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -104,6 +110,7 @@ private struct LibrarySheet: View {
             .padding(.horizontal)
             .padding(.vertical, 10)
             .background(.bar)
+            fieldNoteShelf
             GlossaryView()
         }
         .task {
@@ -120,6 +127,128 @@ private struct LibrarySheet: View {
         .sheet(item: $detailTarget) { target in
             GlossaryDetailSheet(entryId: target.id)
                 .environmentObject(store)
+        }
+    }
+
+    // MARK: 現場ノートの書棚（§4.3）
+
+    /// トーストで出た（seenFieldNoteIds に入った）ノートをカタログ順に。0 件なら棚ごと出さない。
+    /// GlossaryView が自前の NavigationStack を持つので List には混ぜず、上に高さを抑えた棚として置く
+    @ViewBuilder
+    private var fieldNoteShelf: some View {
+        let seen = store.state.stats.seenFieldNoteIds
+        let notes = Catalog.fieldNotes.filter { seen.contains($0.id) }
+        if !notes.isEmpty {
+            let unreadCount = notes.filter { !openedNoteIds.contains($0.id) }.count
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 6) {
+                    Label("現場ノート", systemImage: "note.text")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.orange)
+                    Text("\(notes.count) 件")
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if unreadCount > 0 {
+                        Text("未読 \(unreadCount)")
+                            .font(.caption2.bold())
+                            .monospacedDigit()
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.orange))
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(notes) { note in
+                            fieldNoteRow(note)
+                            Divider()
+                                .padding(.leading)
+                        }
+                    }
+                }
+                // 図鑑一覧が隠れないように棚の高さを抑える（展開中は少し広げる）
+                .frame(maxHeight: expandedNoteId == nil ? 180 : 300)
+            }
+            .background(Color(.secondarySystemBackground))
+        }
+    }
+
+    private func fieldNoteRow(_ note: FieldNoteSpec) -> some View {
+        let isExpanded = expandedNoteId == note.id
+        let isUnread = !openedNoteIds.contains(note.id)
+        // fn.little は実数値入りの見出し
+        let title = Engine.fieldNoteTitle(id: note.id, state: store.state, derived: store.derived)
+        return VStack(alignment: .leading, spacing: 8) {
+            Button {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    if isExpanded {
+                        expandedNoteId = nil
+                    } else {
+                        expandedNoteId = note.id
+                        openedNoteIds.insert(note.id)
+                    }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Text(title)
+                        .font(.subheadline.weight(isUnread ? .bold : .regular))
+                        .foregroundStyle(.primary)
+                        .multilineTextAlignment(.leading)
+                        .lineLimit(isExpanded ? nil : 1)
+                        .fixedSize(horizontal: false, vertical: isExpanded)
+                    Spacer(minLength: 4)
+                    if isUnread {
+                        Text("未読")
+                            .font(.caption2.bold())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.orange))
+                    }
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if isExpanded {
+                Text(note.body)
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                fieldNoteGlossaryChips(note.relatedGlossaryIds)
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+    }
+
+    /// 関連図鑑のチップ（FieldNoteToast と同じ見た目）。タップで detailTarget 経由で図鑑詳細を重ねる。
+    /// 未解放の用語は本文を見せない扱い（.task の targetId と同じ）なので、鍵つきで無効にする
+    private func fieldNoteGlossaryChips(_ ids: [String]) -> some View {
+        let terms = ids.compactMap { Catalog.glossaryTerm(id: $0) }
+        let unlockedIds = Set(Engine.glossaryEntries(state: store.state).filter { $0.unlocked }.map { $0.id })
+        return ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(terms) { term in
+                    let unlocked = unlockedIds.contains(term.id)
+                    Button {
+                        detailTarget = FacilityStringTarget(id: term.id)
+                    } label: {
+                        Label(term.term, systemImage: unlocked ? "books.vertical" : "lock.fill")
+                            .font(.caption.bold())
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .tint(.orange)
+                    .disabled(!unlocked)
+                }
+            }
         }
     }
 }
@@ -148,6 +277,8 @@ struct EntrySheet: View {
     @EnvironmentObject private var store: GameStore
 
     @State private var nodeSwitchTarget: FacilityStringTarget?
+    /// リトルの法則ライブの項をタップしたときに資料室で開く図鑑エントリ
+    @State private var glossaryTarget: FacilityStringTarget?
 
     var body: some View {
         let state = store.state
@@ -156,10 +287,15 @@ struct EntrySheet: View {
         List {
             nodeSection(state: state, node: node)
             productSection(state: state)
+            littleLawSection(state: state)
             learningSection(state: state, derived: derived, node: node)
         }
         .sheet(item: $nodeSwitchTarget) { target in
             NodeSwitchSheet(targetNodeId: target.id)
+                .environmentObject(store)
+        }
+        .sheet(item: $glossaryTarget) { target in
+            LibrarySheet(targetId: target.id)
                 .environmentObject(store)
         }
     }
@@ -303,6 +439,84 @@ struct EntrySheet: View {
         .padding(.vertical, 4)
     }
 
+    // MARK: リトルの法則ライブ（§4.4）
+
+    /// 実測の 3 値で WIP ＝ スループット × サイクルタイム を見せる。
+    /// 値は Engine.fieldNoteTitle の fn.little と同じ出どころ（ロット数・throughputEMA ÷ 25・cycleTimeEMA ÷ 60）
+    @ViewBuilder
+    private func littleLawSection(state: GameState) -> some View {
+        let sim = state.fab.sim
+        let wip = sim?.lots.count ?? 0
+        // throughputEMA はウェハ／ゲーム時間 → 1 FOUP ＝ 25 枚で FOUP／時に
+        let throughput = (sim?.throughputEMA ?? 0) / 25
+        // cycleTimeEMA はゲーム分 → ゲーム時間に
+        let cycleTime = (sim?.cycleTimeEMA ?? 0) / 60
+        Section {
+            HStack(alignment: .top, spacing: 4) {
+                littleTerm(value: "\(wip)", label: "WIP", unit: "FOUP", termId: "term.wip")
+                littleOperator("＝")
+                littleTerm(value: MoneyFormat.decimal(throughput, digits: 2), label: "スループット", unit: "FOUP／時", termId: "term.little")
+                littleOperator("×")
+                littleTerm(value: MoneyFormat.decimal(cycleTime, digits: 1), label: "サイクルタイム", unit: "時間", termId: "term.cycletime")
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
+            if cycleTime > 0 {
+                Text("ライン上の行列（WIP）が伸びたら、出荷ペースが落ちたのか、1 個が出るまでの時間が延びたのかを見比べよう。装置を足してスループットが上がると、同じ WIP でもサイクルタイムは縮む。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("最初の FOUP が出荷されると、サイクルタイムが測れるようになります。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } header: {
+            Text("リトルの法則ライブ")
+        } footer: {
+            Text("各項をタップすると図鑑が開きます（未解放の用語は一覧のみ）。")
+        }
+    }
+
+    /// 数式の 1 項（大きな値＋名前＋単位）。タップで対応する図鑑エントリを資料室で開く
+    private func littleTerm(value: String, label: String, unit: String, termId: String) -> some View {
+        Button {
+            glossaryTarget = FacilityStringTarget(id: termId)
+        } label: {
+            VStack(spacing: 2) {
+                Text(value)
+                    .font(.title.bold())
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                    .foregroundStyle(.primary)
+                Text(label)
+                    .font(.caption2.bold())
+                    .foregroundStyle(.blue)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Text(unit)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        // List の 1 行に複数ボタンを置くので、行全体ではなく各ボタンだけを反応させる
+        .buttonStyle(.borderless)
+        .accessibilityLabel(Text("\(label) \(value) \(unit)"))
+        .accessibilityHint(Text("図鑑で読む"))
+    }
+
+    private func littleOperator(_ symbol: String) -> some View {
+        Text(symbol)
+            .font(.title2.bold())
+            .foregroundStyle(.secondary)
+            .padding(.top, 4)
+    }
+
     // MARK: 学習枚数（state.learningWafers と DerivedState の学習値）
 
     @ViewBuilder
@@ -310,6 +524,7 @@ struct EntrySheet: View {
         let learned = state.learningWafers[node.id] ?? 0
         let span = node.yieldMax - node.yieldInit
         let progress = span > 0 ? min(max((derived.learnedYield - node.yieldInit) / span, 0), 1) : 1
+        let waferProgress = node.learnWafers > 0 ? min(max(learned / node.learnWafers, 0), 1) : 1
         Section {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
@@ -334,7 +549,19 @@ struct EntrySheet: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.vertical, 4)
-            row("このノードで流した枚数", "\(MoneyFormat.count(learned)) 枚")
+            // 学習枚数の進捗（§4.2）。旧「このノードで流した枚数」の行を、目安 learnWafers 付きのバーに置き換えた
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("累計投入")
+                    Spacer()
+                    Text("\(MoneyFormat.count(learned)) ／ \(MoneyFormat.count(node.learnWafers)) 枚")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                ProgressView(value: waferProgress)
+                    .tint(.blue)
+            }
+            .padding(.vertical, 4)
             row("累計投入ウェハ（全ノード）", "\(MoneyFormat.decimal(state.stats.totalWafersInput, digits: 1)) 枚")
         } header: {
             Text("歩留まりの学習")

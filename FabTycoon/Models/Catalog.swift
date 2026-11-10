@@ -750,6 +750,20 @@ enum MilestoneCondition: Equatable {
     case currentNodeIs(String)
     /// 指定ノードで稼働中かつライン歩留まりが target 以上
     case lineYieldAtLeastOnNode(nodeId: String, target: Double)
+    /// stats.railCellsBuilt が値以上
+    case railCellsBuiltAtLeast(Int)
+    /// stats.completedLots が値以上
+    case completedLotsAtLeast(Int)
+    /// ライン成立：寸断がなく、かつラインが流れている
+    case lineConnected
+    /// 戻りレーン（レール網の有向循環路）が完成している
+    case returnLaneBuilt
+    /// 滞留ゼロの状態が指定ゲーム時間（hours）継続
+    case noStallForGameHours(Double)
+    /// サイクルタイム（ゲーム時間 hours）が値未満
+    case cycleTimeBelow(Double)
+    /// レール環（有向循環路）の数が値以上
+    case railLoopsAtLeast(Int)
 }
 
 struct MilestoneSpec: Identifiable, Equatable {
@@ -819,6 +833,35 @@ extension Catalog {
             id: "yield_80_n14", title: "14nm歩留まり80%", condition: .lineYieldAtLeastOnNode(nodeId: "n14", target: 0.80),
             learningNote: "新しいノードの歩留まりは、旧ノードで積み上げた学習がそのまま使えず、低い値からランプし直しになる。量産を流しながら欠陥の原因を一つずつ潰していくことで、ようやく旧ノード並みの水準に追いつく。"
         ),
+        // R2：マップ・搬送まわりの目標
+        MilestoneSpec(
+            id: "first_rail", title: "初めてのレール敷設", condition: .railCellsBuiltAtLeast(1),
+            learningNote: "レールはFOUPを装置から装置へ運ぶ道。現実のファブでは天井にOHT（天井搬送車）の軌道が張り巡らされ、人の手を介さずにウェハが運ばれる。"
+        ),
+        MilestoneSpec(
+            id: "first_lot_complete", title: "初ロット完成", condition: .completedLotsAtLeast(1),
+            learningNote: "25枚のウェハが全工程を通り抜けて、初めて製品になった。現実の28nmでは投入から出荷まで1〜2か月かかり、その長さ（サイクルタイム）もファブの実力を表す指標になる。"
+        ),
+        MilestoneSpec(
+            id: "line_connected", title: "ライン成立", condition: .lineConnected,
+            learningNote: "装置を並べただけではラインにならない。投入口から出荷口まで、全工程が搬送でつながって初めてウェハが流れ出す。"
+        ),
+        MilestoneSpec(
+            id: "return_lane", title: "戻りレーン完成", condition: .returnLaneBuilt,
+            learningNote: "ウェハは層を重ねるたびに同じ工程へ何度も戻る（リエントラント）。行きの道だけでなく戻りの道があることで、FOUPは詰まらずに装置を巡回できる。"
+        ),
+        MilestoneSpec(
+            id: "no_stall_day", title: "滞留ゼロの1日", condition: .noStallForGameHours(24),
+            learningNote: "丸1日、どのレールにもFOUPの行列ができなかった。装置の能力と投入のペースが釣り合っているラインは、仕掛かりが少なく流れが速い。"
+        ),
+        MilestoneSpec(
+            id: "cycle_time_40", title: "サイクルタイム40時間未満", condition: .cycleTimeBelow(40),
+            learningNote: "サイクルタイムは、投入したロットが出荷されるまでの時間。リトルの法則（WIP＝スループット×サイクルタイム）により、同じ生産量なら仕掛かりを減らすほど短くなる。"
+        ),
+        MilestoneSpec(
+            id: "second_loop", title: "2本目のレール環", condition: .railLoopsAtLeast(2),
+            learningNote: "大きなファブでは、工程ごとの小さな環（イントラベイ）と、それらを結ぶ幹線の環（インターベイ）を組み合わせて搬送する。環を分けると、一か所の渋滞がライン全体に広がりにくくなる。"
+        ),
     ]
 
     private static let milestoneIndex: [String: MilestoneSpec] =
@@ -842,6 +885,8 @@ enum GlossaryUnlock: Equatable {
     case defectDetected
     /// stats.totalMarketDefectChips > 0
     case marketDefectOccurred
+    /// 関連する現場ノートが既読（stats.seenFieldNoteIds に含まれる）
+    case fieldNoteSeen(String)
 }
 
 struct GlossaryTerm: Identifiable, Equatable {
@@ -1020,12 +1065,223 @@ extension Catalog {
             body: "新しいプロセスや工場の生産量と歩留まりを、量産水準まで引き上げていく立ち上げ期間のこと（ランプアップ）。この期間の速さが新世代の収益を左右するため、各社は立ち上げの速さを競っている。このゲームでも累計投入ウェハが増えるほど歩留まりが上がり、90%に届けば一流の量産ラインと言える。",
             unlock: .milestone("yield_90")
         ),
+        // 現場ノート既読で解放（R2）
+        GlossaryTerm(
+            id: "term.lot", term: "ロット", category: "基礎",
+            body: "一緒に処理・搬送されるウェハのまとまりで、通常は25枚で1ロット。現実のファブではロット単位で処理の履歴が記録され、不良が出たときの追跡にも使われる。このゲームでもウェハは25枚1ロットで投入口を出て、ロット単位で装置を巡る。",
+            unlock: .fieldNoteSeen("fn.first_lot")
+        ),
+        GlossaryTerm(
+            id: "term.foup", term: "FOUP", category: "基礎",
+            body: "Front Opening Unified Pod の略で、300mmウェハを最大25枚収める密閉式の搬送容器。中を清浄に保ったまま運べるため、クリーンルーム全体よりも容器の中のほうがきれいなほど。このゲームでマップ上を動く小さな箱が、ロットを入れたFOUP。",
+            unlock: .fieldNoteSeen("fn.first_lot")
+        ),
+        GlossaryTerm(
+            id: "term.amhs", term: "AMHS", category: "製造",
+            body: "Automated Material Handling System（自動搬送システム）の略で、FOUPを装置や倉庫の間で自動的に運ぶ仕組みの総称。先端ファブでは1日に数万回の搬送を人手なしでこなす。このゲームのレール・ストッカー・投入口・出荷口をまとめたものがAMHSにあたる。",
+            unlock: .fieldNoteSeen("fn.first_rail")
+        ),
+        GlossaryTerm(
+            id: "term.oht", term: "OHT", category: "製造",
+            body: "Overhead Hoist Transport（天井搬送車）の略で、天井のレールを走りFOUPを吊り下げて運ぶ搬送車。装置の真上で止まり、ホイストでFOUPを降ろしてロードポートに置く。このゲームで敷くレールは、このOHTの軌道を表している。",
+            unlock: .fieldNoteSeen("fn.first_rail")
+        ),
+        GlossaryTerm(
+            id: "term.stocker", term: "ストッカー", category: "製造",
+            body: "FOUPを一時的に保管する自動倉庫。次の装置が空くまでの待ち場所になり、ラインの流れのムラを吸収する。このゲームでもストッカーに行き場のないFOUPが預けられ、たまり続けるのは先の工程が足りないサインになる。",
+            unlock: .fieldNoteSeen("fn.stocker")
+        ),
+        GlossaryTerm(
+            id: "term.loadport", term: "ロードポート", category: "製造",
+            body: "装置の正面にある、FOUPを置いてウェハを出し入れするための受け渡し口。FOUPの扉を自動で開け、中のウェハを装置内のロボットが取り出す。このゲームでは装置のロードポートがレールにつながっていないと、FOUPが届かず装置は動けない。",
+            unlock: .fieldNoteSeen("fn.unconnected")
+        ),
+        GlossaryTerm(
+            id: "term.wip", term: "WIP", category: "製造",
+            body: "Work In Process（仕掛かり品）の略で、投入されたがまだ出荷されていない製品のこと。WIPが多すぎると待ち行列が伸び、少なすぎると装置が手待ちになる。このゲームではライン上にあるFOUPの数がWIPで、レールの熱色やストッカーの在庫として見える。",
+            unlock: .fieldNoteSeen("fn.queue_seen")
+        ),
+        GlossaryTerm(
+            id: "term.cycletime", term: "サイクルタイム", category: "製造",
+            body: "ロットを投入してから出荷されるまでにかかる時間。処理そのものより待ち時間が大半を占めることが多く、現実の先端ロジックでは数か月に及ぶ。このゲームでは出荷されたロットの所要ゲーム時間の平均として測り、短いほど資金の回りが速い。",
+            unlock: .fieldNoteSeen("fn.little")
+        ),
+        GlossaryTerm(
+            id: "term.little", term: "リトルの法則", category: "製造",
+            body: "安定したラインでは「WIP＝スループット×サイクルタイム」が成り立つという待ち行列理論の法則。生産量を変えずにサイクルタイムを縮めたければ、仕掛かりを減らせばよいことを示す。このゲームでは投入口の「リトルの法則ライブ」で、実際の数値が両辺で釣り合う様子を確かめられる。",
+            unlock: .fieldNoteSeen("fn.little")
+        ),
+        GlossaryTerm(
+            id: "term.reentrant", term: "リエントラント", category: "製造",
+            body: "同じ工程や装置にウェハが何度も戻ってくる流れ方（再入型）。層を重ねるたびに成膜・露光・エッチングを繰り返す半導体製造の大きな特徴で、自動車の組立ラインのような一方通行とは違う。このゲームでも28nmのロットは露光を15回通るため、行きと戻りの両方の搬送路が必要になる。",
+            unlock: .fieldNoteSeen("fn.reentrant")
+        ),
+        GlossaryTerm(
+            id: "term.conwip", term: "CONWIP", category: "製造",
+            body: "Constant WIP の略で、ライン上の仕掛かりの総数を一定に保ち、1ロット出荷されたら1ロット投入する投入管理の方式。入れすぎによる渋滞や行き詰まり（デッドロック）を防ぎ、サイクルタイムを安定させる。このゲームでデッドロックが起きたら、投入を絞ってWIPを抑えるのが第一の対策になる。",
+            unlock: .fieldNoteSeen("fn.deadlock")
+        ),
     ]
 
     private static let glossaryTermIndex: [String: GlossaryTerm] =
         Dictionary(uniqueKeysWithValues: glossaryTerms.map { ($0.id, $0) })
 
     static func glossaryTerm(id: String) -> GlossaryTerm? { glossaryTermIndex[id] }
+}
+
+// MARK: - 現場ノート
+
+/// 現場ノートの発生条件（判定は Engine.pendingFieldNotes が state/derived から決定的に行う）
+enum FieldNoteTrigger: Equatable {
+    /// 新規ゲームで最初のロットが投入口を出た
+    case firstLotReleased
+    /// stats.completedLots が 0 → 1
+    case firstLotCompleted
+    /// bottleneckToolId が初めて非 nil になり、指定ゲーム分（minutes）継続
+    case bottleneckSustained(gameMinutes: Double)
+    /// 購入直後 withinSeconds 秒以内に lineWPH の上昇が minGain 未満
+    case purchaseWithoutWPHGain(withinSeconds: Double, minGain: Double)
+    /// レール熱色が初めて橙以上になった
+    case railCongestionOrange
+    /// WIP（ライン上のロット数）≥ minWIP かつ cycleTimeEMA > 0 が初めて成立
+    case littleLawObservable(minWIP: Int)
+    /// 追跡中の FOUP が同一工程の 2 回目に入った
+    case trackedLotReentered
+    /// stats.railCellsBuilt が 0 → 1 以上
+    case firstRailBuilt
+    /// ストッカー在庫が初めて値以上
+    case stockerInventoryAtLeast(Int)
+    /// 未接続の装置が初めて発生
+    case unconnectedToolAppeared
+    /// lineBreak（ラインの寸断）が初めて発生
+    case lineBreakOccurred
+    /// デッドロックが初めて発生
+    case deadlockOccurred
+    /// 赤帯 FOUP（検査で不良が見つかったロット）が初めて出た
+    case redBandLotAppeared
+    /// stats.totalMarketDefectChips が初めて > 0
+    case marketDefectOccurred
+    /// 学習で歩留まりが初期値から points（割合、0.05 = 5pt）以上上がった
+    case learningYieldGain(points: Double)
+    /// marketCondition が初めて .boom
+    case marketBoom
+}
+
+struct FieldNoteSpec: Identifiable, Equatable {
+    let id: String
+    let title: String
+    /// 3〜4 行・120 字以内（出来事の意味と次に見るべき場所）
+    let body: String
+    /// 関連する図鑑エントリid（1〜2件）
+    let relatedGlossaryIds: [String]
+    let trigger: FieldNoteTrigger
+}
+
+extension Catalog {
+    /// 現場ノート。並びは Engine.pendingFieldNotes の評価順
+    static let fieldNotes: [FieldNoteSpec] = [
+        FieldNoteSpec(
+            id: "fn.first_lot", title: "FOUP は 25 枚入り",
+            body: "ウェハは25枚ずつFOUPという密閉容器に入れて運ばれ、このまとまりをロットと呼ぶ。投入口を出たFOUPはレールに乗って最初の装置へ向かう。FOUPをタップすると、その旅を追跡できる。",
+            relatedGlossaryIds: ["term.lot", "term.foup"],
+            trigger: .firstLotReleased
+        ),
+        FieldNoteSpec(
+            id: "fn.first_complete", title: "1 枚のウェハから 100 個のチップ",
+            body: "最初のロットが全工程を終えて出荷口に着いた。ウェハ1枚には碁盤の目のようにダイが並び、切り分けるとそれぞれがチップになる。取れる数は製品で違うので、出荷口で在庫を確かめよう。",
+            relatedGlossaryIds: ["term.wafer", "term.die"],
+            trigger: .firstLotCompleted
+        ),
+        FieldNoteSpec(
+            id: "fn.bottleneck_seen", title: "赤く光る装置がラインの速さを決める",
+            body: "赤く脈打つ装置は、ラインで一番遅い律速工程。ここが詰まると、他の装置がいくら速くても全体は速くならない。装置をタップして工程の実効WPHを確かめよう。",
+            relatedGlossaryIds: ["term.bottleneck"],
+            trigger: .bottleneckSustained(gameMinutes: 60)
+        ),
+        FieldNoteSpec(
+            id: "fn.not_bottleneck", title: "増やしても速くならない工程がある",
+            body: "今の増設では、ラインWPHがほとんど変わらなかった。律速でない工程を増やしても、全体の速さは一番遅い工程で決まる。まず赤く光る装置の工程を探そう。",
+            relatedGlossaryIds: ["term.bottleneck", "term.wph"],
+            trigger: .purchaseWithoutWPHGain(withinSeconds: 30, minGain: 0.05)
+        ),
+        FieldNoteSpec(
+            id: "fn.queue_seen", title: "行列ができるのは次の装置が満杯だから",
+            body: "レールが橙色になり、FOUPが列を作り始めた。次の装置が処理中で受け入れ枠が満杯だと、FOUPは手前で待つしかない。列の先にある装置の能力を見てみよう。",
+            relatedGlossaryIds: ["term.wip"],
+            trigger: .railCongestionOrange
+        ),
+        FieldNoteSpec(
+            id: "fn.little", title: "WIP ＝ スループット × サイクルタイム",
+            body: "ライン上のFOUPの数（WIP）は、出荷ペースと1個が出るまでの時間（サイクルタイム）の掛け算に等しい。投入口の「リトルの法則ライブ」で実際の数字を確かめよう。",
+            relatedGlossaryIds: ["term.little"],
+            trigger: .littleLawObservable(minWIP: 20)
+        ),
+        FieldNoteSpec(
+            id: "fn.reentrant", title: "同じ装置に何度も戻ってくる",
+            body: "追跡中のFOUPが、また同じ工程に戻ってきた。チップは層を何十も重ねて作るため、露光や成膜を何度も通る。追跡カードで今が何回目かを見てみよう。",
+            relatedGlossaryIds: ["term.reentrant"],
+            trigger: .trackedLotReentered
+        ),
+        FieldNoteSpec(
+            id: "fn.first_rail", title: "レールの正体は天井を走る OHT",
+            body: "このレールは、現実のファブでは天井を走るOHT（天井搬送車）の軌道。FOUPを吊り下げて運ぶ自動搬送の仕組みをAMHSと呼ぶ。装置どうしがつながったか確かめよう。",
+            relatedGlossaryIds: ["term.amhs", "term.oht"],
+            trigger: .firstRailBuilt
+        ),
+        FieldNoteSpec(
+            id: "fn.stocker", title: "ストッカーは自動倉庫",
+            body: "ストッカーに10個以上のFOUPがたまった。ストッカーは、次の装置が空くまでFOUPを預かる自動倉庫。たまり続けるなら、その先の工程が足りていないサイン。",
+            relatedGlossaryIds: ["term.stocker"],
+            trigger: .stockerInventoryAtLeast(10)
+        ),
+        FieldNoteSpec(
+            id: "fn.unconnected", title: "置いただけでは動かない",
+            body: "レールにつながっていない装置がある。FOUPはロードポート（装置の受け渡し口）からしか出入りできず、置いただけでは仕事が来ない。建設からレールを敷いてつなごう。",
+            relatedGlossaryIds: ["term.loadport"],
+            trigger: .unconnectedToolAppeared
+        ),
+        FieldNoteSpec(
+            id: "fn.line_break", title: "戻りレーンが要る理由",
+            body: "ラインが途切れ、FOUPが次の工程へ進めなくなった。ウェハは同じ工程に何度も戻るので、行きの道だけでなく戻りのレーンが要る。矢印の示す区間にレールを足そう。",
+            relatedGlossaryIds: ["term.reentrant"],
+            trigger: .lineBreakOccurred
+        ),
+        FieldNoteSpec(
+            id: "fn.deadlock", title: "お互いに道をふさぐ",
+            body: "FOUPどうしが互いの行き先をふさぎ、ラインが止まった。仕掛かり（WIP）を入れすぎると起きやすい。投入を絞るか、ストッカーや迂回レールで逃げ場を作ろう。",
+            relatedGlossaryIds: ["term.wip"],
+            trigger: .deadlockOccurred
+        ),
+        FieldNoteSpec(
+            id: "fn.red_foup", title: "検査して初めて不良が見える",
+            body: "赤帯のFOUPは、検査で不良が見つかったロット。不良は各工程で生まれるが、検査を通るまでは見えない。検査装置の能力と検出率を確かめよう。",
+            relatedGlossaryIds: ["term.screening"],
+            trigger: .redBandLotAppeared
+        ),
+        FieldNoteSpec(
+            id: "fn.market_defect", title: "見逃した不良は客先で見つかる",
+            body: "検査をすり抜けた不良が客先に届き、返品対応のペナルティが発生した。検査の余裕が足りないと見逃しが増える。事務所の統計で市場不良の件数を確かめよう。",
+            relatedGlossaryIds: ["term.market_defect"],
+            trigger: .marketDefectOccurred
+        ),
+        FieldNoteSpec(
+            id: "fn.learning", title: "流すほど上手くなる",
+            body: "歩留まりが最初より5ポイント上がった。ウェハを流すほど現場に知恵がたまり、欠陥が減っていく（学習曲線）。投入口で学習の進み具合を見てみよう。",
+            relatedGlossaryIds: ["term.learning_curve", "term.ramp"],
+            trigger: .learningYieldGain(points: 0.05)
+        ),
+        FieldNoteSpec(
+            id: "fn.boom", title: "シリコンサイクル",
+            body: "市況が好況に入り、チップの単価が上がった。半導体は数年ごとに好不況を繰り返す（シリコンサイクル）。出荷口で在庫をためて好況に売る判断もできる。",
+            relatedGlossaryIds: ["term.market"],
+            trigger: .marketBoom
+        ),
+    ]
+
+    private static let fieldNoteIndex: [String: FieldNoteSpec] =
+        Dictionary(uniqueKeysWithValues: fieldNotes.map { ($0.id, $0) })
+
+    static func fieldNote(id: String) -> FieldNoteSpec? { fieldNoteIndex[id] }
 }
 
 // MARK: - 歩留まり異常（エクスカーション）

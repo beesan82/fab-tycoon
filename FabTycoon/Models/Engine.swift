@@ -924,9 +924,15 @@ enum Engine {
         guard let placedTool = layout.placed(ToolInstance(instance: instance), origin: origin, rotation: rotation,
                                              among: state.fab.placed)
         else { return false }
+        let lineWPHBefore = derived(state: state).lineWPH
         state.cashYen -= model.priceYen
         state.fab.placed.append(placedTool)
         state.subsidy.totalInvestedYen += model.priceYen
+        // 現場ノート fn.not_bottleneck 用：この購入がラインを速くしなかった（ラインWPHの上昇が閾値未満）
+        // という事実だけを記録する。ノートを出すかどうかは pendingFieldNotes が判定する
+        if derived(state: state).lineWPH - lineWPHBefore < notBottleneckMinGainWPH {
+            state.stats.noteTriggerMemo[notBottleneckMemoKey] = state.gameHoursElapsed
+        }
         return true
     }
 
@@ -2049,12 +2055,100 @@ extension Engine {
             return state.fab.currentNodeId == nodeId
         case .lineYieldAtLeastOnNode(let nodeId, let target):
             return state.fab.currentNodeId == nodeId && derived.lineYield >= target
+        case .railCellsBuiltAtLeast(let target):
+            return state.stats.railCellsBuilt >= target
+        case .completedLotsAtLeast(let target):
+            return state.stats.completedLots >= target
+        case .lineConnected:
+            return isLineConnected(state: state, derived: derived)
+        case .returnLaneBuilt:
+            return railLoopCount(state: state) >= 1
+        case .railLoopsAtLeast(let target):
+            return railLoopCount(state: state) >= target
+        case .noStallForGameHours(let hours):
+            return !hasRailStall(state: state)
+                && derived.lineWPH > 0
+                && (state.fab.sim?.stats.releasedLots ?? 0) > 0
+                && state.gameHoursElapsed - lastStallGameHours(state: state) >= hours
+        case .cycleTimeBelow(let hours):
+            let cycleTimeHours = cycleTimeGameHours(state: state)
+            return cycleTimeHours > 0 && cycleTimeHours < hours
         }
+    }
+
+    /// 最後に滞留を観測した gameHoursElapsed を残すメモキー
+    static let lastStallMemoKey = "ms.lastStallGameHours"
+
+    /// 最後に滞留を観測した gameHoursElapsed（未観測なら 0）
+    private static func lastStallGameHours(state: GameState) -> Double {
+        state.stats.noteTriggerMemo[lastStallMemoKey] ?? 0
+    }
+
+    /// サイクルタイム（cycleTimeEMA はゲーム分）をゲーム時間に直したもの。sim が無ければ 0
+    private static func cycleTimeGameHours(state: GameState) -> Double {
+        (state.fab.sim?.cycleTimeEMA ?? 0) / 60
+    }
+
+    /// ライン成立：寸断が無く、ラインが流れている（マイルストーン lineConnected・ミッション段「つなぐ」で共用）
+    private static func isLineConnected(state: GameState, derived: DerivedState) -> Bool {
+        !layoutProblems(state: state).contains { problem in
+            if case .lineBreak = problem { return true }
+            return false
+        } && derived.lineWPH > 0
+    }
+
+    /// 滞留があるか：レール上で止まっているロット（.rail で progress >= 0.999）がある、またはデッドロック中
+    private static func hasRailStall(state: GameState) -> Bool {
+        let stopped = state.fab.sim?.lots.contains { lot in
+            if case .rail(_, let progress) = lot.location { return progress >= 0.999 }
+            return false
+        } ?? false
+        return stopped || isSimDeadlocked(state: state)
+    }
+
+    /// レール網の「環」の数。RailGraph の exits を向きを問わない無向グラフとみなし、
+    /// 循環数（辺の数 − 頂点の数 ＋ 連結成分の数）で数える。頂点は exits の始点・終点に現れるレールセルのみ、
+    /// 辺は重複を除いた無向ペア。単純な一つの環なら 1、木（行き止まりのある一本道など）なら 0 になる。
+    /// レイアウトが無ければ 0
+    static func railLoopCount(state: GameState) -> Int {
+        guard let layout = state.fab.layout else { return 0 }
+        let graph = RailGraph(layout: layout)
+        var vertices = Set<GridPoint>()
+        var edges = Set<[GridPoint]>()
+        var neighbors: [GridPoint: [GridPoint]] = [:]
+        for point in graph.cells.keys {
+            for exit in graph.exits(of: point) where exit.to != point && graph.cells[exit.to] != nil {
+                let pair = [point, exit.to].sorted { ($0.y, $0.x) < ($1.y, $1.x) }
+                guard edges.insert(pair).inserted else { continue }
+                vertices.insert(point)
+                vertices.insert(exit.to)
+                neighbors[point, default: []].append(exit.to)
+                neighbors[exit.to, default: []].append(point)
+            }
+        }
+        var components = 0
+        var visited = Set<GridPoint>()
+        for seed in vertices where !visited.contains(seed) {
+            components += 1
+            visited.insert(seed)
+            var stack = [seed]
+            while let point = stack.popLast() {
+                for next in neighbors[point] ?? [] where !visited.contains(next) {
+                    visited.insert(next)
+                    stack.append(next)
+                }
+            }
+        }
+        return edges.count - vertices.count + components
     }
 
     /// 未達成のマイルストーンを評価し、達成したものを記録する。今回達成した id を返す
     @discardableResult
     static func evaluateMilestones(state: inout GameState) -> [String] {
+        // 滞留ゼロの継続判定（noStallForGameHours）の起点：条件判定の前に最後の滞留時刻を更新する
+        if hasRailStall(state: state) {
+            state.stats.noteTriggerMemo[lastStallMemoKey] = state.gameHoursElapsed
+        }
         let pending = Catalog.milestones.filter { state.stats.achievedMilestones[$0.id] == nil }
         guard !pending.isEmpty else { return [] }
         let d = derived(state: state)
@@ -2096,6 +2190,21 @@ extension Engine {
             return ratio(Double(state.fab.expansionCount), Double(target))
         case .maxLevelAtLeast(let target):
             return ratio(Double(maxOwnedLevel(state: state)), Double(target))
+        case .railCellsBuiltAtLeast(let target):
+            return ratio(Double(state.stats.railCellsBuilt), Double(target))
+        case .completedLotsAtLeast(let target):
+            return ratio(Double(state.stats.completedLots), Double(target))
+        case .railLoopsAtLeast(let target):
+            return ratio(Double(railLoopCount(state: state)), Double(target))
+        case .lineConnected, .returnLaneBuilt:
+            return milestoneAchieved(spec, state: state, derived: derived) ? 1 : 0
+        case .noStallForGameHours(let hours):
+            guard !hasRailStall(state: state) else { return 0 }
+            return ratio(state.gameHoursElapsed - lastStallGameHours(state: state), hours)
+        case .cycleTimeBelow(let hours):
+            let cycleTimeHours = cycleTimeGameHours(state: state)
+            guard cycleTimeHours > 0 else { return 0 }
+            return min(hours / cycleTimeHours, 1)
         }
     }
 
@@ -2131,6 +2240,24 @@ extension Engine {
             let name = Catalog.node(id: nodeId)?.displayName ?? nodeId
             let current = state.fab.currentNodeId == nodeId ? MoneyFormat.percent(derived.lineYield) : "未移行"
             return (current, "\(name)で\(MoneyFormat.percent(target))")
+        case .railCellsBuiltAtLeast(let target):
+            return ("\(state.stats.railCellsBuilt)セル", "\(target)セル")
+        case .completedLotsAtLeast(let target):
+            return ("\(state.stats.completedLots)ロット", "\(target)ロット")
+        case .lineConnected:
+            return (achieved ? "達成" : "未達成", "ラインをつなぐ")
+        case .returnLaneBuilt:
+            return (achieved ? "達成" : "未達成", "戻りレーンを完成させる")
+        case .railLoopsAtLeast(let target):
+            return ("\(railLoopCount(state: state))本", "\(target)本")
+        case .noStallForGameHours(let hours):
+            // 滞留中は evaluateMilestones が起点を今に更新するので、経過は 0 に近い値になる
+            let elapsed = max(0, state.gameHoursElapsed - lastStallGameHours(state: state))
+            return (MoneyFormat.decimal(elapsed, digits: 1), "\(hours)時間")
+        case .cycleTimeBelow(let hours):
+            let cycleTimeHours = cycleTimeGameHours(state: state)
+            let current = cycleTimeHours > 0 ? MoneyFormat.decimal(cycleTimeHours, digits: 1) : "―"
+            return (current, "\(hours)時間未満")
         }
     }
 }
@@ -2169,6 +2296,8 @@ extension Engine {
             return state.stats.totalDefectChips > 0
         case .marketDefectOccurred:
             return state.stats.totalMarketDefectChips > 0
+        case .fieldNoteSeen(let noteId):
+            return state.stats.seenFieldNoteIds.contains(noteId)
         }
     }
 
@@ -2282,5 +2411,299 @@ extension Engine {
             return "次の目標は『\(spec.title)』です（進捗 \(MoneyFormat.percent(progress, digits: 0))）。"
         }
         return "全ての目標を達成しました。ラインは順調に稼働しています。"
+    }
+}
+
+// MARK: - ロット進捗・レール滞留・寸断アンカー（R2、simcity-rebuild §3.1・§3.3・§4.5・§5.4）
+
+/// 検査通過後の FOUP の品質帯（§3.3）。検査前は none（検査するまで分からない）
+enum LotQualityBand: Equatable {
+    case none
+    case red
+    case green
+}
+
+/// FOUP 追跡（LotCard）用のロット進捗照会結果
+struct LotProgress: Equatable {
+    var lotId: UUID
+    /// 次に処理するルートステップ（Lot.stepIndex そのまま、0始まり）
+    var stepIndex: Int
+    var totalSteps: Int
+    /// 現工程（stepIndex がルート範囲外なら nil）
+    var currentProcess: ProcessType?
+    /// 現工程が何回目か（1始まり。currentProcess が nil なら 0）
+    var passNumber: Int
+    /// ルート全体で現工程が何回あるか（currentProcess が nil なら 0）
+    var totalPasses: Int
+    var nextProcess: ProcessType?
+    /// ポートにいる場合の装置 id
+    var currentToolId: UUID?
+    /// 行き先の装置 id（destinationToolId、無ければ destination が .tool のときその id）
+    var destinationToolId: UUID?
+    /// 投入からの経過ゲーム分
+    var elapsedGameMin: Double
+    var waitedGameMin: Double
+    /// 期待良品率（Lot.goodFraction）
+    var expectedGoodFraction: Double
+    /// 検査ステップ通過済みの場合の推定不良率 = (1 − goodFraction) × 検出率。未検査なら nil
+    var lastInspectionDefectRate: Double?
+    var qualityBand: LotQualityBand
+}
+
+extension Engine {
+    /// 品質帯のしきい値（§3.3）：推定不良率がこれ以上なら赤帯
+    static let lotQualityRedThreshold = 0.25
+    /// 品質帯のしきい値（§3.3）：推定不良率がこれ未満なら緑帯
+    static let lotQualityGreenThreshold = 0.10
+
+    /// ロットのルート（ロット自身のノード・露光クラスで組む）
+    private static func lotRouteSteps(_ lot: Lot) -> [ProcessType] {
+        RouteBuilder.routeSteps(node: Catalog.node(id: lot.nodeId) ?? Catalog.defaultNode, lithoClass: lot.lithoClass)
+    }
+
+    /// 検査ステップを通過済み（ルート内の検査ステップが stepIndex より前にある）なら推定不良率、未検査なら nil
+    private static func lotInspectionDefectRate(state: GameState, lot: Lot, steps: [ProcessType]) -> Double? {
+        let passed = steps.prefix(max(0, min(lot.stepIndex, steps.count)))
+        guard passed.contains(.inspection) else { return nil }
+        return (1 - lot.goodFraction) * derived(state: state).detectionRate
+    }
+
+    /// 推定不良率から品質帯を決める（未検査は none、0.10〜0.25 の中間も none）
+    private static func lotQualityBand(defectRate: Double?) -> LotQualityBand {
+        guard let rate = defectRate else { return .none }
+        if rate >= lotQualityRedThreshold { return .red }
+        if rate < lotQualityGreenThreshold { return .green }
+        return .none
+    }
+
+    /// ロットの品質帯。LotCard・マップの FOUP 描画・現場ノート判定で同じ物差しを使う
+    static func lotQualityBand(state: GameState, lot: Lot) -> LotQualityBand {
+        lotQualityBand(defectRate: lotInspectionDefectRate(state: state, lot: lot, steps: lotRouteSteps(lot)))
+    }
+
+    /// ロットの進捗（§4.5）。sim が無い・ロットが無ければ nil
+    static func lotProgress(state: GameState, lotId: UUID) -> LotProgress? {
+        guard let sim = state.fab.sim, let lot = sim.lots.first(where: { $0.id == lotId }) else { return nil }
+        let steps = lotRouteSteps(lot)
+        let index = lot.stepIndex
+        let current: ProcessType? = steps.indices.contains(index) ? steps[index] : nil
+        let next: ProcessType? = steps.indices.contains(index + 1) ? steps[index + 1] : nil
+        var passNumber = 0
+        var totalPasses = 0
+        if let current {
+            passNumber = steps[0...index].filter { $0 == current }.count
+            totalPasses = steps.filter { $0 == current }.count
+        }
+        var currentToolId: UUID? = nil
+        if case .port(let toolId, _) = lot.location {
+            currentToolId = toolId
+        }
+        var destinationToolId = lot.destinationToolId
+        if destinationToolId == nil, case .tool(let toolId) = lot.destination {
+            destinationToolId = toolId
+        }
+        let defectRate = lotInspectionDefectRate(state: state, lot: lot, steps: steps)
+        return LotProgress(
+            lotId: lot.id,
+            stepIndex: index,
+            totalSteps: steps.count,
+            currentProcess: current,
+            passNumber: passNumber,
+            totalPasses: totalPasses,
+            nextProcess: next,
+            currentToolId: currentToolId,
+            destinationToolId: destinationToolId,
+            elapsedGameMin: sim.currentGameMin - lot.releasedAtGameMin,
+            waitedGameMin: lot.waitedGameMin,
+            expectedGoodFraction: lot.goodFraction,
+            lastInspectionDefectRate: defectRate,
+            qualityBand: lotQualityBand(defectRate: defectRate)
+        )
+    }
+
+    /// レール滞留（§3.1 の熱色）：停止セル → そのセルが属する連続停止区間の長さ。
+    /// 停止ロット = location が .rail で progress >= 0.999 のロット（セルは lot.path[cellIndex]、範囲外は無視）。
+    /// 区間の定義：RailGraph の exits で隣り合う停止セル同士を向きを問わず（双方向に）結んだ連結成分。
+    /// 分岐・合流で複数方向に続く場合も、辿れる停止セルはすべて同じ1区間として数える。
+    /// 長さは区間内の停止セルの数（同一セルの重複は1つと数える）。sim・layout が無ければ空
+    static func railCongestion(state: GameState) -> [GridPoint: Int] {
+        guard let sim = state.fab.sim, let layout = state.fab.layout else { return [:] }
+        var stopped = Set<GridPoint>()
+        for lot in sim.lots {
+            guard case .rail(let cellIndex, let progress) = lot.location, progress >= 0.999,
+                  lot.path.indices.contains(cellIndex) else { continue }
+            stopped.insert(lot.path[cellIndex])
+        }
+        guard !stopped.isEmpty else { return [:] }
+
+        // exits は一方向なので、停止セル間の辺を両向きに張った無向グラフにする
+        let graph = RailGraph(layout: layout)
+        var neighbors: [GridPoint: Set<GridPoint>] = [:]
+        for point in stopped {
+            for exit in graph.exits(of: point) where stopped.contains(exit.to) {
+                neighbors[point, default: []].insert(exit.to)
+                neighbors[exit.to, default: []].insert(point)
+            }
+        }
+
+        // 連結成分ごとに大きさを数える（走査は (y, x) 順で決定的）
+        var result: [GridPoint: Int] = [:]
+        for seed in stopped.sorted(by: { ($0.y, $0.x) < ($1.y, $1.x) }) where result[seed] == nil {
+            var component: [GridPoint] = [seed]
+            var visited: Set<GridPoint> = [seed]
+            var head = 0
+            while head < component.count {
+                let point = component[head]
+                head += 1
+                for next in (neighbors[point] ?? []).sorted(by: { ($0.y, $0.x) < ($1.y, $1.x) })
+                where !visited.contains(next) {
+                    visited.insert(next)
+                    component.append(next)
+                }
+            }
+            for point in component {
+                result[point] = component.count
+            }
+        }
+        return result
+    }
+
+    /// 寸断（lineBreak）の点線矢印のアンカー（§3.1）。from・to それぞれ：
+    /// 工程が nil の側は投入口（from）／出荷口（to）のセルの重心、工程がある側はその工程の設置済み装置の全セルの重心。
+    /// lineBreak でない・レイアウトが無い・対象工程の装置が1台も無ければ nil
+    static func lineBreakAnchors(state: GameState, problem: LayoutProblem) -> (from: GridPoint, to: GridPoint)? {
+        guard case .lineBreak(let fromProcess, let toProcess) = problem,
+              let layout = state.fab.layout else { return nil }
+        let tools = installedTools(state: state)
+
+        func processCells(_ process: ProcessType) -> [GridPoint] {
+            tools.filter { Catalog.model(id: $0.modelId)?.process == process }.flatMap { layout.cells(of: $0) }
+        }
+        /// 座標の平均を最も近い整数へ丸めた点（セルが無ければ nil）
+        func centroid(_ cells: [GridPoint]) -> GridPoint? {
+            guard !cells.isEmpty else { return nil }
+            let count = Double(cells.count)
+            let x = Double(cells.reduce(0) { $0 + $1.x }) / count
+            let y = Double(cells.reduce(0) { $0 + $1.y }) / count
+            return GridPoint(x: Int(x.rounded()), y: Int(y.rounded()))
+        }
+
+        let fromCells = fromProcess.map { processCells($0) } ?? layout.entryCells()
+        let toCells = toProcess.map { processCells($0) } ?? layout.shippingCells()
+        guard let from = centroid(fromCells), let to = centroid(toCells) else { return nil }
+        return (from: from, to: to)
+    }
+}
+
+// MARK: - 現場ノート・ガイド付きミッション（R2、simcity-rebuild §4.6）
+
+extension Engine {
+    /// 律速が続いている起点（最初に観測した gameHoursElapsed）を残すメモキー
+    static let bottleneckFirstAtMemoKey = "fn.bottleneck.firstAt"
+    /// 購入してもラインWPHがほぼ上がらなかった時刻を残すメモキー
+    static let notBottleneckMemoKey = "fn.not_bottleneck.at"
+    /// fn.not_bottleneck の閾値：購入によるラインWPHの上昇がこれ未満なら「速くならなかった」
+    static let notBottleneckMinGainWPH = 0.05
+    /// レール熱色が橙以上とみなす連続停止区間の長さ（railCongestion の値）
+    static let railCongestionOrangeLength = 4
+
+    /// 現場ノート判定の補助メモを更新する。律速がある間は最初に観測した時刻を保持し（既にあれば維持）、
+    /// 律速が無くなったらキーを消す
+    static func updateFieldNoteMemo(state: inout GameState, derived: DerivedState) {
+        if derived.bottleneck != nil {
+            if state.stats.noteTriggerMemo[bottleneckFirstAtMemoKey] == nil {
+                state.stats.noteTriggerMemo[bottleneckFirstAtMemoKey] = state.gameHoursElapsed
+            }
+        } else {
+            state.stats.noteTriggerMemo[bottleneckFirstAtMemoKey] = nil
+        }
+    }
+
+    /// 発生条件を満たした未読の現場ノート id（Catalog.fieldNotes の順。決定的）
+    static func pendingFieldNotes(state: GameState, derived: DerivedState) -> [String] {
+        let unseen = Catalog.fieldNotes.filter { !state.stats.seenFieldNoteIds.contains($0.id) }
+        guard !unseen.isEmpty else { return [] }
+        let sim = state.fab.sim
+        let memo = state.stats.noteTriggerMemo
+        let problems = layoutProblems(state: state)
+
+        func isTriggered(_ trigger: FieldNoteTrigger) -> Bool {
+            switch trigger {
+            case .firstLotReleased:
+                return (sim?.stats.releasedLots ?? 0) >= 1
+            case .firstLotCompleted:
+                return state.stats.completedLots >= 1
+            case .bottleneckSustained(let minutes):
+                guard let firstAt = memo[bottleneckFirstAtMemoKey], derived.bottleneck != nil else { return false }
+                return state.gameHoursElapsed - firstAt >= minutes / 60
+            case .purchaseWithoutWPHGain:
+                return memo[notBottleneckMemoKey] != nil
+            case .railCongestionOrange:
+                return (railCongestion(state: state).values.max() ?? 0) >= railCongestionOrangeLength
+            case .littleLawObservable(let minWIP):
+                return (sim?.lots.count ?? 0) >= minWIP && (sim?.cycleTimeEMA ?? 0) > 0
+            case .trackedLotReentered:
+                // 追跡中のロットは GameStore の状態（Engine は知らない）なので、GameStore 側で判定する
+                return false
+            case .firstRailBuilt:
+                return state.stats.railCellsBuilt >= 1
+            case .stockerInventoryAtLeast(let count):
+                return (sim?.stocker.lotIds.count ?? 0) >= count
+            case .unconnectedToolAppeared:
+                return problems.contains { problem in
+                    switch problem {
+                    case .unconnectedInput, .unconnectedOutput: return true
+                    case .lineBreak: return false
+                    }
+                }
+            case .lineBreakOccurred:
+                return problems.contains { problem in
+                    if case .lineBreak = problem { return true }
+                    return false
+                }
+            case .deadlockOccurred:
+                return isSimDeadlocked(state: state)
+            case .redBandLotAppeared:
+                return sim?.lots.contains { lotQualityBand(state: state, lot: $0) == .red } ?? false
+            case .marketDefectOccurred:
+                return state.stats.totalMarketDefectChips > 0
+            case .learningYieldGain(let points):
+                return derived.learnedYield >= (Catalog.node(id: derived.nodeId)?.yieldInit ?? 0) + points
+            case .marketBoom:
+                return derived.marketCondition == .boom
+            }
+        }
+
+        return unseen.filter { isTriggered($0.trigger) }.map { $0.id }
+    }
+
+    /// 現場ノートのタイトル。fn.little だけはリトルの法則の実数値を埋め込む
+    /// （WIP ＝ スループット[FOUP/時] × サイクルタイム[時間]）
+    static func fieldNoteTitle(id: String, state: GameState, derived: DerivedState) -> String {
+        if id == "fn.little", let sim = state.fab.sim {
+            let wip = sim.lots.count
+            let throughput = MoneyFormat.decimal(sim.throughputEMA / 25, digits: 2)
+            let cycleTime = MoneyFormat.decimal(sim.cycleTimeEMA / 60, digits: 0)
+            return "WIP \(wip) ＝ \(throughput) × \(cycleTime)"
+        }
+        return Catalog.fieldNote(id: id)?.title ?? id
+    }
+
+    /// ガイド付きミッションの段 step（0 始まり。設計書 §4.6 の段 1〜5）が状態から見て満たされているか
+    static func tutorialStepSatisfied(state: GameState, step: Int) -> Bool {
+        switch step {
+        case 0, 1, 2:
+            // 眺める・装置をタップ・律速をタップは UI イベントで、状態からは判定できない。
+            // GameStore.advanceTutorial がイベントを受けて進める
+            return false
+        case 3:
+            // 増やす
+            return state.subsidy.totalInvestedYen > 0
+        case 4:
+            // つなぐ（寸断が無く、ラインが流れている）
+            return isLineConnected(state: state, derived: derived(state: state))
+        default:
+            return false
+        }
     }
 }

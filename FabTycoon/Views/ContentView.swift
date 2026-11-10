@@ -23,10 +23,17 @@ struct ContentView: View {
     @State private var focusNonce = 0
     @State private var toastText: String?
     @State private var toastNonce = 0
+    /// RailCard を出すレールセル（混雑セルのタップで入る）
+    @State private var railCardCell: GridPoint?
+    @State private var stockerCardPresented = false
+    /// 追跡中の FOUP が画面外にあるときの方向矢印（MapScene から。画面内・追跡なしは nil）
+    @State private var trackedLotDirection: String?
 
     /// アドバイザー吹き出しを出しておく秒数（§1.4）
     static let advisorDisplaySeconds: Double = 12
     static let toastDisplaySeconds: Double = 4
+    /// 配置フィードバックチップを出しておく秒数（§3.2）
+    static let placementFeedbackSeconds: Double = 3
 
     var body: some View {
         let state = store.state
@@ -37,10 +44,26 @@ struct ContentView: View {
             MapScene(selectedToolId: $store.selectedToolId,
                      placement: $placement,
                      focusRequest: $focusRequest,
-                     moveRequest: $moveRequest,
+                     moveRequest: $moveRequest, showNumbers: showNumbers,
                      onOpenFacility: { kind in openFacilitySheet(kind) },
                      onOpenEntry: { activeFacilitySheet = .entry },
-                     onOpenShipping: { activeFacilitySheet = .shipping })
+                     onOpenShipping: { activeFacilitySheet = .shipping },
+                     onTrackLot: { lotId in
+                         railCardCell = nil
+                         stockerCardPresented = false
+                         store.trackLot(lotId)
+                     },
+                     onOpenRailCard: { cell in
+                         stockerCardPresented = false
+                         railCardCell = cell
+                     },
+                     onOpenStockerCard: {
+                         railCardCell = nil
+                         stockerCardPresented = true
+                     },
+                     onTrackedLotDirection: { direction in
+                         trackedLotDirection = direction
+                     })
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
@@ -49,6 +72,18 @@ struct ContentView: View {
                 }
                 Spacer(minLength: 0)
                 VStack(spacing: 8) {
+                    if let noteId = store.activeFieldNote {
+                        FieldNoteToast(noteId: noteId,
+                                       onOpenGlossary: { termId in
+                                           glossaryTargetId = termId
+                                           activeFacilitySheet = .library
+                                       })
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+                    if let feedback = store.placementFeedback {
+                        placementFeedbackChip(feedback)
+                            .transition(.opacity)
+                    }
                     bubbleArea(advisorText: advisorText)
                     if facilityRowPresented {
                         facilityRow
@@ -84,6 +119,19 @@ struct ContentView: View {
             try? await Task.sleep(for: .seconds(Self.toastDisplaySeconds))
             guard !Task.isCancelled else { return }
             withAnimation { toastText = nil }
+        }
+        .task(id: store.placementFeedback) {
+            // 新しい配置が来たら（id が変わってタスクが再起動して）3 秒を数え直す
+            guard store.placementFeedback != nil else { return }
+            try? await Task.sleep(for: .seconds(Self.placementFeedbackSeconds))
+            guard !Task.isCancelled else { return }
+            withAnimation { store.clearPlacementFeedback() }
+        }
+        .onChange(of: store.lineEstablishedSignal) { _, _ in
+            showToast("ライン成立！")
+        }
+        .onChange(of: store.selectedToolId) { _, toolId in
+            advanceTutorialOnSelect(toolId)
         }
         .sheet(item: $activeFacilitySheet) { kind in
             FacilitySheetView(kind: kind, glossaryTargetId: glossaryTargetId)
@@ -158,7 +206,42 @@ struct ContentView: View {
                      },
                      onOpenBuild: { process in openBuild(process: process) })
             .transition(.move(edge: .bottom))
+        } else if store.trackedLotId != nil {
+            LotCard(trackedDirection: trackedLotDirection,
+                    onLearn: { entryId in
+                        glossaryTargetId = entryId
+                        activeFacilitySheet = .library
+                    })
+                .transition(.move(edge: .bottom))
+        } else if let railCardCell {
+            RailCard(cell: railCardCell, onClose: { self.railCardCell = nil })
+                .transition(.move(edge: .bottom))
+        } else if stockerCardPresented {
+            StockerCard(onClose: { stockerCardPresented = false })
+                .transition(.move(edge: .bottom))
         }
+    }
+
+    /// 配置直後のチップ（§3.2）：接続 OK（＋ライン WPH が上がったら前後を緑で）／未接続
+    private func placementFeedbackChip(_ feedback: PlacementFeedback) -> some View {
+        HStack(spacing: 8) {
+            if feedback.connected {
+                Label("接続 OK", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                if feedback.lineWPHAfter > feedback.lineWPHBefore {
+                    Text("ライン \(MoneyFormat.decimal(feedback.lineWPHBefore, digits: 1)) → \(MoneyFormat.decimal(feedback.lineWPHAfter, digits: 1))")
+                        .foregroundStyle(.green)
+                        .monospacedDigit()
+                }
+            } else {
+                Label("未接続です（プラグを確認）", systemImage: "powerplug")
+                    .foregroundStyle(.orange)
+            }
+        }
+        .font(.caption.weight(.semibold))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Capsule().fill(.ultraThinMaterial))
     }
 
     /// トースト（優先）かアドバイザー吹き出しの 1 行。問題ポップオーバー表示中は最上段に同じ文が出るので隠す
@@ -319,6 +402,20 @@ struct ContentView: View {
     private func showToast(_ text: String) {
         withAnimation { toastText = text }
         toastNonce += 1
+    }
+
+    /// ミッション連動（§4.6）：段 1「装置をタップ」は装置選択で、段 2「律速を見つける」はボトルネック工程の装置選択で進める
+    private func advanceTutorialOnSelect(_ toolId: UUID?) {
+        guard let toolId else { return }
+        let step = store.state.stats.tutorialStep
+        if step == 1 {
+            store.advanceTutorial()
+        } else if step == 2,
+                  let tool = store.state.fab.placed.first(where: { $0.id == toolId }),
+                  let process = Catalog.model(id: tool.modelId)?.process,
+                  process == store.derived.bottleneck {
+            store.advanceTutorial()
+        }
     }
 
     private func presentWelcomeIfNeeded() {

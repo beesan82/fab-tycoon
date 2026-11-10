@@ -8,6 +8,15 @@ enum BuildDrawerTab: Hashable {
     case remove
 }
 
+/// 装置を置いた直後のフィードバック（§3.2）。接続状況とライン WPH の前後を View に渡す
+struct PlacementFeedback: Equatable {
+    let toolId: UUID
+    let connected: Bool
+    let lineWPHBefore: Double
+    let lineWPHAfter: Double
+    let at: Date
+}
+
 /// ゲーム状態の保持・時間進行・セーブを担う。メインスレッドからのみ使う。
 final class GameStore: ObservableObject {
     @Published var state: GameState
@@ -19,6 +28,15 @@ final class GameStore: ObservableObject {
     @Published var selectedToolId: UUID?
     @Published var buildDrawerTab: BuildDrawerTab = .shop
     @Published var railMode: Bool = false
+    // 以下 R2 の実行時状態（セーブには入れない）
+    /// FOUP 追跡の対象ロット（§4.5）
+    @Published var trackedLotId: UUID?
+    /// トースト表示中の現場ノート id（§4.3）
+    @Published var activeFieldNote: String?
+    /// 配置直後のフィードバック（§3.2）
+    @Published var placementFeedback: PlacementFeedback?
+    /// ライン寸断が解消されるたびに +1。View が「ライン成立」トーストに使う（§3.2）
+    @Published var lineEstablishedSignal: Int = 0
 
     static let tickInterval: TimeInterval = 0.25
     static let maxTickDelta: TimeInterval = 2
@@ -32,6 +50,8 @@ final class GameStore: ObservableObject {
     private var timer: Timer?
     private var lastTick: Date
     private var lastSave: Date
+    /// 直前の評価時点でライン寸断があったか（「ライン成立」の遷移検出用）
+    private var hadLineBreak: Bool
 
     init(saveManager: SaveManager = SaveManager()) {
         var manager = saveManager
@@ -58,6 +78,7 @@ final class GameStore: ObservableObject {
         offlineReport = report
         lastTick = now
         lastSave = now
+        hadLineBreak = Self.containsLineBreak(Engine.layoutProblems(state: loaded))
         start()
     }
 
@@ -89,6 +110,7 @@ final class GameStore: ObservableObject {
         Engine.tick(state: &state, dtRealSeconds: dt)
         Engine.settleResearchIfDue(state: &state, now: now)
         refresh()
+        evaluateR2AfterTick()
         if now.timeIntervalSince(lastSave) >= Self.autosaveInterval {
             save()
         }
@@ -110,6 +132,7 @@ final class GameStore: ObservableObject {
             }
             lastTick = now
             refresh()
+            evaluateR2AfterTick()
             start()
         case .background:
             stop()
@@ -134,6 +157,55 @@ final class GameStore: ObservableObject {
 
     private func refresh() {
         derived = Engine.derived(state: state)
+    }
+
+    // MARK: R2 の tick 後評価
+
+    /// tick（または復帰時の追いつき）の refresh() 後に呼ぶ。現場ノート・ミッション・ライン成立を判定する
+    private func evaluateR2AfterTick() {
+        // (a)「初めて」判定の補助メモを更新
+        Engine.updateFieldNoteMemo(state: &state, derived: derived)
+
+        // (b) 現場ノートの配信：表示中なら待つ。1 回の評価で最大 1 件、出した時点で既読扱い（§4.3）
+        if activeFieldNote == nil {
+            if let noteId = nextFieldNoteToShow() {
+                activeFieldNote = noteId
+                markFieldNoteSeen(noteId)
+            }
+        }
+
+        // (c) ミッション自動進行：状態判定で満たされている段を連続で進める
+        while state.stats.tutorialStep < 5,
+              Engine.tutorialStepSatisfied(state: state, step: state.stats.tutorialStep) {
+            state.stats.tutorialStep += 1
+        }
+
+        // (d) ライン成立の検出：寸断「あり → なし」の遷移でシグナルを上げる
+        let hasLineBreak = Self.containsLineBreak(layoutProblems)
+        if hadLineBreak && !hasLineBreak {
+            lineEstablishedSignal += 1
+        }
+        hadLineBreak = hasLineBreak
+    }
+
+    /// 次にトーストへ出す現場ノート。追跡中ロットのリエントラントを最優先し、次に Engine の判定の先頭
+    private func nextFieldNoteToShow() -> String? {
+        // fn.reentrant は追跡対象が GameStore にあるため、Engine ではなくここで判定する
+        let reentrantId = "fn.reentrant"
+        if let lotId = trackedLotId,
+           !state.stats.seenFieldNoteIds.contains(reentrantId),
+           let progress = Engine.lotProgress(state: state, lotId: lotId),
+           progress.passNumber >= 2 {
+            return reentrantId
+        }
+        return Engine.pendingFieldNotes(state: state, derived: derived).first
+    }
+
+    private static func containsLineBreak(_ problems: [LayoutProblem]) -> Bool {
+        problems.contains { problem in
+            if case .lineBreak = problem { return true }
+            return false
+        }
     }
 
     /// オフライン進行（§1.8 のハイブリッド方式）。結果を OfflineReportSheet 用の OfflineReport に詰め替える
@@ -167,8 +239,14 @@ final class GameStore: ObservableObject {
 
     @discardableResult
     func buyAndPlace(modelId: String, origin: GridPoint, rotation: Int) -> Bool {
+        let placedBefore = Set(state.fab.placed.map(\.id))
+        let wphBefore = derived.lineWPH
         let ok = Engine.buyAndPlace(state: &state, modelId: modelId, origin: origin, rotation: rotation)
         refresh()
+        // 新規インスタンスは配置前後の id 集合の差分で特定する
+        if ok, let newId = state.fab.placed.map(\.id).first(where: { !placedBefore.contains($0) }) {
+            recordPlacementFeedback(toolId: newId, lineWPHBefore: wphBefore)
+        }
         return ok
     }
 
@@ -242,9 +320,36 @@ final class GameStore: ObservableObject {
 
     @discardableResult
     func placeStoredTool(toolId: UUID, origin: GridPoint, rotation: Int) -> Bool {
+        let wphBefore = derived.lineWPH
         let ok = Engine.placeStoredTool(state: &state, toolId: toolId, origin: origin, rotation: rotation)
         refresh()
+        if ok {
+            recordPlacementFeedback(toolId: toolId, lineWPHBefore: wphBefore)
+        }
         return ok
+    }
+
+    /// 配置成功直後に呼ぶ（refresh() 後）。接続状況と WPH の前後を記録する（§3.2）
+    private func recordPlacementFeedback(toolId: UUID, lineWPHBefore: Double) {
+        let connected = !layoutProblems.contains { problem in
+            switch problem {
+            case .unconnectedInput(let id, _), .unconnectedOutput(let id, _):
+                return id == toolId
+            case .lineBreak:
+                return false
+            }
+        }
+        placementFeedback = PlacementFeedback(
+            toolId: toolId,
+            connected: connected,
+            lineWPHBefore: lineWPHBefore,
+            lineWPHAfter: derived.lineWPH,
+            at: Date()
+        )
+    }
+
+    func clearPlacementFeedback() {
+        placementFeedback = nil
     }
 
     @discardableResult
@@ -352,6 +457,30 @@ final class GameStore: ObservableObject {
         state.stats.readGlossaryIds.insert(id)
     }
 
+    // MARK: 現場ノート・FOUP 追跡・ミッション（R2）
+
+    /// 現場ノートを既読にする（保存は通常のオートセーブに任せる）
+    func markFieldNoteSeen(_ id: String) {
+        guard !state.stats.seenFieldNoteIds.contains(id) else { return }
+        state.stats.seenFieldNoteIds.insert(id)
+    }
+
+    func dismissFieldNote() {
+        activeFieldNote = nil
+    }
+
+    /// FOUP 追跡の開始／終了（nil で終了）
+    func trackLot(_ lotId: UUID?) {
+        trackedLotId = lotId
+    }
+
+    /// ガイド付きミッションを UI イベントで 1 段進める（段 0〜2：眺める／タップ／律速を見つける）。
+    /// 段 3・4（増やす／つなぐ）は状態判定で evaluateR2AfterTick が自動で進めるので、ここでは進めない
+    func advanceTutorial() {
+        guard (0...2).contains(state.stats.tutorialStep) else { return }
+        state.stats.tutorialStep += 1
+    }
+
     // MARK: 旧セーブ告知・新規開始
 
     /// 旧バージョンのセーブを読み込み、バランス変更の告知をまだ閉じていない
@@ -382,6 +511,11 @@ final class GameStore: ObservableObject {
         refresh()
         offlineReport = nil
         loadedOriginalVersion = nil
+        // R2 の実行時状態も戻す。古い追跡・ノート・寸断状態が残ると誤った「ライン成立」トースト等が出るため
+        trackedLotId = nil
+        activeFieldNote = nil
+        placementFeedback = nil
+        hadLineBreak = Self.containsLineBreak(Engine.layoutProblems(state: state))
         do {
             try saveManager.deleteSave()
         } catch {

@@ -8,6 +8,10 @@ struct StatsView: View {
         let derived = store.derived
         let currentProduct = Engine.currentProduct(state: store.state)
         List {
+            // ガイド付きミッション（§4.6）。tutorialStep が 5（完了・旧セーブ）になったら出さない
+            if (0..<Self.missionTexts.count).contains(stats.tutorialStep) {
+                missionSection(step: stats.tutorialStep)
+            }
             Section("目標") {
                 ForEach(Catalog.milestones) { spec in
                     milestoneRow(spec, derived: derived)
@@ -111,6 +115,68 @@ struct StatsView: View {
     /// 倍率表示（例：×2.8、×1）。ProductsView と同じ形式
     private func multiplierText(_ value: Double) -> String {
         String(format: "×%g", value)
+    }
+
+    // MARK: ミッション看板（§4.6）
+
+    /// 段ごとの見出しと案内文（Stats.tutorialStep の 0〜4 に対応）
+    private static let missionTexts: [(title: String, guide: String)] = [
+        ("フロアを眺めよう", "ピンチで引いて、IN から OUT までを辿ろう"),
+        ("装置をタップしてみよう", "フロアの装置をタップすると、状態と操作のカードが出ます"),
+        ("赤く光る律速の装置をタップしよう", "赤く脈動している装置が、ラインの速さを決めています"),
+        ("建設から装置を買って置こう", "画面下の＋から装置を選び、フロアに置きます"),
+        ("レールでつないでラインを成立させよう", "建設 → レールで、置いた装置をラインにつなぎます"),
+    ]
+
+    private func missionSection(step: Int) -> some View {
+        let current = Self.missionTexts[step]
+        return Section {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "flag.fill")
+                        .foregroundStyle(.orange)
+                    Text("ミッション \(step + 1) / \(Self.missionTexts.count)")
+                        .font(.caption.bold())
+                        .monospacedDigit()
+                        .foregroundStyle(.orange)
+                    Spacer()
+                }
+                Text(current.title)
+                    .font(.headline)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(current.guide)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                ProgressView(value: Double(step), total: Double(Self.missionTexts.count))
+                    .tint(.orange)
+            }
+            .padding(.vertical, 4)
+            // 全 5 段の一覧：済んだ段はチェック、いまの段は強調、先の段は薄く
+            ForEach(Self.missionTexts.indices, id: \.self) { index in
+                HStack(spacing: 8) {
+                    if index < step {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    } else if index == step {
+                        Image(systemName: "\(index + 1).circle.fill")
+                            .foregroundStyle(.orange)
+                    } else {
+                        Image(systemName: "\(index + 1).circle")
+                            .foregroundStyle(.tertiary)
+                    }
+                    Text(Self.missionTexts[index].title)
+                        .strikethrough(index < step, color: .secondary)
+                        .font(.subheadline.weight(index == step ? .bold : .regular))
+                        .foregroundStyle(index > step ? Color.secondary : Color.primary)
+                    Spacer()
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityValue(Text(index < step ? "済み" : (index == step ? "いまのミッション" : "これから")))
+            }
+        } header: {
+            Text("ミッション")
+        }
     }
 
     // MARK: 目標

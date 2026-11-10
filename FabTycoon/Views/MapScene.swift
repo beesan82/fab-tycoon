@@ -138,6 +138,12 @@ struct FloorDrawData {
         let portLots: Int
         /// ルートで工程が最初に現れる順位（①〜）。工程順バッジ用（β1 実機FB対応）
         let stepRank: Int?
+        /// 入力・出力ポートのどちらかがレールにつながっていない
+        let isUnconnected: Bool
+        /// 稼働率（busyEMA × 100）。123 オーバーレイ用
+        let busyPercent: Int
+        /// この装置を行き先にしているロット数。123 オーバーレイ用
+        let waitingLots: Int
     }
 
     let layout: FloorLayout
@@ -148,10 +154,29 @@ struct FloorDrawData {
     let entryLots: Int
     let gameMin: Double
     let bottleneckToolId: UUID?
+    /// レールセルごとの混雑度（熱色レール用）
+    let congestion: [GridPoint: Int]
+    /// レール上ロットの品質帯（FOUP の赤帯／緑帯用）
+    let lotBands: [UUID: LotQualityBand]
+    let stockerCapacity: Int
+    /// 仕掛かり数と上限（123 オーバーレイ用）
+    let wipCount: Int
+    let wipCap: Int
+    /// ノード切替の排出中プレート用（切替先の名前と、旧ノードのロットの残数）
+    let nodeSwitchTargetName: String?
+    let nodeSwitchRemainingWIP: Int
+    /// 歩留まり異常中（検査装置の「！」用。ヒント段階に関わらず出す）
+    let excursionActive: Bool
+    /// ライン寸断の矢印（前工程の出口 → 次工程の入口）
+    let lineBreaks: [(from: GridPoint, to: GridPoint)]
+    /// シミュレーションが詰まっている（ビネット用）
+    let isDeadlocked: Bool
+    /// 追跡中の FOUP（黄輪郭用）
+    let trackedLotId: UUID?
 
     static let idleLamp = Color.white
 
-    init(state: GameState, layout: FloorLayout, problems: [LayoutProblem]) {
+    init(state: GameState, layout: FloorLayout, problems: [LayoutProblem], trackedLotId: UUID? = nil) {
         self.layout = layout
         let sim = state.fab.sim
         let nodeId = state.fab.currentNodeId
@@ -187,7 +212,20 @@ struct FloorDrawData {
         let stepRanks = RouteStepOrder.ranks(node: node, lithoClass: Engine.topLithoClass(state: state))
         let simTools = Dictionary((sim?.tools ?? []).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let lotsById = Dictionary((sim?.lots ?? []).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let causeToolId = state.activeExcursion?.causeToolId
+        // 原因装置の赤ランプはヒント段階連動（設計書 §3.1・§7-13、案 A）：
+        // ヒント 3 段階目まで進み、かつ現ノードで稼働する Q3 があるときだけ赤にする。
+        // Q1/Q2 だけでは原因を特定できない＝検査グレードの価値を出すため。満たさなければ通常のランプ決定に任せる
+        let hasActiveQ3 = Engine.installedTools(state: state).contains { placed in
+            guard placed.modelId == "Q3", let model = Catalog.model(id: placed.modelId) else { return false }
+            return Engine.isActive(model, nodeId: nodeId)
+        }
+        let causeToolId = (state.activeExcursion?.hintsRevealed ?? 0) >= 3 && hasActiveQ3
+            ? state.activeExcursion?.causeToolId
+            : nil
+        var waitingByTool: [UUID: Int] = [:]
+        for lot in sim?.lots ?? [] {
+            if let dest = lot.destinationToolId { waitingByTool[dest, default: 0] += 1 }
+        }
         var tools: [ToolItem] = []
         var bottleneck: (id: UUID, busy: Double)?
         for placedTool in Engine.installedTools(state: state) {
@@ -223,7 +261,10 @@ struct FloorDrawData {
             }
             tools.append(ToolItem(tool: tool, process: model?.process, isStandby: isStandby, lamp: lamp,
                                   portLots: tool.ports.filter { $0.lotId != nil }.count,
-                                  stepRank: model.flatMap { stepRanks[$0.process] }))
+                                  stepRank: model.flatMap { stepRanks[$0.process] },
+                                  isUnconnected: unconnected.contains(tool.id),
+                                  busyPercent: Int(tool.busyEMA * 100),
+                                  waitingLots: waitingByTool[tool.id] ?? 0))
         }
         self.tools = tools
         bottleneckToolId = bottleneck?.id
@@ -244,6 +285,30 @@ struct FloorDrawData {
         self.entryLots = entryLots
         stockerLots = sim?.stocker.lotIds.count ?? 0
         gameMin = sim?.currentGameMin ?? 0
+
+        congestion = Engine.railCongestion(state: state)
+        var lotBands: [UUID: LotQualityBand] = [:]
+        for lot in railLots {
+            lotBands[lot.id] = Engine.lotQualityBand(state: state, lot: lot)
+        }
+        self.lotBands = lotBands
+        stockerCapacity = sim?.stocker.capacity ?? 40
+        wipCount = sim?.lots.count ?? 0
+        wipCap = sim?.wipCap ?? 0
+        if let pendingNodeId = state.fab.nodeSwitch.pendingNodeId {
+            nodeSwitchTargetName = Catalog.node(id: pendingNodeId)?.displayName
+            nodeSwitchRemainingWIP = (sim?.lots ?? []).filter { $0.nodeId != pendingNodeId }.count
+        } else {
+            nodeSwitchTargetName = nil
+            nodeSwitchRemainingWIP = 0
+        }
+        excursionActive = state.activeExcursion != nil
+        lineBreaks = problems.compactMap { problem in
+            guard case .lineBreak = problem else { return nil }
+            return Engine.lineBreakAnchors(state: state, problem: problem)
+        }
+        isDeadlocked = Engine.isSimDeadlocked(state: state)
+        self.trackedLotId = trackedLotId
     }
 }
 
@@ -261,6 +326,10 @@ struct FloorEditOverlay {
     var portCells: [GridPoint] = []
     /// 持ち上げ中の装置（元位置を点線で残す）
     var liftedToolId: UUID?
+    /// 配置直後フラッシュの対象（配置から 1 秒以内だけ。§3.2）
+    var placementFlashToolId: UUID?
+    /// 配置からの経過秒（描画時に毎フレーム補正する）
+    var placementFlashPhase: Double = 0
 }
 
 /// フロア外の飾りに使う値（施設帯のライブ表示・売地看板の値段）。state の更新ごとに作る
@@ -283,9 +352,19 @@ struct MapScene: View {
     @Binding var focusRequest: MapFocusRequest?
     /// 装置の持ち上げ依頼（ToolCard の「移動」から。処理したら nil に戻す）
     @Binding var moveRequest: UUID?
+    /// 123 オーバーレイ（数値ラベル）の表示（§3.5）
+    let showNumbers: Bool
     var onOpenFacility: (FacilityKind) -> Void
     var onOpenEntry: () -> Void
     var onOpenShipping: () -> Void
+    /// レール上の FOUP をタップ → 追跡開始（LotCard、§4.5）
+    var onTrackLot: (UUID) -> Void
+    /// 混雑したレールセルをタップ → RailCard
+    var onOpenRailCard: (GridPoint) -> Void
+    /// ストッカーをタップ → StockerCard
+    var onOpenStockerCard: () -> Void
+    /// 追跡中の FOUP が画面外にある間はその方向の矢印（↑↗→↘↓↙←↖）、画面内・追跡なしは nil（§4.5）。値が変わったときだけ呼ぶ
+    var onTrackedLotDirection: (String?) -> Void
 
     @State private var zoom: CGFloat = 1
     @State private var zoomAtGestureStart: CGFloat?
@@ -295,6 +374,8 @@ struct MapScene: View {
     @State private var canvasSize: CGSize = .zero
     @State private var didFit = false
     @State private var simClock = FloorSimClock()
+    /// 初回の fitIfNeeded による zoom 変更はミッション段1（眺める）に数えない
+    @State private var ignoreNextZoomChange = false
 
     @State private var message: String?
     // 1本指のタッチ（パン／持ち上げ／ゴースト移動／なぞりのどれになるかを最初に決める）
@@ -370,23 +451,35 @@ struct MapScene: View {
          placement: Binding<PlacementRequest?>,
          focusRequest: Binding<MapFocusRequest?>,
          moveRequest: Binding<UUID?>,
+         showNumbers: Bool = false,
          onOpenFacility: @escaping (FacilityKind) -> Void,
          onOpenEntry: @escaping () -> Void,
-         onOpenShipping: @escaping () -> Void) {
+         onOpenShipping: @escaping () -> Void,
+         onTrackLot: @escaping (UUID) -> Void = { _ in },
+         onOpenRailCard: @escaping (GridPoint) -> Void = { _ in },
+         onOpenStockerCard: @escaping () -> Void = {},
+         onTrackedLotDirection: @escaping (String?) -> Void = { _ in }) {
         _selectedToolId = selectedToolId
         _placement = placement
         _focusRequest = focusRequest
         _moveRequest = moveRequest
+        self.showNumbers = showNumbers
         self.onOpenFacility = onOpenFacility
         self.onOpenEntry = onOpenEntry
         self.onOpenShipping = onOpenShipping
+        self.onTrackLot = onTrackLot
+        self.onOpenRailCard = onOpenRailCard
+        self.onOpenStockerCard = onOpenStockerCard
+        self.onTrackedLotDirection = onTrackedLotDirection
     }
 
     var body: some View {
         let state = store.state
+        let trackedDirection = trackedLotDirection(state: state)
         Group {
             if let layout = state.fab.layout {
-                let data = FloorDrawData(state: state, layout: layout, problems: store.layoutProblems)
+                let data = FloorDrawData(state: state, layout: layout, problems: store.layoutProblems,
+                                         trackedLotId: store.trackedLotId)
                 floorCanvas(layout: layout, data: data, decor: decor(state: state))
             } else {
                 Text("フロアのデータがありません")
@@ -412,6 +505,20 @@ struct MapScene: View {
         }
         .onChange(of: store.railMode) { _, isOn in
             railModeChanged(isOn)
+        }
+        .onChange(of: trackedDirection, initial: true) { _, direction in
+            // body は tick・パン・ズームごとに再評価されるが、通知は矢印が変わったときだけ
+            onTrackedLotDirection(direction)
+        }
+        .onChange(of: zoom) { _, _ in
+            // ミッション段1「フロアを眺めよう」はズーム変更で達成（§4.6）
+            if ignoreNextZoomChange {
+                ignoreNextZoomChange = false
+                return
+            }
+            if store.state.stats.tutorialStep == 0 {
+                store.advanceTutorial()
+            }
         }
         .alert(
             "区画を購入しますか？",
@@ -441,14 +548,26 @@ struct MapScene: View {
         let geometry = FloorGridGeometry(zoom: zoom, pan: panOffset)
         let overlay = editOverlay(layout: layout, data: data)
         let clock = simClock
-        let paused = data.railLots.isEmpty && data.bottleneckToolId == nil && !decor.researchActive
+        let inventoryChips = store.state.inventoryChips
+        let showNumbers = self.showNumbers
+        let flashAt = store.placementFeedback?.at.timeIntervalSinceReferenceDate
+        // R2 の点滅・脈動（未接続プラグ・ストッカー満杯・ビネット・配置フラッシュ）も止めない
+        let animatingR2 = data.isDeadlocked || data.stockerLots >= data.stockerCapacity
+            || data.tools.contains { $0.isUnconnected } || overlay.placementFlashToolId != nil
+        let paused = data.railLots.isEmpty && data.bottleneckToolId == nil && !decor.researchActive && !animatingR2
         return GeometryReader { geo in
             TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: paused)) { timeline in
                 Canvas { context, size in
                     let now = timeline.date.timeIntervalSinceReferenceDate
                     let elapsed = clock.elapsed(gameMin: data.gameMin, now: now)
-                    drawFloor(context, size: size, data: data, overlay: overlay, decor: decor, geometry: geometry,
-                              now: now, simElapsed: elapsed)
+                    // 配置フラッシュの経過秒は state 更新間隔（0.25 秒）より細かく要るのでフレームごとに補正する
+                    var frameOverlay = overlay
+                    if frameOverlay.placementFlashToolId != nil, let flashAt {
+                        frameOverlay.placementFlashPhase = now - flashAt
+                        if frameOverlay.placementFlashPhase > 1 { frameOverlay.placementFlashToolId = nil }
+                    }
+                    drawFloor(context, size: size, data: data, overlay: frameOverlay, decor: decor, geometry: geometry,
+                              now: now, simElapsed: elapsed, showNumbers: showNumbers, inventoryChips: inventoryChips)
                 }
             }
             .contentShape(Rectangle())
@@ -723,7 +842,28 @@ struct MapScene: View {
             selectedToolId = hitTool.id
             return
         }
-        // 空き床・レール・ストッカー・FOUP（R1 ではカードを出さない）
+        // FOUP：レール上ロットのいるセル → LotCard（追跡、§4.5）
+        if let lot = store.state.fab.sim?.lots.first(where: { lot in
+            guard case .rail(let cellIndex, _) = lot.location, lot.path.indices.contains(cellIndex) else { return false }
+            return lot.path[cellIndex] == cell
+        }) {
+            selectedToolId = nil
+            onTrackLot(lot.id)
+            return
+        }
+        // ストッカー → StockerCard
+        if layout.stockerCells().contains(cell) {
+            selectedToolId = nil
+            onOpenStockerCard()
+            return
+        }
+        // 混雑しているレールセル（停止ロット 2 個以上）→ RailCard（§2.5・§3.1）
+        if layout.railIndex[cell] != nil, (Engine.railCongestion(state: store.state)[cell] ?? 0) >= 2 {
+            selectedToolId = nil
+            onOpenRailCard(cell)
+            return
+        }
+        // 空き床・それ以外のレール
         selectedToolId = nil
     }
 
@@ -1063,6 +1203,14 @@ struct MapScene: View {
             overlay.ghostValid = ghost.error == nil
         }
         overlay.liftedToolId = placement == nil ? movingToolId : nil
+        // 配置直後フラッシュ（§3.2）：配置から 1 秒以内だけ対象を渡す
+        if let feedback = store.placementFeedback {
+            let phase = Date().timeIntervalSince(feedback.at)
+            if phase <= 1 {
+                overlay.placementFlashToolId = feedback.toolId
+                overlay.placementFlashPhase = max(phase, 0)
+            }
+        }
         if store.railMode {
             switch railTool {
             case .erase:
@@ -1152,7 +1300,9 @@ struct MapScene: View {
         let availableHeight = max(canvasSize.height - Self.hudHeight - Self.dockHeight - margin * 2, 1)
         let base = FloorGridGeometry.baseCellSize
         let fit = min(availableWidth / (columns * base), availableHeight / (rows * base))
-        zoom = min(max(fit, Self.zoomRange.lowerBound), Self.zoomRange.upperBound)
+        let fitted = min(max(fit, Self.zoomRange.lowerBound), Self.zoomRange.upperBound)
+        ignoreNextZoomChange = fitted != zoom
+        zoom = fitted
         let cs = base * zoom
         panOffset = CGSize(
             width: (canvasSize.width - columns * cs) / 2 - margin - CGFloat(minX) * cs,
@@ -1184,6 +1334,48 @@ struct MapScene: View {
         let margin = FloorGridGeometry.margin
         panOffset = CGSize(width: canvasSize.width / 2 - margin - (CGFloat(cell.x) + 0.5) * cs,
                            height: canvasSize.height / 2 - margin - (CGFloat(cell.y) + 0.5) * cs)
+    }
+
+    // MARK: 追跡中 FOUP の方向矢印（§4.5）
+
+    /// 8 方位の矢印（東から反時計回り、45° ごと）
+    static let directionArrows = ["→", "↗", "↑", "↖", "←", "↙", "↓", "↘"]
+
+    /// 追跡中ロットが見えているセル範囲の外にあるなら、画面中央から見た方向の矢印。
+    /// 範囲内・追跡なし・ロットが見つからない（出荷済み・仮想搬送中）・キャンバス未確定なら nil
+    private func trackedLotDirection(state: GameState) -> String? {
+        guard let lotId = store.trackedLotId, let layout = state.fab.layout,
+              canvasSize.width > 0, canvasSize.height > 0,
+              let cell = Self.lotAnchorCell(state: state, layout: layout, lotId: lotId) else { return nil }
+        let geometry = FloorGridGeometry(zoom: zoom, pan: panOffset)
+        let topLeft = geometry.cell(at: .zero)
+        let bottomRight = geometry.cell(at: CGPoint(x: canvasSize.width, y: canvasSize.height))
+        if (topLeft.x...bottomRight.x).contains(cell.x) && (topLeft.y...bottomRight.y).contains(cell.y) {
+            return nil
+        }
+        let target = geometry.center(cell)
+        // 画面座標は y が下向きなので、角度は上向きを正にして求める
+        let angle = atan2(-(target.y - canvasSize.height / 2), target.x - canvasSize.width / 2)
+        let sector = Int((angle / (.pi / 4)).rounded())
+        return Self.directionArrows[(sector % 8 + 8) % 8]
+    }
+
+    /// ロットの代表セル：レール上は path[cellIndex]、ポート内は装置の原点、ストッカー／投入口はそのエリアの原点
+    static func lotAnchorCell(state: GameState, layout: FloorLayout, lotId: UUID) -> GridPoint? {
+        guard let lot = state.fab.sim?.lots.first(where: { $0.id == lotId }) else { return nil }
+        switch lot.location {
+        case .rail(let cellIndex, _):
+            return lot.path.indices.contains(cellIndex) ? lot.path[cellIndex] : nil
+        case .port(let toolId, _):
+            return state.fab.placed.first(where: { $0.id == toolId })?.origin
+        case .stocker:
+            return layout.stocker.origin
+        case .entry:
+            return layout.entry.origin
+        case .inTransit:
+            // 仮想搬送（layout なしの旧モード）はフロア上に位置を持たない
+            return nil
+        }
     }
 
     private func handleFocusRequest(_ request: MapFocusRequest?) {
@@ -1349,7 +1541,8 @@ struct MapScene: View {
     // MARK: 描画
 
     private func drawFloor(_ context: GraphicsContext, size: CGSize, data: FloorDrawData, overlay: FloorEditOverlay,
-                           decor: MapDecor, geometry g: FloorGridGeometry, now: Double, simElapsed: Double) {
+                           decor: MapDecor, geometry g: FloorGridGeometry, now: Double, simElapsed: Double,
+                           showNumbers: Bool, inventoryChips: Double) {
         let bounds = CGRect(origin: .zero, size: size)
         let cs = g.cellSize
         let layout = data.layout
@@ -1420,7 +1613,26 @@ struct MapScene: View {
             drawForSaleSign(context, parcelRect: rect, cost: decor.parcelCostYen, cash: decor.cashYen, cellSize: cs)
         }
 
-        // 3. レール（土台 → 芯線 → 方向シェブロン）
+        // 3. レール（熱色の地色 → 土台 → 芯線 → 方向シェブロン）
+        // 熱色レール（§3.1）凡例：混雑度＝そのセルに連なる待ち列の長さ。
+        //   0〜1 = 地色なし／2〜3 = 黄／4〜5 = 橙／6 以上 = 赤（半透明でレールが透けて見える濃さ）
+        var heatYellow = Path()
+        var heatOrange = Path()
+        var heatRed = Path()
+        for rail in data.rails {
+            guard let level = data.congestion[rail.point], level >= 2 else { continue }
+            let rect = g.rect(origin: rail.point, width: 1, depth: 1)
+            guard rect.intersects(bounds) else { continue }
+            switch level {
+            case 2...3: heatYellow.addRect(rect)
+            case 4...5: heatOrange.addRect(rect)
+            default: heatRed.addRect(rect)
+            }
+        }
+        context.fill(heatYellow, with: .color(Color.yellow.opacity(0.35)))
+        context.fill(heatOrange, with: .color(Color.orange.opacity(0.42)))
+        context.fill(heatRed, with: .color(Color.red.opacity(0.42)))
+
         var trackBase = Path()
         var trackCore = Path()
         var chevrons = Path()
@@ -1517,9 +1729,32 @@ struct MapScene: View {
             drawBadge(context, text: "×\(data.stockerLots)", at: CGPoint(x: stockerRect.maxX, y: stockerRect.minY),
                       color: .orange, fontSize: labelSize)
         }
+        // 充填メーター（§3.1）：下辺に沿った割合バー。90% 以上で橙、満杯で赤の 1 秒周期点滅
+        let stockerFull = data.stockerCapacity > 0 && data.stockerLots >= data.stockerCapacity
+        if data.stockerCapacity > 0 {
+            let fill = min(CGFloat(data.stockerLots) / CGFloat(data.stockerCapacity), 1)
+            let barHeight = max(cs * 0.14, 2.5)
+            let track = CGRect(x: stockerRect.minX + cs * 0.12, y: stockerRect.maxY - barHeight - cs * 0.03,
+                               width: stockerRect.width - cs * 0.24, height: barHeight)
+            context.fill(Path(roundedRect: track, cornerRadius: barHeight / 2), with: .color(Color.black.opacity(0.45)))
+            let barColor: Color
+            if stockerFull {
+                barColor = Color.red.opacity(now.truncatingRemainder(dividingBy: 1) < 0.5 ? 1 : 0.35)
+            } else if fill >= 0.9 {
+                barColor = .orange
+            } else {
+                barColor = Color(red: 0.35, green: 0.8, blue: 0.45)
+            }
+            if fill > 0 {
+                let bar = CGRect(x: track.minX, y: track.minY, width: track.width * fill, height: track.height)
+                context.fill(Path(roundedRect: bar, cornerRadius: barHeight / 2), with: .color(barColor))
+            }
+        }
         let entryRect = g.rect(origin: layout.entry.origin, width: FloorLayout.entrySize.width,
                                depth: FloorLayout.entrySize.depth).insetBy(dx: cs * 0.06, dy: cs * 0.06)
-        context.fill(Path(roundedRect: entryRect, cornerRadius: cs * 0.15), with: .color(Color.green.opacity(0.75)))
+        // ストッカー満杯の間は投入が止まるので灰色に落とす（§3.1）
+        context.fill(Path(roundedRect: entryRect, cornerRadius: cs * 0.15),
+                     with: .color(stockerFull ? Color(white: 0.55) : Color.green.opacity(0.75)))
         context.draw(Text("IN").font(.system(size: labelSize, weight: .heavy)).foregroundColor(.white),
                      at: CGPoint(x: entryRect.midX, y: entryRect.midY))
         if data.entryLots > 0 {
@@ -1544,6 +1779,22 @@ struct MapScene: View {
                       color: Color.green.opacity(0.92), fontSize: portLabelSize)
         drawPortLabel(context, text: "出荷口 OUT", above: shippingRect,
                       color: Color.blue.opacity(0.92), fontSize: portLabelSize)
+        // 投入口の小プレート（§3.1）：満杯なら「投入停止」、ノード切替中は排出の進み具合＋砂時計。
+        // 投入口ラベルプレート（上）と重ならないよう、投入口の下辺に掛けて下へ積む
+        var entryNoteY = entryRect.maxY - cs * 0.2
+        let noteSize = max(cs * 0.36, 8)
+        if stockerFull {
+            let plate = drawSmallPlate(context, text: "投入停止", topCenter: CGPoint(x: entryRect.midX, y: entryNoteY),
+                                       color: Color(white: 0.35), fontSize: noteSize)
+            entryNoteY = plate.maxY + cs * 0.06
+        }
+        if let target = data.nodeSwitchTargetName {
+            let plate = drawSmallPlate(context, text: "排出中 → \(target)（残り \(data.nodeSwitchRemainingWIP)）",
+                                       topCenter: CGPoint(x: entryRect.midX, y: entryNoteY),
+                                       color: Color(red: 0.55, green: 0.35, blue: 0.75), fontSize: noteSize,
+                                       leadingInset: noteSize * 1.3)
+            drawHourglass(context, center: CGPoint(x: plate.minX + noteSize * 0.75, y: plate.midY), size: noteSize * 1.0)
+        }
 
         // 4.5 施設帯の建物（R1 はアイコンプレート。決定 #15）＋ライブ表示
         if bandRect.intersects(bounds) {
@@ -1610,6 +1861,16 @@ struct MapScene: View {
                                  at: CGPoint(x: badgeCenter.x + br + cs * 0.09, y: badgeCenter.y), anchor: .leading)
                 }
             }
+
+            // 切断プラグ（§3.1）：未接続の装置の入力側（左辺中央）に 1 秒周期で点滅
+            if item.isUnconnected, now.truncatingRemainder(dividingBy: 1) < 0.6 {
+                drawUnpluggedPlug(context, at: CGPoint(x: rect.minX, y: rect.midY), size: max(cs * 0.5, 8))
+            }
+            // 歩留まり異常中は検査装置の上に「！」（§3.4）
+            if data.excursionActive, item.process == .inspection {
+                drawBadge(context, text: "！", at: CGPoint(x: rect.midX, y: rect.minY - cs * 0.1),
+                          color: .red, fontSize: max(cs * 0.45, 9))
+            }
         }
 
         // 6. ボトルネック（赤の脈動枠）・選択枠
@@ -1617,6 +1878,16 @@ struct MapScene: View {
             let pulse = 0.55 + 0.45 * sin(now * 2 * Double.pi / 1.2)
             context.stroke(Path(roundedRect: rect.insetBy(dx: -2, dy: -2), cornerRadius: cs * 0.22),
                            with: .color(Color.red.opacity(pulse)), lineWidth: 3)
+            // 律速看板（§3.1）：上辺中央に赤地の小看板
+            drawBadge(context, text: "律速", at: CGPoint(x: rect.midX, y: rect.minY),
+                      color: .red, fontSize: max(cs * 0.36, 8))
+        }
+        // 配置直後フラッシュ（§3.2）：白枠を 0.25 秒周期で 2 回点滅（前半 0.5 秒）
+        if let id = overlay.placementFlashToolId, let rect = toolRects[id],
+           overlay.placementFlashPhase < 0.5,
+           overlay.placementFlashPhase.truncatingRemainder(dividingBy: 0.25) < 0.125 {
+            context.stroke(Path(roundedRect: rect.insetBy(dx: -3, dy: -3), cornerRadius: cs * 0.24),
+                           with: .color(Color.white), lineWidth: 3)
         }
         if let id = highlightedToolId, let rect = toolRects[id] {
             context.stroke(Path(roundedRect: rect.insetBy(dx: -4, dy: -4), cornerRadius: cs * 0.26),
@@ -1626,6 +1897,24 @@ struct MapScene: View {
         if let id = overlay.liftedToolId, let rect = toolRects[id] {
             context.stroke(Path(roundedRect: rect.insetBy(dx: -1, dy: -1), cornerRadius: cs * 0.2),
                            with: .color(Color.white.opacity(0.9)), style: StrokeStyle(lineWidth: 2, dash: [4, 3]))
+        }
+
+        // 6.5 寸断矢印（§3.1）：前工程の出口 → 次工程の入口を赤の点線で結び、中点に ✗
+        for link in data.lineBreaks {
+            let a = g.center(link.from)
+            let b = g.center(link.to)
+            var dashed = Path()
+            dashed.move(to: a)
+            dashed.addLine(to: b)
+            context.stroke(dashed, with: .color(Color.red.opacity(0.85)),
+                           style: StrokeStyle(lineWidth: max(cs * 0.1, 2), lineCap: .round, dash: [cs * 0.3, cs * 0.22]))
+            let mid = CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
+            let r = max(cs * 0.3, 6)
+            context.fill(Path(ellipseIn: CGRect(x: mid.x - r, y: mid.y - r, width: r * 2, height: r * 2)),
+                         with: .color(Color.white))
+            context.stroke(Path(ellipseIn: CGRect(x: mid.x - r, y: mid.y - r, width: r * 2, height: r * 2)),
+                           with: .color(Color.red), lineWidth: 1.5)
+            context.draw(Text("✗").font(.system(size: r * 1.3, weight: .heavy)).foregroundColor(.red), at: mid)
         }
 
         // 7. FOUP（レール上 → ポート内。合計 maxDrawnLots まで）
@@ -1646,9 +1935,22 @@ struct MapScene: View {
             guard bounds.insetBy(dx: -cs, dy: -cs).contains(center) else { continue }
             budget -= 1
             drawFOUP(context, center: center, width: lotWidth, height: lotHeight)
+            // 品質帯（§3.3）：本体中央に横線
+            if let band = data.lotBands[lot.id], band != LotQualityBand.none {
+                var stripe = Path()
+                stripe.move(to: CGPoint(x: center.x - lotWidth / 2 + 1, y: center.y))
+                stripe.addLine(to: CGPoint(x: center.x + lotWidth / 2 - 1, y: center.y))
+                context.stroke(stripe, with: .color(band == .red ? Color.red : Color.green),
+                               lineWidth: max(lotHeight * 0.22, 1.5))
+            }
+            // 追跡中の FOUP は黄色い輪郭（§4.5）
+            if lot.id == data.trackedLotId {
+                let ring = CGRect(x: center.x - lotWidth * 0.85, y: center.y - lotHeight * 0.95,
+                                  width: lotWidth * 1.7, height: lotHeight * 1.9)
+                context.stroke(Path(ellipseIn: ring), with: .color(Color.yellow), lineWidth: 2)
+            }
             if stopped {
-                context.draw(Text("⏳").font(.system(size: max(cs * 0.36, 7))),
-                             at: CGPoint(x: center.x, y: center.y - cs * 0.42))
+                drawHourglass(context, center: CGPoint(x: center.x, y: center.y - cs * 0.42), size: max(cs * 0.36, 7))
             }
         }
         let portSide = cs * 0.24
@@ -1662,6 +1964,22 @@ struct MapScene: View {
                 let square = CGRect(x: x, y: rect.maxY - portSide - cs * 0.08, width: portSide, height: portSide)
                 drawFOUP(context, center: CGPoint(x: square.midX, y: square.midY), width: portSide, height: portSide)
             }
+        }
+
+        // 7.5 123 オーバーレイ（§3.5）：数値ラベル（白文字＋暗い下地）
+        if showNumbers {
+            let numberSize = max(cs * 0.3, 7)
+            for item in data.tools {
+                guard let rect = toolRects[item.tool.id], rect.intersects(bounds) else { continue }
+                drawNumberLabel(context, text: "\(item.busyPercent)%｜待\(item.waitingLots)",
+                                at: CGPoint(x: rect.maxX, y: rect.minY), anchor: .topTrailing, fontSize: numberSize)
+            }
+            drawNumberLabel(context, text: "\(data.stockerLots)/\(data.stockerCapacity)",
+                            at: CGPoint(x: stockerRect.midX, y: stockerRect.midY), anchor: .center, fontSize: numberSize)
+            drawNumberLabel(context, text: "WIP \(data.wipCount)/\(data.wipCap)",
+                            at: CGPoint(x: entryRect.midX, y: entryRect.midY), anchor: .center, fontSize: numberSize)
+            drawNumberLabel(context, text: "在庫 \(Int(inventoryChips))",
+                            at: CGPoint(x: shippingRect.midX, y: shippingRect.midY), anchor: .center, fontSize: numberSize)
         }
 
         // 8. 編集プレビュー
@@ -1684,6 +2002,15 @@ struct MapScene: View {
             let rect = g.rect(origin: point, width: 1, depth: 1).insetBy(dx: 1, dy: 1)
             context.fill(Path(rect), with: .color(Color.red.opacity(0.35)))
             context.stroke(Path(rect), with: .color(Color.red), lineWidth: 1.5)
+        }
+
+        // 9. デッドロック ビネット（§3.1）：画面外周の赤い内側ストロークを 1.5 秒周期で脈動
+        if data.isDeadlocked {
+            let pulse = 0.35 + 0.3 * sin(now * 2 * Double.pi / 1.5)
+            for (width, alpha) in [(CGFloat(36), 0.25), (CGFloat(18), 0.5), (CGFloat(6), 0.9)] {
+                context.stroke(Path(bounds.insetBy(dx: width / 2, dy: width / 2)),
+                               with: .color(Color.red.opacity(pulse * alpha)), lineWidth: width)
+            }
         }
     }
 
@@ -1778,6 +2105,80 @@ struct MapScene: View {
         let rect = CGRect(x: point.x - width / 2, y: point.y - height / 2, width: width, height: height)
         context.fill(Path(roundedRect: rect, cornerRadius: height / 2), with: .color(color))
         context.draw(Text(text).font(.system(size: fontSize, weight: .bold)).foregroundColor(.white),
+                     at: CGPoint(x: rect.midX, y: rect.midY))
+    }
+
+    /// 文字列の幅の見積もり（全角は fontSize 相当、半角（ASCII）は 0.55 倍。drawPortLabel と同じ）
+    private static func estimatedTextWidth(_ text: String, fontSize: CGFloat) -> CGFloat {
+        text.reduce(0) { $0 + ($1.isASCII ? fontSize * 0.55 : fontSize) }
+    }
+
+    /// 投入口の下に積む小プレート（「投入停止」「排出中 → …」）。描いた矩形を返す
+    @discardableResult
+    private func drawSmallPlate(_ context: GraphicsContext, text: String, topCenter: CGPoint, color: Color,
+                                fontSize: CGFloat, leadingInset: CGFloat = 0) -> CGRect {
+        let width = Self.estimatedTextWidth(text, fontSize: fontSize) + fontSize * 0.9 + leadingInset
+        let height = fontSize * 1.45
+        let plate = CGRect(x: topCenter.x - width / 2, y: topCenter.y, width: width, height: height)
+        let path = Path(roundedRect: plate, cornerRadius: height * 0.3)
+        context.fill(path, with: .color(color.opacity(0.92)))
+        context.stroke(path, with: .color(Color.white.opacity(0.8)), lineWidth: 1)
+        context.draw(Text(text).font(.system(size: fontSize, weight: .bold)).foregroundColor(.white),
+                     at: CGPoint(x: plate.midX + leadingInset / 2, y: plate.midY))
+        return plate
+    }
+
+    /// 砂時計のピクセル絵（上下の受け皿＋砂の入った上下のガラス＋くびれ。小さな矩形の組み合わせ）
+    private func drawHourglass(_ context: GraphicsContext, center: CGPoint, size: CGFloat) {
+        let u = size / 8  // 8×8 ドットの格子
+        let ox = center.x - size / 2
+        let oy = center.y - size / 2
+        func dot(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat) -> CGRect {
+            CGRect(x: ox + x * u, y: oy + y * u, width: w * u, height: h * u)
+        }
+        var frame = Path()
+        frame.addRect(dot(0, 0, 8, 1))    // 上の受け皿
+        frame.addRect(dot(0, 7, 8, 1))    // 下の受け皿
+        var glass = Path()
+        glass.addRect(dot(1, 1, 6, 1))    // 上のガラス（広 → 狭）
+        glass.addRect(dot(2, 2, 4, 1))
+        glass.addRect(dot(3, 3, 2, 1))    // くびれ
+        glass.addRect(dot(3, 4, 2, 1))
+        glass.addRect(dot(2, 5, 4, 1))    // 下のガラス（狭 → 広）
+        glass.addRect(dot(1, 6, 6, 1))
+        var sand = Path()
+        sand.addRect(dot(2, 1, 4, 1))     // 上に残る砂
+        sand.addRect(dot(3, 2, 2, 1))
+        sand.addRect(dot(3.5, 3, 1, 2))   // くびれを落ちる砂
+        sand.addRect(dot(2, 6, 4, 1))     // 下に積もった砂
+        context.fill(glass, with: .color(Color(red: 0.85, green: 0.93, blue: 1.0)))
+        context.fill(sand, with: .color(Color(red: 0.95, green: 0.72, blue: 0.25)))
+        context.fill(frame, with: .color(Color(red: 0.45, green: 0.28, blue: 0.12)))
+    }
+
+    /// 切断プラグのピクセル絵（差込口の箱＋2本の刃。tip＝刃先を置く点）。左辺から外へ突き出す
+    private func drawUnpluggedPlug(_ context: GraphicsContext, at tip: CGPoint, size: CGFloat) {
+        let u = size / 6
+        let body = CGRect(x: tip.x - size, y: tip.y - u * 2, width: u * 3.5, height: u * 4)
+        var blades = Path()
+        blades.addRect(CGRect(x: body.maxX, y: tip.y - u * 1.4, width: u * 2.2, height: u * 0.8))
+        blades.addRect(CGRect(x: body.maxX, y: tip.y + u * 0.6, width: u * 2.2, height: u * 0.8))
+        var cord = Path()
+        cord.addRect(CGRect(x: body.minX - u * 1.5, y: tip.y - u * 0.4, width: u * 1.5, height: u * 0.8))
+        context.fill(blades, with: .color(Color(white: 0.75)))
+        context.fill(cord, with: .color(Color(white: 0.2)))
+        context.fill(Path(body), with: .color(Color.red))
+        context.stroke(Path(body), with: .color(Color.white), lineWidth: 1)
+    }
+
+    /// 123 オーバーレイの数値ラベル（白文字＋暗い下地）
+    private func drawNumberLabel(_ context: GraphicsContext, text: String, at point: CGPoint, anchor: UnitPoint,
+                                 fontSize: CGFloat) {
+        let width = Self.estimatedTextWidth(text, fontSize: fontSize) + fontSize * 0.6
+        let height = fontSize * 1.35
+        let rect = CGRect(x: point.x - width * anchor.x, y: point.y - height * anchor.y, width: width, height: height)
+        context.fill(Path(roundedRect: rect, cornerRadius: height * 0.25), with: .color(Color.black.opacity(0.68)))
+        context.draw(Text(text).font(.system(size: fontSize, weight: .semibold).monospacedDigit()).foregroundColor(.white),
                      at: CGPoint(x: rect.midX, y: rect.midY))
     }
 

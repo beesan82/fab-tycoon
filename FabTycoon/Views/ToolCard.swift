@@ -768,8 +768,17 @@ struct ToolCardInfo {
             guard port.state == .done, let lotId = port.lotId else { return false }
             return sim?.lots.first(where: { $0.id == lotId })?.destination == nil
         }
+        // 原因装置の判定は FloorDrawData の赤ランプと条件を揃える（R2、設計書 §3.1・§7-13、案 A）：
+        // ヒント 3 段階目まで進み、かつ現ノードで稼働する Q3 があるときだけ。満たさなければ通常の判定へ
+        let hasActiveQ3 = installed.contains { placed in
+            guard placed.modelId == "Q3", let q3 = Catalog.model(id: placed.modelId) else { return false }
+            return Engine.isActive(q3, nodeId: nodeId)
+        }
+        let causeToolId = (state.activeExcursion?.hintsRevealed ?? 0) >= 3 && hasActiveQ3
+            ? state.activeExcursion?.causeToolId
+            : nil
         // 判定順は FloorDrawData のランプと同じ
-        if let causeToolId = state.activeExcursion?.causeToolId, causeToolId == toolId {
+        if let causeToolId, causeToolId == toolId {
             status = .excursion
         } else if input || output {
             status = .unconnected

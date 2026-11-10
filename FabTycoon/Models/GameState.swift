@@ -372,6 +372,12 @@ struct Stats: Codable, Equatable {
     var railCellsBuilt: Int = 0
     /// 購入した区画数（v4 で追加）
     var parcelsBought: Int = 0
+    /// 既読（トースト表示済み）の現場ノートid（R2 で追加）
+    var seenFieldNoteIds: Set<String> = []
+    /// ガイド付きミッションの進行段（0 始まり、5 で完了。R2 で追加）
+    var tutorialStep: Int = 0
+    /// 現場ノートの「初めて」判定の補助：条件キー → 初回発生時の gameHoursElapsed（R2 で追加）
+    var noteTriggerMemo: [String: Double] = [:]
 
     enum CodingKeys: String, CodingKey {
         case totalRevenueYen
@@ -392,6 +398,9 @@ struct Stats: Codable, Equatable {
         case scrappedLots
         case railCellsBuilt
         case parcelsBought
+        case seenFieldNoteIds
+        case tutorialStep
+        case noteTriggerMemo
     }
 }
 
@@ -418,5 +427,10 @@ extension Stats {
         scrappedLots = try container.decodeIfPresent(Int.self, forKey: .scrappedLots) ?? defaults.scrappedLots
         railCellsBuilt = try container.decodeIfPresent(Int.self, forKey: .railCellsBuilt) ?? defaults.railCellsBuilt
         parcelsBought = try container.decodeIfPresent(Int.self, forKey: .parcelsBought) ?? defaults.parcelsBought
+        seenFieldNoteIds = try container.decodeIfPresent(Set<String>.self, forKey: .seenFieldNoteIds) ?? defaults.seenFieldNoteIds
+        // 番兵：キーが無い＝R2 以前の旧セーブ。ガイド付きミッションは新規ゲーム専用なので、
+        // 既定値 0 ではなく完了済みの 5 を入れて旧セーブには出さない
+        tutorialStep = try container.decodeIfPresent(Int.self, forKey: .tutorialStep) ?? 5
+        noteTriggerMemo = try container.decodeIfPresent([String: Double].self, forKey: .noteTriggerMemo) ?? defaults.noteTriggerMemo
     }
 }

@@ -279,9 +279,9 @@ try? fileManager.removeItem(at: tempRoot)
 // 0.3.0: 目標と図鑑
 print("== 0.3.0. カタログ件数・図鑑の解放 ==")
 let glossaryInitial = GameState.initial()
-check(Catalog.milestones.count == 14, "マイルストーンは14本")
-check(Catalog.glossaryTerms.count == 30, "用語は30本")
-check(Engine.glossaryEntries(state: glossaryInitial).count == 57, "図鑑の全エントリは57件")
+check(Catalog.milestones.count == 21, "マイルストーンは21本（R2で7本追加）")
+check(Catalog.glossaryTerms.count == 41, "用語は41本（R2で11語追加）")
+check(Engine.glossaryEntries(state: glossaryInitial).count == 68, "図鑑の全エントリは68件（R2の用語11語追加で57→68）")
 check(Engine.glossaryUnlockedCount(state: glossaryInitial) == 26, "初期状態の図鑑の解放数は26（装置7＋工程7＋用語12）")
 
 // 0.3.0: 「なぜ？」内訳（初期状態）
@@ -2025,5 +2025,335 @@ check((r1ReencodedObject?["didShowMapRebuildNotice"] as? Bool) == false,
       "R1: 再エンコード結果に didShowMapRebuildNotice が false で書き出される")
 let r1RoundTrip = try? r1Decoder.decode(GameState.self, from: r1Reencoded)
 check(r1RoundTrip == r1FixtureState, "R1: 再エンコード→再デコードで最初のデコード結果と一致する")
+
+// MARK: - R2: 現象化＋学習
+
+let r2Initial = GameState.initial(now: t0)
+let r2InitialDerived = Engine.derived(state: r2Initial)
+
+/// state から derived を取り直して pendingFieldNotes を返す
+func r2Pending(_ s: GameState) -> [String] {
+    Engine.pendingFieldNotes(state: s, derived: Engine.derived(state: s))
+}
+
+func r2IsRailLot(_ lot: Lot) -> Bool {
+    if case .rail = lot.location { return true }
+    return false
+}
+
+// R2. Catalog 整合：現場ノート16件・関連用語の実在・タイトル
+print("== R2. 現場ノートのカタログ整合 ==")
+check(Catalog.fieldNotes.count == 16, "R2: 現場ノートは16件")
+check(Catalog.fieldNotes.allSatisfy { Catalog.fieldNote(id: $0.id) == $0 }, "R2: 全16件が Catalog.fieldNote(id:) で引ける")
+let r2MissingGlossaryRefs = Catalog.fieldNotes.flatMap { note in
+    note.relatedGlossaryIds.filter { Catalog.glossaryTerm(id: $0) == nil }.map { "\(note.id)→\($0)" }
+}
+check(r2MissingGlossaryRefs.isEmpty, "R2: 全16件の relatedGlossaryIds が実在の用語 id（欠落 \(r2MissingGlossaryRefs)）")
+let r2LittleTitle = Engine.fieldNoteTitle(id: "fn.little", state: r2Initial, derived: r2InitialDerived)
+let r2InitialWIP = r2Initial.fab.sim?.lots.count ?? -1
+print("  fn.little のタイトル: \(r2LittleTitle)")
+check(r2LittleTitle.contains("WIP") && r2LittleTitle.contains("＝") && r2LittleTitle.contains("WIP \(r2InitialWIP) ＝")
+      && r2LittleTitle != Catalog.fieldNote(id: "fn.little")?.title,
+      "R2: fn.little のタイトルは WIP と ＝ を含み、実数値（WIP \(r2InitialWIP)）が入る")
+check(Catalog.fieldNotes.filter { $0.id != "fn.little" }.allSatisfy {
+    Engine.fieldNoteTitle(id: $0.id, state: r2Initial, derived: r2InitialDerived) == $0.title
+}, "R2: fn.little 以外のタイトルは spec の title のまま")
+
+// R2. Stats の番兵と既定値（R1 の fixture-v4.json は tutorialStep 等のキーを持たない旧セーブ）
+print("== R2. Stats の番兵と既定値 ==")
+let r2Decoder = JSONDecoder()
+r2Decoder.dateDecodingStrategy = .iso8601
+let r2FixtureState: GameState
+do {
+    r2FixtureState = try r2Decoder.decode(GameState.self, from: r1FixtureData)
+} catch {
+    fail("R2: fixture-v4.json を GameState にデコードできない: \(error)")
+}
+check(r2FixtureState.stats.tutorialStep == 5, "R2: tutorialStep キーの無い旧セーブは番兵 5（ミッション完了扱い）")
+check(r2FixtureState.stats.seenFieldNoteIds.isEmpty, "R2: 旧セーブの seenFieldNoteIds は空")
+check(r2FixtureState.stats.noteTriggerMemo.isEmpty, "R2: 旧セーブの noteTriggerMemo は空")
+check(GameState.initial().stats.tutorialStep == 0, "R2: 新規ゲームの tutorialStep は 0")
+
+// R2. pendingFieldNotes の決定性と既読
+print("== R2. pendingFieldNotes の決定性と既読 ==")
+// 結果が空だと既読の検証が素通りになるので、完了ロット・敷設を 1 にして発生中のノートを作る
+var r2Base = r2Initial
+r2Base.stats.completedLots = 1
+r2Base.stats.railCellsBuilt = 1
+let r2BaseDerived = Engine.derived(state: r2Base)
+let r2PendingA = Engine.pendingFieldNotes(state: r2Base, derived: r2BaseDerived)
+let r2PendingB = Engine.pendingFieldNotes(state: r2Base, derived: r2BaseDerived)
+print("  発生中: \(r2PendingA.joined(separator: ", "))")
+check(!r2PendingA.isEmpty, "R2: 前提として発生中の現場ノートがある")
+check(r2PendingA == r2PendingB, "R2: 同じ state・derived で2回呼んだ結果が一致する")
+/// ids が order の部分列（順序を保った抜き出し）か
+func r2IsSubsequence(_ ids: [String], of order: [String]) -> Bool {
+    var cursor = 0
+    for id in ids {
+        guard let found = order[cursor...].firstIndex(of: id) else { return false }
+        cursor = found + 1
+    }
+    return true
+}
+check(r2IsSubsequence(r2PendingA, of: Catalog.fieldNotes.map { $0.id }), "R2: 結果は Catalog.fieldNotes の並び順の部分列")
+var r2Seen = r2Base
+r2Seen.stats.seenFieldNoteIds.formUnion(r2PendingA)
+check(Set(r2Pending(r2Seen)).isDisjoint(with: r2PendingA), "R2: 既読に入れたノートは次回の結果に含まれない")
+
+// R2. pendingFieldNotes の個別トリガー（GameState.initial() のコピーを加工して決定的に作る）
+print("== R2. 現場ノートの個別トリガー ==")
+var r2Rail0 = r2Initial
+r2Rail0.stats.railCellsBuilt = 0
+check(!r2Pending(r2Rail0).contains("fn.first_rail"), "R2: railCellsBuilt 0 では fn.first_rail が出ない")
+var r2Rail1 = r2Initial
+r2Rail1.stats.railCellsBuilt = 1
+check(r2Pending(r2Rail1).contains("fn.first_rail"), "R2: railCellsBuilt 1 で fn.first_rail が出る")
+
+var r2FirstComplete = r2Initial
+r2FirstComplete.stats.completedLots = 1
+check(r2Pending(r2FirstComplete).contains("fn.first_complete"), "R2: completedLots 1 で fn.first_complete が出る")
+
+var r2MarketDefect = r2Initial
+r2MarketDefect.stats.totalMarketDefectChips = 1
+check(r2Pending(r2MarketDefect).contains("fn.market_defect"), "R2: totalMarketDefectChips 1 で fn.market_defect が出る")
+
+var r2Little = r2Initial
+check((r2Little.fab.sim?.lots.count ?? 0) >= 20, "R2: 前提として sim のロット数が 20 以上（\(r2Little.fab.sim?.lots.count ?? 0)）")
+r2Little.fab.sim?.cycleTimeEMA = 120
+check(r2Pending(r2Little).contains("fn.little"), "R2: cycleTimeEMA 120 で fn.little が出る")
+r2Little.fab.sim?.cycleTimeEMA = 0
+check(!r2Pending(r2Little).contains("fn.little"), "R2: cycleTimeEMA 0 では fn.little が出ない")
+
+// fn.learning：トリガーが見る derived.learnedYield は state.learningWafers[ノード] から計算されるので、
+// sim 側ではなく learningWafers を書き換えて derived を取り直す
+check(!r2Pending(r2Initial).contains("fn.learning"), "R2: 加工前の初期状態では fn.learning が出ない")
+var r2Learning = r2Initial
+r2Learning.learningWafers["n28"] = 1_000_000
+check(r2Pending(r2Learning).contains("fn.learning"), "R2: learningWafers[n28] 1,000,000 で fn.learning が出る")
+
+var r2Bottleneck = r2Initial
+let r2BottleneckDerived = Engine.derived(state: r2Bottleneck)
+check(r2BottleneckDerived.bottleneck != nil, "R2: 前提として初期状態の律速工程がある（\(r2BottleneckDerived.bottleneck?.displayName ?? "-")）")
+Engine.updateFieldNoteMemo(state: &r2Bottleneck, derived: r2BottleneckDerived)
+check(!r2Pending(r2Bottleneck).contains("fn.bottleneck_seen"), "R2: 律速メモを打った直後は fn.bottleneck_seen が出ない")
+r2Bottleneck.gameHoursElapsed += 1.0
+check(r2Pending(r2Bottleneck).contains("fn.bottleneck_seen"), "R2: 律速が 1 ゲーム時間続くと fn.bottleneck_seen が出る")
+
+// 律速以外の工程のモデル：初期状態で購入可能なものの最安（同額なら id 昇順）。原点は R1 と同じ y→x・回転 0→90 の走査
+guard let r2BottleneckProcess = r2InitialDerived.bottleneck else { fail("R2: 初期状態に律速工程が無い") }
+guard let r2OtherModel = Catalog.equipment
+    .filter({ $0.process != r2BottleneckProcess && Engine.buyBlockReason(state: r2Initial, modelId: $0.id) == nil })
+    .min(by: { ($0.priceYen, $0.id) < ($1.priceYen, $1.id) })
+else { fail("R2: 律速以外の工程で購入可能なモデルが無い") }
+guard let r2Layout = r2Initial.fab.layout else { fail("R2: 初期状態にレイアウトが無い") }
+let r2Width = ((r2Layout.parcels.map { $0.x }.max() ?? 0) + 1) * FloorLayout.parcelSize
+let r2Height = ((r2Layout.parcels.map { $0.y }.max() ?? 0) + 1) * FloorLayout.parcelSize
+var r2Spot: (origin: GridPoint, rotation: Int)? = nil
+r2Scan: for y in 0..<r2Height {
+    for x in 0..<r2Width {
+        for rotation in [0, 90] {
+            let origin = GridPoint(x: x, y: y)
+            if Engine.buyBlockReason(state: r2Initial, modelId: r2OtherModel.id, origin: origin, rotation: rotation) == nil {
+                r2Spot = (origin: origin, rotation: rotation)
+                break r2Scan
+            }
+        }
+    }
+}
+guard let r2BuyOrigin = r2Spot?.origin, let r2BuyRotation = r2Spot?.rotation else { fail("R2: \(r2OtherModel.id) を置ける原点が無い") }
+print("  律速 \(r2BottleneckProcess.displayName) 以外のモデル: \(r2OtherModel.id)  配置原点: (\(r2BuyOrigin.x),\(r2BuyOrigin.y)) 回転 \(r2BuyRotation)")
+var r2Bought = r2Initial
+check(Engine.buyAndPlace(state: &r2Bought, modelId: r2OtherModel.id, origin: r2BuyOrigin, rotation: r2BuyRotation, now: t0),
+      "R2: 律速以外の工程の \(r2OtherModel.id) を buyAndPlace できる")
+check(r2Bought.stats.noteTriggerMemo["fn.not_bottleneck.at"] != nil, "R2: 購入で noteTriggerMemo[fn.not_bottleneck.at] が記録される")
+check(r2Pending(r2Bought).contains("fn.not_bottleneck"), "R2: 律速以外の増設で fn.not_bottleneck が出る")
+
+// fn.unconnected：未接続は装置ごとのポート到達性で決まるので、レールに接しない位置へ装置を置いて作る。
+// 購入可能なモデル（価格→id 昇順）× 原点（y→x）× 回転 0→90 を r2Initial のコピー上で試し、
+// buyAndPlace が成功し、かつその装置の unconnectedInput／unconnectedOutput が出る最初の組み合わせを使う。
+// 見つからなければ check は省き、その旨を出力する（テンプレートは左上 (0,0)〜(1,1) などレールから離れた空きを持つので、通常は見つかる）
+/// layoutProblems に toolId の装置の未接続（入口・出口いずれか）が含まれるか
+func r2HasUnconnected(_ s: GameState, toolId: UUID) -> Bool {
+    Engine.layoutProblems(state: s).contains { problem in
+        switch problem {
+        case .unconnectedInput(let id, _), .unconnectedOutput(let id, _): return id == toolId
+        case .lineBreak: return false
+        }
+    }
+}
+check(!r2Pending(r2Initial).contains("fn.unconnected"), "R2: 前提として初期状態では fn.unconnected が出ない")
+let r2UnconnectedModels = Catalog.equipment
+    .filter { Engine.buyBlockReason(state: r2Initial, modelId: $0.id) == nil }
+    .sorted { ($0.priceYen, $0.id) < ($1.priceYen, $1.id) }
+var r2UnconnectedSpot: (modelId: String, origin: GridPoint, rotation: Int)? = nil
+r2UnconnectedScan: for model in r2UnconnectedModels {
+    for y in 0..<r2Height {
+        for x in 0..<r2Width {
+            for rotation in [0, 90] {
+                let origin = GridPoint(x: x, y: y)
+                var trial = r2Initial
+                guard Engine.buyAndPlace(state: &trial, modelId: model.id, origin: origin, rotation: rotation, now: t0),
+                      let trialTool = trial.fab.placed.last else { continue }
+                if r2HasUnconnected(trial, toolId: trialTool.id) {
+                    r2UnconnectedSpot = (modelId: model.id, origin: origin, rotation: rotation)
+                    break r2UnconnectedScan
+                }
+            }
+        }
+    }
+}
+if let spot = r2UnconnectedSpot {
+    print("  未接続の配置: \(spot.modelId)  原点: (\(spot.origin.x),\(spot.origin.y)) 回転 \(spot.rotation)")
+    var r2Unconnected = r2Initial
+    check(Engine.buyAndPlace(state: &r2Unconnected, modelId: spot.modelId, origin: spot.origin, rotation: spot.rotation, now: t0),
+          "R2: レールに接しない位置へ \(spot.modelId) を buyAndPlace できる")
+    check(r2Unconnected.fab.placed.last.map { r2HasUnconnected(r2Unconnected, toolId: $0.id) } == true,
+          "R2: 配置した \(spot.modelId) について未接続（unconnectedInput／unconnectedOutput）が出る")
+    check(r2Pending(r2Unconnected).contains("fn.unconnected"), "R2: 未接続の装置で fn.unconnected が出る")
+} else {
+    print("  未接続になる配置が見つからないため fn.unconnected の check は省く")
+}
+
+var r2Break = r2Initial
+check(r2Break.fab.layout?.rails.contains { $0.point.y == 14 } == true, "R2: 前提としてテンプレートに y == 14 の戻りレーンがある")
+r2Break.fab.layout?.rails.removeAll { $0.point.y == 14 }
+let r2LineBreak = Engine.layoutProblems(state: r2Break).first { problem in
+    if case .lineBreak = problem { return true }
+    return false
+}
+print("  戻りレーン除去後: \(r2LineBreak?.message ?? "-")")
+check(r2LineBreak != nil, "R2: 戻りレーン（y == 14）を除去すると lineBreak が発生する")
+check(r2Pending(r2Break).contains("fn.line_break"), "R2: lineBreak で fn.line_break が出る")
+check(r2LineBreak.flatMap { Engine.lineBreakAnchors(state: r2Break, problem: $0) } != nil,
+      "R2: その lineBreak について lineBreakAnchors が nil でない")
+
+// R2. railCongestion・railLoopCount・lotProgress
+print("== R2. railCongestion・railLoopCount・lotProgress ==")
+guard let r2Sim0 = r2Initial.fab.sim else { fail("R2: 初期状態に sim が無い") }
+guard let r2RailLot = r2Sim0.lots.first(where: { r2IsRailLot($0) && $0.path.count >= 5 })
+else { fail("R2: 初期状態にレール上のロット（経路 5 セル以上）が無い") }
+let r2QueueCells = Array(r2RailLot.path.prefix(5))
+check(Set(r2QueueCells).count == 5, "R2: 前提として経路の連続5セルが相異なる")
+var r2Queue = r2Initial
+r2Queue.fab.sim?.lots.removeAll { r2IsRailLot($0) }
+for cellIndex in 0..<5 {
+    var copy = r2RailLot
+    copy.id = UUID()
+    copy.location = .rail(cellIndex: cellIndex, progress: 0.999)
+    r2Queue.fab.sim?.lots.append(copy)
+}
+let r2Congestion = Engine.railCongestion(state: r2Queue)
+print("  滞留: \(r2QueueCells.map { "(\($0.x),\($0.y))=\(r2Congestion[$0] ?? 0)" }.joined(separator: " "))")
+check(r2QueueCells.allSatisfy { r2Congestion[$0] == 5 }, "R2: 連続5セルに停止ロットを置くと railCongestion が5セルとも 5")
+check(r2Pending(r2Queue).contains("fn.queue_seen"), "R2: 5セルの滞留で fn.queue_seen が出る")
+
+check(Engine.railLoopCount(state: r2Initial) == 1, "R2: 初期状態（蛇行テンプレート）の railLoopCount は 1")
+
+guard let r2FirstLot = r2Sim0.lots.first else { fail("R2: 初期状態の sim にロットが無い") }
+guard let r2Progress = Engine.lotProgress(state: r2Initial, lotId: r2FirstLot.id) else { fail("R2: 初期状態の先頭ロットで lotProgress が nil") }
+check(true, "R2: 初期状態の先頭ロットで lotProgress が nil でない")
+guard let r2Node28 = Catalog.node(id: "n28") else { fail("R2: n28 がカタログに無い") }
+let r2Steps = RouteBuilder.routeSteps(node: r2Node28, lithoClass: .duvDry)
+check(r2Progress.totalSteps == r2Steps.count, "R2: totalSteps がルート（n28・duvDry）の \(r2Steps.count) ステップと一致")
+check(r2Progress.stepIndex <= r2Progress.totalSteps, "R2: stepIndex（\(r2Progress.stepIndex)）≤ totalSteps")
+var r2ExpectedPass = 0
+if r2Steps.indices.contains(r2FirstLot.stepIndex) {
+    let current = r2Steps[r2FirstLot.stepIndex]
+    for i in 0...r2FirstLot.stepIndex where r2Steps[i] == current {
+        r2ExpectedPass += 1
+    }
+}
+check(r2Progress.passNumber >= 1 && r2Progress.passNumber <= r2Progress.totalPasses && r2Progress.passNumber == r2ExpectedPass,
+      "R2: passNumber \(r2Progress.passNumber) が 1〜totalPasses（\(r2Progress.totalPasses)）で、ルートから数えた値 \(r2ExpectedPass) と一致")
+
+// 検査の前後：先頭ロットの stepIndex を差し替え、goodFraction は 0.5 に固定して判定する
+guard let r2FirstInspection = r2Steps.firstIndex(of: .inspection) else { fail("R2: ルートに検査ステップが無い") }
+func r2LotProgress(_ base: GameState, lotId: UUID, stepIndex: Int) -> (state: GameState, progress: LotProgress?) {
+    var s = base
+    if let index = s.fab.sim?.lots.firstIndex(where: { $0.id == lotId }) {
+        s.fab.sim?.lots[index].stepIndex = stepIndex
+        s.fab.sim?.lots[index].goodFraction = 0.5
+    }
+    return (s, Engine.lotProgress(state: s, lotId: lotId))
+}
+let r2BeforeInspection = r2LotProgress(r2Initial, lotId: r2FirstLot.id, stepIndex: r2FirstInspection)
+check(r2BeforeInspection.progress != nil && r2BeforeInspection.progress?.lastInspectionDefectRate == nil
+      && r2BeforeInspection.progress?.qualityBand == LotQualityBand.none,
+      "R2: 最初の検査ステップ（\(r2FirstInspection)）の手前では推定不良率 nil・品質帯 none")
+let r2AfterInspection = r2LotProgress(r2Initial, lotId: r2FirstLot.id, stepIndex: r2FirstInspection + 1)
+let r2ExpectedDefectRate = (1 - 0.5) * Engine.derived(state: r2AfterInspection.state).detectionRate
+let r2ExpectedBand: LotQualityBand = r2ExpectedDefectRate >= 0.25 ? .red
+    : (r2ExpectedDefectRate < 0.10 ? .green : LotQualityBand.none)
+print("  検査通過後: 推定不良率 \(num(r2AfterInspection.progress?.lastInspectionDefectRate ?? -1, 4))（期待 \(num(r2ExpectedDefectRate, 4))）")
+check(r2AfterInspection.progress?.lastInspectionDefectRate.map { abs($0 - r2ExpectedDefectRate) < 1e-12 } == true,
+      "R2: 検査通過後の推定不良率が (1 − goodFraction) × 検出率")
+check(r2AfterInspection.progress?.qualityBand == r2ExpectedBand, "R2: 検査通過後の品質帯が閾値（0.25 以上 red／0.10 未満 green）どおり")
+
+// R2. 新マイルストーン条件
+print("== R2. 新マイルストーン条件 ==")
+func r2Achieved(_ id: String, _ s: GameState) -> Bool {
+    guard let spec = Catalog.milestone(id: id) else { fail("R2: マイルストーン \(id) がカタログに無い") }
+    return Engine.milestoneAchieved(spec, state: s, derived: Engine.derived(state: s))
+}
+check(!r2Achieved("first_rail", r2Rail0), "R2: first_rail は railCellsBuilt 0 で未達成")
+check(r2Achieved("first_rail", r2Rail1), "R2: first_rail は railCellsBuilt 1 で達成")
+var r2Lots0 = r2Initial
+r2Lots0.stats.completedLots = 0
+check(!r2Achieved("first_lot_complete", r2Lots0), "R2: first_lot_complete は completedLots 0 で未達成")
+check(r2Achieved("first_lot_complete", r2FirstComplete), "R2: first_lot_complete は completedLots 1 で達成")
+check(r2Achieved("line_connected", r2Initial), "R2: line_connected は初期状態で達成")
+check(r2Achieved("return_lane", r2Initial), "R2: return_lane は初期状態で達成")
+check(!r2Achieved("second_loop", r2Initial), "R2: second_loop は初期状態で未達成")
+
+var r2Cycle = r2Initial
+r2Cycle.fab.sim?.cycleTimeEMA = 1_800
+check(r2Achieved("cycle_time_40", r2Cycle), "R2: cycle_time_40 はサイクルタイム 30 時間（1,800 分）で達成")
+r2Cycle.fab.sim?.cycleTimeEMA = 3_000
+check(!r2Achieved("cycle_time_40", r2Cycle), "R2: cycle_time_40 はサイクルタイム 50 時間（3,000 分）で未達成")
+r2Cycle.fab.sim?.cycleTimeEMA = 0
+check(!r2Achieved("cycle_time_40", r2Cycle), "R2: cycle_time_40 はサイクルタイム未計測（0）で未達成")
+
+var r2NoStall = r2Initial
+if var sim = r2NoStall.fab.sim {
+    for index in sim.lots.indices {
+        if case .rail(let cellIndex, _) = sim.lots[index].location {
+            sim.lots[index].location = .rail(cellIndex: cellIndex, progress: 0.5)
+        }
+    }
+    if sim.stats.releasedLots == 0 {
+        sim.stats.releasedLots = 1
+    }
+    r2NoStall.fab.sim = sim
+}
+r2NoStall.stats.noteTriggerMemo["ms.lastStallGameHours"] = r2NoStall.gameHoursElapsed - 25
+check(r2Achieved("no_stall_day", r2NoStall), "R2: no_stall_day は滞留なしで最後の滞留から 25 ゲーム時間なら達成")
+guard let r2StallIndex = r2NoStall.fab.sim?.lots.firstIndex(where: { r2IsRailLot($0) })
+else { fail("R2: レール上のロットが無い") }
+if case .rail(let cellIndex, _)? = r2NoStall.fab.sim?.lots[r2StallIndex].location {
+    r2NoStall.fab.sim?.lots[r2StallIndex].location = .rail(cellIndex: cellIndex, progress: 0.999)
+}
+Engine.evaluateMilestones(state: &r2NoStall)
+check(r2NoStall.stats.noteTriggerMemo["ms.lastStallGameHours"] == r2NoStall.gameHoursElapsed,
+      "R2: 停止ロットがあると evaluateMilestones が最後の滞留時刻を現在時刻に更新する")
+check(!r2Achieved("no_stall_day", r2NoStall), "R2: 滞留が起きると no_stall_day は未達成に戻る")
+
+// R2. ガイド付きミッションの段
+print("== R2. tutorialStepSatisfied ==")
+for step in 0...2 {
+    check(!Engine.tutorialStepSatisfied(state: r2Initial, step: step), "R2: 段 \(step) は初期状態で false（UI イベントで進む）")
+}
+check(!Engine.tutorialStepSatisfied(state: r2Initial, step: 3), "R2: 段 3 は初期状態（totalInvestedYen 0）で false")
+check(Engine.tutorialStepSatisfied(state: r2Bought, step: 3), "R2: 段 3 は buyAndPlace 後に true")
+check(Engine.tutorialStepSatisfied(state: r2Initial, step: 4), "R2: 段 4 は初期状態（ライン成立）で true")
+
+// R2. 図鑑の新解放条件
+print("== R2. 図鑑の解放（現場ノート既読） ==")
+check(r2Initial.stats.seenFieldNoteIds.isEmpty
+      && !Engine.isGlossaryUnlocked(.fieldNoteSeen("fn.first_rail"), state: r2Initial),
+      "R2: seenFieldNoteIds が空なら .fieldNoteSeen(fn.first_rail) は未解放")
+var r2GlossarySeen = r2Initial
+r2GlossarySeen.stats.seenFieldNoteIds.insert("fn.first_rail")
+check(Engine.isGlossaryUnlocked(.fieldNoteSeen("fn.first_rail"), state: r2GlossarySeen),
+      "R2: fn.first_rail を既読にすると .fieldNoteSeen(fn.first_rail) が解放される")
 
 print("HEADLESS CHECK PASSED")
