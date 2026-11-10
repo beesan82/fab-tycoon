@@ -548,7 +548,7 @@ struct MapScene: View {
         let geometry = FloorGridGeometry(zoom: zoom, pan: panOffset)
         let overlay = editOverlay(layout: layout, data: data)
         let clock = simClock
-        let inventoryChips = store.state.inventoryChips
+        let inventoryChips = store.state.fab.inventoryChips
         let showNumbers = self.showNumbers
         let flashAt = store.placementFeedback?.at.timeIntervalSinceReferenceDate
         // R2 の点滅・脈動（未接続プラグ・ストッカー満杯・ビネット・配置フラッシュ）も止めない
