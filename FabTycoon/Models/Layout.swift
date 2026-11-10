@@ -261,50 +261,6 @@ struct FloorLayout: Codable, Equatable {
         paidRailPoints.remove(point)
         return true
     }
-
-    // MARK: 固定設備の移動
-
-    private enum Facility {
-        case stocker, entry, shipping
-    }
-
-    /// 固定設備を移したときのフットプリントが購入済み区画内で、装置・レール・他の固定設備と重ならないこと
-    private func canPlaceFacility(_ facility: Facility, cells footprint: [GridPoint], among tools: [ToolInstance]) -> Bool {
-        guard footprint.allSatisfy({ isPurchased(cell: $0) }) else { return false }
-        var blocked = Set<GridPoint>()
-        for tool in tools {
-            blocked.formUnion(cells(of: tool))
-        }
-        blocked.formUnion(rails.map { $0.point })
-        if facility != .stocker { blocked.formUnion(stockerCells()) }
-        if facility != .entry { blocked.formUnion(entryCells()) }
-        if facility != .shipping { blocked.formUnion(shippingCells()) }
-        return !footprint.contains { blocked.contains($0) }
-    }
-
-    @discardableResult
-    mutating func moveStocker(to origin: GridPoint, among tools: [ToolInstance]) -> Bool {
-        guard canPlaceFacility(.stocker, cells: Self.cells(origin: origin, size: Self.stockerSize), among: tools)
-        else { return false }
-        stocker.origin = origin
-        return true
-    }
-
-    @discardableResult
-    mutating func moveEntry(to origin: GridPoint, among tools: [ToolInstance]) -> Bool {
-        guard canPlaceFacility(.entry, cells: Self.cells(origin: origin, size: Self.entrySize), among: tools)
-        else { return false }
-        entry.origin = origin
-        return true
-    }
-
-    @discardableResult
-    mutating func moveShipping(to origin: GridPoint, among tools: [ToolInstance]) -> Bool {
-        guard canPlaceFacility(.shipping, cells: Self.cells(origin: origin, size: Self.shippingSize), among: tools)
-        else { return false }
-        shipping.origin = origin
-        return true
-    }
 }
 
 // 旧セーブ互換：paidRailPoints を欠いていても読めるようにする。
@@ -616,11 +572,6 @@ enum RouteStepOrder {
 // MARK: - デフォルト配置テンプレート（§2.6）
 
 enum LayoutTemplate {
-    /// 現行テンプレート（蛇行型）のレールセルの位置集合（レール配置は装備に依存しない）
-    static var templateRailPoints: Set<GridPoint> {
-        Set(starter16(equipment: []).layout.rails.map { $0.point })
-    }
-
     /// β1〜β3 の初期テンプレート（リング型）のレールセルの位置集合（40 セル、スパー 2 セル含む）。
     /// 旧セーブ（paidRailPoints を欠く β1 セーブ）の購入済み判定専用に、位置を固定して保持する。
     /// 現行テンプレートを差し替えても、この集合は絶対に変更しないこと（旧セーブの復元結果が変わる）。

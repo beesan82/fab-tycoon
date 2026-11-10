@@ -410,14 +410,15 @@ struct SimCore {
         self.init(state: state, tools: state.fab.equipment.map { ToolInstance(instance: $0) }, layout: nil)
     }
 
-    /// tools は配置済みの装置。layout が nil なら仮想搬送、あればレール搬送
-    init(state: GameState, tools: [ToolInstance], layout: FloorLayout?) {
+    /// tools は配置済みの装置。layout が nil なら仮想搬送、あればレール搬送。
+    /// knownPriceYen は呼び出し側が同じ state から計算済みの精算価格（nil なら derived から計算する）
+    init(state: GameState, tools: [ToolInstance], layout: FloorLayout?, knownPriceYen: Double? = nil) {
         self.tools = tools
         releaseNodeId = state.fab.currentNodeId
         releaseProductId = state.currentProductId
         releaseLithoClass = Engine.topLithoClass(state: state) ?? .duvDry
         research = Engine.researchEffects(state: state)
-        settlementPriceYen = Engine.derived(state: state).currentPriceYen
+        settlementPriceYen = knownPriceYen ?? Engine.derived(state: state).currentPriceYen
         self.layout = layout
         if let layout = layout {
             stocker.origin = layout.stocker.origin
@@ -437,8 +438,8 @@ struct SimCore {
 
     /// セーブから復元する。レイアウトは state.fab.layout、装置はスナップショットのもの。
     /// 経路キャッシュ等の派生値は init で作り直す（レイアウトから決定的に決まるので結果は変わらない）
-    init(state: GameState, snapshot: SimSnapshot) {
-        self.init(state: state, tools: snapshot.tools, layout: state.fab.layout)
+    init(state: GameState, snapshot: SimSnapshot, knownPriceYen: Double? = nil) {
+        self.init(state: state, tools: snapshot.tools, layout: state.fab.layout, knownPriceYen: knownPriceYen)
         lots = Dictionary(snapshot.lots.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
         lotReleaseOrder = snapshot.lots.map { $0.id }
         stocker = snapshot.stocker

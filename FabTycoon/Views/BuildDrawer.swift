@@ -328,8 +328,6 @@ private struct BuildModelTile: View {
             return "不明な装置です"
         case .locked(let reasons):
             return reasons.joined(separator: "／")
-        case .noFreeSlot:
-            return "フロアに空きがありません"
         case .insufficientCash(let shortfall):
             return "資金不足（あと\(MoneyFormat.yen(shortfall))）"
         case .cannotPlace(let message):

@@ -635,7 +635,7 @@ struct MapScene: View {
     // MARK: ジェスチャ
 
     private var magnifyGesture: some Gesture {
-        MagnificationGesture()
+        MagnifyGesture()
             .onChanged { value in
                 // 2本指が入ったら：なぞりは捨て、長押しの持ち上げも成立させない
                 if store.railMode && !strokeCancelled {
@@ -649,7 +649,7 @@ struct MapScene: View {
                 if zoomAtGestureStart == nil {
                     zoomAtGestureStart = zoom
                 }
-                zoom = min(max(base * value, Self.zoomRange.lowerBound), Self.zoomRange.upperBound)
+                zoom = min(max(base * value.magnification, Self.zoomRange.lowerBound), Self.zoomRange.upperBound)
             }
             .onEnded { _ in
                 zoomAtGestureStart = nil
@@ -1102,8 +1102,6 @@ struct MapScene: View {
             return "不明な装置です"
         case .locked(let reasons):
             return reasons.joined(separator: "／")
-        case .noFreeSlot:
-            return "フロアに空きがありません"
         case .insufficientCash(let shortfall):
             return "資金不足（あと\(MoneyFormat.yen(shortfall))）"
         case .cannotPlace(let message):
@@ -1555,7 +1553,7 @@ struct MapScene: View {
         let band = Self.facilityBand(layout: layout)
         let bandRect = g.rect(origin: band.origin, width: band.width, depth: Self.facilityBandRows)
         if bandRect.intersects(bounds) {
-            context.fill(Path(roundedRect: bandRect.insetBy(dx: 1, dy: 1), cornerRadius: cs * 0.3),
+            context.fill(Path(bandRect.insetBy(dx: 1, dy: 1)),
                          with: .color(Color(red: 0.33, green: 0.40, blue: 0.31)))
             // フロアとの境の縁石
             var curb = Path()
@@ -1584,7 +1582,7 @@ struct MapScene: View {
                             guard cellRect.intersects(bounds) else { continue }
                             if (cx + cy) % 2 == 0 { cellTints.addRect(cellRect) }
                             let d = max(cs * 0.09, 1)
-                            perfDots.addEllipse(in: CGRect(x: cellRect.midX - d / 2, y: cellRect.maxY - d - cs * 0.08,
+                            perfDots.addRect(CGRect(x: cellRect.midX - d / 2, y: cellRect.maxY - d - cs * 0.08,
                                                            width: d, height: d))
                         }
                     }
@@ -1698,9 +1696,14 @@ struct MapScene: View {
         let stockerRect = g.rect(origin: layout.stocker.origin, width: FloorLayout.stockerSize.width,
                                  depth: FloorLayout.stockerSize.depth).insetBy(dx: cs * 0.06, dy: cs * 0.06)
         // ストッカー（P5環境・第2ゲート）: ラック棚＋収納FOUPのスロットで見せる（手続き描画）
-        context.fill(Path(roundedRect: stockerRect, cornerRadius: cs * 0.2), with: .color(Color(white: 0.30)))
+        // 外枠・内枠とも直角＋輪郭色の縁（外枠の上端に 1 段のハイライト）
+        let rackEdge = max(cs * 0.05, 1)
+        drawPixelBox(context, stockerRect, fill: Color(white: 0.30), edge: rackEdge)
+        context.fill(Path(CGRect(x: stockerRect.minX + rackEdge, y: stockerRect.minY + rackEdge,
+                                 width: stockerRect.width - rackEdge * 2, height: rackEdge)),
+                     with: .color(Color(white: 0.40)))
         let rackInner = stockerRect.insetBy(dx: cs * 0.12, dy: cs * 0.12)
-        context.fill(Path(roundedRect: rackInner, cornerRadius: cs * 0.1), with: .color(Color(white: 0.45)))
+        drawPixelBox(context, rackInner, fill: Color(white: 0.45), edge: rackEdge)
         let rackCols = 3, rackRows = 2
         let slotW = rackInner.width / CGFloat(rackCols), slotH = rackInner.height / CGFloat(rackRows)
         var shelf = Path()
@@ -1712,14 +1715,13 @@ struct MapScene: View {
             shelf.move(to: CGPoint(x: rackInner.minX + slotW * CGFloat(c), y: rackInner.minY))
             shelf.addLine(to: CGPoint(x: rackInner.minX + slotW * CGFloat(c), y: rackInner.maxY))
         }
-        context.stroke(shelf, with: .color(Color(white: 0.25)), lineWidth: max(cs * 0.05, 1))
+        context.stroke(shelf, with: .color(Self.pixelOutline.opacity(0.85)), lineWidth: max(cs * 0.05, 1))
         for i in 0..<min(data.stockerLots, rackCols * rackRows) {
             let slot = CGRect(x: rackInner.minX + slotW * CGFloat(i % rackCols),
                               y: rackInner.minY + slotH * CGFloat(i / rackCols),
                               width: slotW, height: slotH).insetBy(dx: slotW * 0.18, dy: slotH * 0.18)
-            let slotPath = Path(roundedRect: slot, cornerRadius: slot.height * 0.15)
-            context.fill(slotPath, with: .color(Color(red: 0.93, green: 0.86, blue: 0.70)))
-            context.stroke(slotPath, with: .color(Color.brown.opacity(0.8)), lineWidth: 1)
+            // 収納 FOUP はレール上と同じピクセル絵の小型版
+            drawFOUP(context, center: CGPoint(x: slot.midX, y: slot.midY), width: slot.width, height: slot.height)
         }
         if data.stockerLots == 0 {
             context.draw(Text("ST").font(.system(size: labelSize * 1.2, weight: .heavy)).foregroundColor(.white),
@@ -1736,7 +1738,7 @@ struct MapScene: View {
             let barHeight = max(cs * 0.14, 2.5)
             let track = CGRect(x: stockerRect.minX + cs * 0.12, y: stockerRect.maxY - barHeight - cs * 0.03,
                                width: stockerRect.width - cs * 0.24, height: barHeight)
-            context.fill(Path(roundedRect: track, cornerRadius: barHeight / 2), with: .color(Color.black.opacity(0.45)))
+            context.fill(Path(track), with: .color(Color.black.opacity(0.45)))
             let barColor: Color
             if stockerFull {
                 barColor = Color.red.opacity(now.truncatingRemainder(dividingBy: 1) < 0.5 ? 1 : 0.35)
@@ -1747,14 +1749,13 @@ struct MapScene: View {
             }
             if fill > 0 {
                 let bar = CGRect(x: track.minX, y: track.minY, width: track.width * fill, height: track.height)
-                context.fill(Path(roundedRect: bar, cornerRadius: barHeight / 2), with: .color(barColor))
+                context.fill(Path(bar), with: .color(barColor))
             }
         }
         let entryRect = g.rect(origin: layout.entry.origin, width: FloorLayout.entrySize.width,
                                depth: FloorLayout.entrySize.depth).insetBy(dx: cs * 0.06, dy: cs * 0.06)
         // ストッカー満杯の間は投入が止まるので灰色に落とす（§3.1）
-        context.fill(Path(roundedRect: entryRect, cornerRadius: cs * 0.15),
-                     with: .color(stockerFull ? Color(white: 0.55) : Color.green.opacity(0.75)))
+        drawPortPlate(context, entryRect, fill: stockerFull ? Color(white: 0.55) : Color.green.opacity(0.75), cellSize: cs)
         context.draw(Text("IN").font(.system(size: labelSize, weight: .heavy)).foregroundColor(.white),
                      at: CGPoint(x: entryRect.midX, y: entryRect.midY))
         if data.entryLots > 0 {
@@ -1763,7 +1764,7 @@ struct MapScene: View {
         }
         let shippingRect = g.rect(origin: layout.shipping.origin, width: FloorLayout.shippingSize.width,
                                   depth: FloorLayout.shippingSize.depth).insetBy(dx: cs * 0.06, dy: cs * 0.06)
-        context.fill(Path(roundedRect: shippingRect, cornerRadius: cs * 0.15), with: .color(Color.blue.opacity(0.7)))
+        drawPortPlate(context, shippingRect, fill: Color.blue.opacity(0.7), cellSize: cs)
         context.draw(Text("OUT").font(.system(size: labelSize * 0.8, weight: .heavy)).foregroundColor(.white),
                      at: CGPoint(x: shippingRect.midX, y: shippingRect.midY))
 
@@ -1841,9 +1842,8 @@ struct MapScene: View {
 
             // 状態ランプ（右上）
             let r = max(cs * 0.14, 3)
-            let lamp = Path(ellipseIn: CGRect(x: rect.maxX - r * 2 - cs * 0.1, y: rect.minY + cs * 0.1, width: r * 2, height: r * 2))
-            context.fill(lamp, with: .color(item.lamp))
-            context.stroke(lamp, with: .color(item.lamp == FloorDrawData.idleLamp ? Color.gray : Color.white), lineWidth: 1)
+            drawPixelBox(context, CGRect(x: rect.maxX - r * 2 - cs * 0.1, y: rect.minY + cs * 0.1, width: r * 2, height: r * 2),
+                         fill: item.lamp, edge: 1)
 
             // 工程順バッジ（左下。β1 実機FB対応）：番号は常時、工程名はズームが十分なときだけ併記し、
             // 引いた表示では番号だけにして邪魔にならないようにする
@@ -2049,30 +2049,82 @@ struct MapScene: View {
                   in: CGRect(x: -half, y: -half, width: platen.width, height: platen.width))
     }
 
+    /// 環境ドット絵の輪郭色（装置スプライトの #222636 相当）
+    private static let pixelOutline = Color(red: 0.13, green: 0.15, blue: 0.21)
+
+    /// 角を 1 段（notch 分）欠いた矩形の外形（ピクセル絵の角落とし。階段状の 1 本の多角形）
+    private static func notchedRect(_ r: CGRect, notch n: CGFloat) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: r.minX + n, y: r.minY))
+        path.addLine(to: CGPoint(x: r.maxX - n, y: r.minY))
+        path.addLine(to: CGPoint(x: r.maxX - n, y: r.minY + n))
+        path.addLine(to: CGPoint(x: r.maxX, y: r.minY + n))
+        path.addLine(to: CGPoint(x: r.maxX, y: r.maxY - n))
+        path.addLine(to: CGPoint(x: r.maxX - n, y: r.maxY - n))
+        path.addLine(to: CGPoint(x: r.maxX - n, y: r.maxY))
+        path.addLine(to: CGPoint(x: r.minX + n, y: r.maxY))
+        path.addLine(to: CGPoint(x: r.minX + n, y: r.maxY - n))
+        path.addLine(to: CGPoint(x: r.minX, y: r.maxY - n))
+        path.addLine(to: CGPoint(x: r.minX, y: r.minY + n))
+        path.addLine(to: CGPoint(x: r.minX + n, y: r.minY + n))
+        path.closeSubpath()
+        return path
+    }
+
+    /// ピクセル調の箱：輪郭色の縁（太さ edge、角丸なし）＋内側の塗り。notched なら角を edge 分欠いた階段状シルエット。
+    /// 縁は外形と内側の差（偶奇塗り）で描くので、半透明の塗りでも輪郭色と混ざらない
+    private func drawPixelBox(_ context: GraphicsContext, _ rect: CGRect, fill: Color, edge: CGFloat,
+                              notched: Bool = false) {
+        let inner = rect.insetBy(dx: edge, dy: edge)
+        guard inner.width > 0, inner.height > 0 else {
+            context.fill(Path(rect), with: .color(Self.pixelOutline))
+            return
+        }
+        var ring = notched ? Self.notchedRect(rect, notch: edge) : Path(rect)
+        ring.addRect(inner)
+        context.fill(ring, with: .color(Self.pixelOutline), style: FillStyle(eoFill: true))
+        context.fill(Path(inner), with: .color(fill))
+    }
+
+    /// 投入口・出荷口のプレート（直角＋輪郭色の縁＋内側の白線）
+    private func drawPortPlate(_ context: GraphicsContext, _ rect: CGRect, fill: Color, cellSize cs: CGFloat) {
+        let edge = max(cs * 0.06, 1)
+        drawPixelBox(context, rect, fill: fill, edge: edge)
+        context.stroke(Path(rect.insetBy(dx: edge * 2.5, dy: edge * 2.5)),
+                       with: .color(Color.white.opacity(0.6)), lineWidth: max(cs * 0.04, 1))
+    }
+
+    /// FOUP のピクセル絵（矩形の接地影＋角を 1 段欠いた本体＋蓋の継ぎ目・窓帯・取っ手。すべて矩形の合成）
     private func drawFOUP(_ context: GraphicsContext, center: CGPoint, width: CGFloat, height: CGFloat) {
         let rect = CGRect(x: center.x - width / 2, y: center.y - height / 2, width: width, height: height)
-        // 接地影（P5環境・第2ゲート）
-        let shadow = CGRect(x: rect.minX + width * 0.06, y: rect.maxY - height * 0.18,
-                            width: width * 0.88, height: height * 0.3)
-        context.fill(Path(ellipseIn: shadow), with: .color(Color.black.opacity(0.18)))
-        let path = Path(roundedRect: rect, cornerRadius: min(width, height) * 0.2)
-        context.fill(path, with: .color(Color(red: 0.93, green: 0.86, blue: 0.70)))
-        context.stroke(path, with: .color(Color.brown.opacity(0.8)), lineWidth: 1)
+        // ドット 1 個分（輪郭の太さ＝角の欠け）
+        let px = max(min(width, height) / 8, 0.75)
+        // 接地影（P5環境・第2ゲート）：本体の下端から右下へ落ちる矩形
+        context.fill(Path(CGRect(x: rect.minX + px, y: rect.maxY - px, width: width, height: px * 1.5)),
+                     with: .color(Color.black.opacity(0.18)))
+        // 本体（FOUP ベージュ）
+        drawPixelBox(context, rect, fill: Color(red: 0.93, green: 0.86, blue: 0.70), edge: px, notched: true)
+        let inner = rect.insetBy(dx: px, dy: px)
+        let seamY = rect.minY + height * 0.28
+        // 蓋は 1 段明るく、下端は 1 段暗く
+        if seamY > inner.minY {
+            context.fill(Path(CGRect(x: inner.minX, y: inner.minY, width: inner.width, height: seamY - inner.minY)),
+                         with: .color(Color(red: 0.98, green: 0.94, blue: 0.82)))
+        }
+        context.fill(Path(CGRect(x: inner.minX, y: inner.maxY - px, width: inner.width, height: px)),
+                     with: .color(Color(red: 0.80, green: 0.71, blue: 0.54)))
         // 蓋の継ぎ目
-        var seam = Path()
-        seam.move(to: CGPoint(x: rect.minX + 1, y: rect.minY + height * 0.28))
-        seam.addLine(to: CGPoint(x: rect.maxX - 1, y: rect.minY + height * 0.28))
-        context.stroke(seam, with: .color(Color.brown.opacity(0.5)), lineWidth: 1)
-        // 前面の窓帯
+        context.fill(Path(CGRect(x: inner.minX, y: seamY, width: inner.width, height: px)),
+                     with: .color(Self.pixelOutline.opacity(0.6)))
+        // 前面の窓帯（左上に 1 ドットの映り込み）
         let win = CGRect(x: rect.minX + width * 0.18, y: rect.minY + height * 0.45,
                          width: width * 0.64, height: height * 0.3)
-        context.fill(Path(roundedRect: win, cornerRadius: height * 0.06),
-                     with: .color(Color(white: 0.35).opacity(0.55)))
+        context.fill(Path(win), with: .color(Color(red: 0.36, green: 0.40, blue: 0.48)))
+        context.fill(Path(CGRect(x: win.minX, y: win.minY, width: win.width * 0.3, height: min(px, win.height / 2))),
+                     with: .color(Color.white.opacity(0.45)))
         // 上部の取っ手
-        let handle = CGRect(x: center.x - width * 0.14, y: rect.minY - height * 0.10,
-                            width: width * 0.28, height: height * 0.12)
-        context.stroke(Path(roundedRect: handle, cornerRadius: height * 0.05),
-                       with: .color(Color.brown.opacity(0.9)), lineWidth: 1)
+        context.fill(Path(CGRect(x: center.x - width * 0.14, y: rect.minY - px, width: width * 0.28, height: px)),
+                     with: .color(Self.pixelOutline))
     }
 
     /// 投入口／出荷口の大きなラベルプレート（施設の上に、三角のポインタつきで描く。β1 実機FB対応）
@@ -2084,9 +2136,8 @@ struct MapScene: View {
         }
         let height = fontSize * 1.5
         let plate = CGRect(x: rect.midX - width / 2, y: max(rect.minY - height - 3, 2), width: width, height: height)
-        let path = Path(roundedRect: plate, cornerRadius: height / 2)
-        context.fill(path, with: .color(color))
-        context.stroke(path, with: .color(Color.white.opacity(0.85)), lineWidth: 1.2)
+        // 角を 1 段欠いた矩形＋輪郭色の縁
+        drawPixelBox(context, plate, fill: color, edge: max(fontSize * 0.12, 1.2), notched: true)
         context.draw(Text(text).font(.system(size: fontSize, weight: .heavy)).foregroundColor(.white),
                      at: CGPoint(x: plate.midX, y: plate.midY))
         // 施設へつなぐ小さな三角ポインタ
@@ -2103,7 +2154,9 @@ struct MapScene: View {
         let width = fontSize * (0.7 * CGFloat(text.count) + 0.8)
         let height = fontSize * 1.4
         let rect = CGRect(x: point.x - width / 2, y: point.y - height / 2, width: width, height: height)
-        context.fill(Path(roundedRect: rect, cornerRadius: height / 2), with: .color(color))
+        let path = Path(roundedRect: rect, cornerRadius: height * 0.15)
+        context.fill(path, with: .color(color))
+        context.stroke(path, with: .color(Self.pixelOutline), lineWidth: 1)
         context.draw(Text(text).font(.system(size: fontSize, weight: .bold)).foregroundColor(.white),
                      at: CGPoint(x: rect.midX, y: rect.midY))
     }
@@ -2120,9 +2173,10 @@ struct MapScene: View {
         let width = Self.estimatedTextWidth(text, fontSize: fontSize) + fontSize * 0.9 + leadingInset
         let height = fontSize * 1.45
         let plate = CGRect(x: topCenter.x - width / 2, y: topCenter.y, width: width, height: height)
-        let path = Path(roundedRect: plate, cornerRadius: height * 0.3)
+        let path = Path(roundedRect: plate, cornerRadius: height * 0.15)
         context.fill(path, with: .color(color.opacity(0.92)))
-        context.stroke(path, with: .color(Color.white.opacity(0.8)), lineWidth: 1)
+        context.stroke(path, with: .color(Self.pixelOutline), lineWidth: 1)
+        context.stroke(Path(plate.insetBy(dx: 1.5, dy: 1.5)), with: .color(Color.white.opacity(0.5)), lineWidth: 0.8)
         context.draw(Text(text).font(.system(size: fontSize, weight: .bold)).foregroundColor(.white),
                      at: CGPoint(x: plate.midX + leadingInset / 2, y: plate.midY))
         return plate
@@ -2177,7 +2231,9 @@ struct MapScene: View {
         let width = Self.estimatedTextWidth(text, fontSize: fontSize) + fontSize * 0.6
         let height = fontSize * 1.35
         let rect = CGRect(x: point.x - width * anchor.x, y: point.y - height * anchor.y, width: width, height: height)
-        context.fill(Path(roundedRect: rect, cornerRadius: height * 0.25), with: .color(Color.black.opacity(0.68)))
+        let path = Path(roundedRect: rect, cornerRadius: height * 0.15)
+        context.fill(path, with: .color(Color.black.opacity(0.68)))
+        context.stroke(path, with: .color(Self.pixelOutline), lineWidth: 1)
         context.draw(Text(text).font(.system(size: fontSize, weight: .semibold).monospacedDigit()).foregroundColor(.white),
                      at: CGPoint(x: rect.midX, y: rect.midY))
     }
@@ -2192,17 +2248,20 @@ struct MapScene: View {
         let w = min(rect.width * 0.72, max(cs * 4.2, 64))
         let h = w * (affordable ? 0.5 : 0.62)
         let board = CGRect(x: rect.midX - w / 2, y: rect.midY - h * 0.75, width: w, height: h)
-        var posts = Path()
+        // 支柱（輪郭色の縁つきの矩形）
+        let postWidth = max(w * 0.05, 3)
         for fx: CGFloat in [0.28, 0.72] {
             let x = board.minX + w * fx
-            posts.move(to: CGPoint(x: x, y: board.maxY))
-            posts.addLine(to: CGPoint(x: x, y: board.maxY + h * 0.45))
+            drawPixelBox(context, CGRect(x: x - postWidth / 2, y: board.maxY - 1, width: postWidth, height: h * 0.45 + 1),
+                         fill: Color(white: 0.55), edge: 1)
         }
-        context.stroke(posts, with: .color(Color(white: 0.55)), lineWidth: max(w * 0.035, 1.5))
-        let path = Path(roundedRect: board, cornerRadius: h * 0.12)
-        context.fill(path, with: .color(affordable ? Color(red: 0.99, green: 0.86, blue: 0.36) : Color(white: 0.6)))
-        context.stroke(path, with: .color(affordable ? Color(red: 0.6, green: 0.42, blue: 0.1) : Color(white: 0.4)),
-                       lineWidth: max(w * 0.03, 1.2))
+        // 看板（直角＋輪郭色の縁。内側に旧来の縁色で 1 本の線）
+        let edge = max(w * 0.03, 1.2)
+        drawPixelBox(context, board, fill: affordable ? Color(red: 0.99, green: 0.86, blue: 0.36) : Color(white: 0.6),
+                     edge: edge)
+        context.stroke(Path(board.insetBy(dx: edge * 2, dy: edge * 2)),
+                       with: .color(affordable ? Color(red: 0.6, green: 0.42, blue: 0.1) : Color(white: 0.4)),
+                       lineWidth: 1)
         let ink = affordable ? Color(red: 0.35, green: 0.2, blue: 0.0) : Color(white: 0.22)
         if affordable {
             context.draw(Text("売地").font(.system(size: h * 0.34, weight: .heavy)).foregroundColor(ink),
@@ -2220,35 +2279,171 @@ struct MapScene: View {
         }
     }
 
-    private static func facilityStyle(_ kind: FacilityKind) -> (name: String, symbol: String, color: Color) {
+    private static func facilityStyle(_ kind: FacilityKind) -> (name: String, color: Color) {
         switch kind {
         case .office:
-            return ("事務所", "🏢", Color(red: 0.25, green: 0.45, blue: 0.70))
+            return ("事務所", Color(red: 0.25, green: 0.45, blue: 0.70))
         case .research:
-            return ("研究棟", "🔬", Color(red: 0.48, green: 0.36, blue: 0.70))
+            return ("研究棟", Color(red: 0.48, green: 0.36, blue: 0.70))
         case .library:
-            return ("資料室", "📚", Color(red: 0.62, green: 0.42, blue: 0.24))
+            return ("資料室", Color(red: 0.62, green: 0.42, blue: 0.24))
         }
     }
 
-    /// 施設帯の建物 1 棟（角丸の板＋絵文字＋名前）とライブ表示（￥吹き出し・煙・！・未読数）
+    /// 施設帯の建物 1 棟（矩形合成のピクセル絵の建物＋名前）とライブ表示（￥吹き出し・煙・！・未読数）。
+    /// 判別点：事務所＝窓格子のビル、研究棟＝煙突＋ガラスドーム、資料室＝本を積んだ屋根＋縦帯
     private func drawFacilityPlate(_ context: GraphicsContext, kind: FacilityKind, rect: CGRect, decor: MapDecor,
                                    cellSize cs: CGFloat, now: Double) {
         let plate = rect.insetBy(dx: cs * 0.3, dy: cs * 0.3)
         guard plate.width > 0, plate.height > 0 else { return }
         let style = Self.facilityStyle(kind)
-        let radius = min(plate.width, plate.height) * 0.18
-        context.fill(Path(roundedRect: plate.offsetBy(dx: 0, dy: cs * 0.08), cornerRadius: radius),
-                     with: .color(Color.black.opacity(0.25)))
-        let path = Path(roundedRect: plate, cornerRadius: radius)
-        context.fill(path, with: .color(style.color))
-        context.stroke(path, with: .color(Color.white.opacity(0.85)), lineWidth: max(cs * 0.06, 1.2))
-        let iconSize = min(plate.height * 0.42, plate.width * 0.32)
-        context.draw(Text(style.symbol).font(.system(size: iconSize)),
-                     at: CGPoint(x: plate.midX, y: plate.minY + plate.height * 0.36))
+        let outline = Self.pixelOutline
+        // ドット 1 個分。建物の各部はこの格子に揃える
+        let u = cs / 12
+        let bodyLight = Color(red: 0.95, green: 0.96, blue: 0.98)
+        let bodyMid = Color(red: 0.82, green: 0.85, blue: 0.90)
+        let bodyDark = Color(red: 0.65, green: 0.70, blue: 0.78)
+        let glass = Color(red: 0.62, green: 0.80, blue: 0.95)
+        let door = Color(red: 0.30, green: 0.34, blue: 0.44)
+        func snapX(_ f: CGFloat) -> CGFloat { plate.minX + (plate.width * f / u).rounded() * u }
+        func snapY(_ f: CGFloat) -> CGFloat { plate.minY + (plate.height * f / u).rounded() * u }
+        // 接地線（プレート下端から 2 ドット上）
+        let ground = plate.maxY - u * 2
+        /// 左右 x0〜x1・上端 top（プレート比）から接地線までの建物本体
+        func building(_ x0: CGFloat, _ top: CGFloat, _ x1: CGFloat) -> CGRect {
+            let minX = snapX(x0), minY = snapY(top)
+            return CGRect(x: minX, y: minY, width: snapX(x1) - minX, height: max(ground - minY, u * 4))
+        }
+        /// 本体の矩形の影（右下へ落とす）と足元の舗装
+        func groundShadow(_ body: CGRect) {
+            context.fill(Path(body.offsetBy(dx: u * 2, dy: u)), with: .color(Color.black.opacity(0.25)))
+            context.fill(Path(CGRect(x: body.minX - u, y: ground, width: body.width + u * 2, height: u)),
+                         with: .color(Color(red: 0.45, green: 0.48, blue: 0.45)))
+        }
+        /// 本体右側の陰の帯
+        func shadeRight(_ body: CGRect) {
+            let inner = body.insetBy(dx: u, dy: u)
+            let w = max((inner.width * 0.2 / u).rounded() * u, u)
+            context.fill(Path(CGRect(x: inner.maxX - w, y: inner.minY, width: w, height: inner.height)),
+                         with: .color(bodyDark))
+        }
+
+        // 施設帯の地面になじむ暗めの無地プレート（影は矩形で落とす）
+        context.fill(Path(plate.offsetBy(dx: 0, dy: cs * 0.08)), with: .color(Color.black.opacity(0.25)))
+        context.fill(Path(plate), with: .color(Color(red: 0.27, green: 0.33, blue: 0.26)))
+
+        // 研究棟の煙突（煙の起点にも使う）
+        var chimney = CGRect.null
+        switch kind {
+        case .office:
+            // 窓格子のあるビル（アクセント色の屋上＋アンテナ）
+            let body = building(0.22, 0.16, 0.78)
+            groundShadow(body)
+            drawPixelBox(context, body, fill: bodyLight, edge: u)
+            shadeRight(body)
+            context.fill(Path(CGRect(x: body.midX - u / 2, y: body.minY - u * 2, width: u, height: u * 2)),
+                         with: .color(outline))
+            drawPixelBox(context, CGRect(x: body.minX - u, y: body.minY, width: body.width + u * 2, height: u * 3),
+                         fill: style.color, edge: u)
+            let inner = body.insetBy(dx: u, dy: u)
+            let winTop = body.minY + u * 4
+            let winBottom = body.maxY - u * 5
+            let cols = max(Int((inner.width - u) / (u * 3)), 1)
+            let rows = max(Int((winBottom - winTop + u) / (u * 3)), 0)
+            let gridW = CGFloat(cols) * u * 3 - u
+            let startX = inner.minX + ((inner.width - gridW) / 2 / u).rounded(.down) * u
+            var frames = Path()
+            var windows = Path()
+            for r in 0..<rows {
+                for c in 0..<cols {
+                    let win = CGRect(x: startX + CGFloat(c) * u * 3, y: winTop + CGFloat(r) * u * 3,
+                                     width: u * 2, height: u * 2)
+                    frames.addRect(win.insetBy(dx: -u * 0.5, dy: -u * 0.5))
+                    windows.addRect(win)
+                }
+            }
+            context.fill(frames, with: .color(outline.opacity(0.7)))
+            context.fill(windows, with: .color(glass))
+            context.fill(Path(CGRect(x: body.midX - u * 1.5, y: inner.maxY - u * 3, width: u * 3, height: u * 3)),
+                         with: .color(door))
+        case .research:
+            // 横長の棟＋煙突＋屋上のガラスドーム（段々の半球）
+            let body = building(0.12, 0.48, 0.88)
+            chimney = CGRect(x: snapX(0.2), y: snapY(0.22), width: u * 4, height: max(body.minY - snapY(0.22), u) + u)
+            groundShadow(body)
+            drawPixelBox(context, chimney, fill: bodyDark, edge: u)
+            context.fill(Path(CGRect(x: chimney.minX - u, y: chimney.minY, width: chimney.width + u * 2, height: u)),
+                         with: .color(outline))
+            drawPixelBox(context, body, fill: bodyMid, edge: u)
+            shadeRight(body)
+            drawPixelBox(context, CGRect(x: body.minX - u, y: body.minY, width: body.width + u * 2, height: u * 4),
+                         fill: style.color, edge: u)
+            let domeX = snapX(0.64)
+            var domeOutline = Path()
+            var domeGlass = Path()
+            for (i, w) in ([8, 8, 6, 4] as [CGFloat]).enumerated() {
+                let y = body.minY - u * CGFloat(i + 1)
+                domeOutline.addRect(CGRect(x: domeX - (w / 2 + 1) * u, y: y, width: (w + 2) * u, height: u))
+                domeGlass.addRect(CGRect(x: domeX - w / 2 * u, y: y, width: w * u, height: u))
+            }
+            domeOutline.addRect(CGRect(x: domeX - u * 2, y: body.minY - u * 5, width: u * 4, height: u))
+            context.fill(domeOutline, with: .color(outline))
+            context.fill(domeGlass, with: .color(glass))
+            context.fill(Path(CGRect(x: domeX - u * 2, y: body.minY - u * 3, width: u, height: u)),
+                         with: .color(Color.white.opacity(0.8)))
+            // 窓の列
+            let inner = body.insetBy(dx: u, dy: u)
+            var windows = Path()
+            var x = inner.minX + u
+            while x + u * 2 <= inner.maxX - u {
+                windows.addRect(CGRect(x: x, y: body.minY + u * 5, width: u * 2, height: u * 2))
+                x += u * 3
+            }
+            context.fill(windows, with: .color(glass))
+            context.fill(Path(CGRect(x: body.midX - u * 1.5, y: inner.maxY - u * 3, width: u * 3, height: u * 3)),
+                         with: .color(door))
+        case .library:
+            // 本を積んだような段々の屋根（1 冊ずつ輪郭つき、右端に頁の白）＋縦帯の外壁
+            let body = building(0.16, 0.40, 0.84)
+            groundShadow(body)
+            let books: [(inset: CGFloat, shift: CGFloat)] = [(-1, 0), (2, 1), (4, -1)]
+            for (i, book) in books.enumerated().reversed() {
+                let r = CGRect(x: body.minX + (book.inset + book.shift) * u, y: body.minY - u * CGFloat(2 * (i + 1)),
+                               width: body.width - book.inset * 2 * u, height: u * 3)
+                guard r.width > u * 3 else { continue }
+                drawPixelBox(context, r, fill: style.color, edge: u)
+                context.fill(Path(CGRect(x: r.maxX - u * 2, y: r.minY + u, width: u, height: u)),
+                             with: .color(bodyLight))
+            }
+            drawPixelBox(context, body, fill: bodyLight, edge: u)
+            shadeRight(body)
+            let inner = body.insetBy(dx: u, dy: u)
+            var stripes = Path()
+            var alt = Path()
+            var x = inner.minX + u
+            var k = 0
+            while x + u <= inner.maxX - u {
+                let strip = CGRect(x: x, y: inner.minY + u, width: u, height: max(inner.height - u * 5, u))
+                if k % 2 == 0 { stripes.addRect(strip) } else { alt.addRect(strip) }
+                x += u * 2
+                k += 1
+            }
+            context.fill(stripes, with: .color(style.color))
+            context.fill(alt, with: .color(bodyDark))
+            context.fill(Path(CGRect(x: body.midX - u * 1.5, y: inner.maxY - u * 3, width: u * 3, height: u * 3)),
+                         with: .color(door))
+        }
+
         let nameSize = min(max(cs * 0.42, 8), plate.width / CGFloat(style.name.count + 1))
+        let namePoint = CGPoint(x: plate.midX, y: plate.minY + plate.height * 0.78)
+        // 名前の下敷き（輪郭色の板。建物の上でも読めるように）
+        let nameWidth = Self.estimatedTextWidth(style.name, fontSize: nameSize) + nameSize * 0.6
+        let nameHeight = nameSize * 1.3
+        context.fill(Path(CGRect(x: namePoint.x - nameWidth / 2, y: namePoint.y - nameHeight / 2,
+                                 width: nameWidth, height: nameHeight)),
+                     with: .color(outline.opacity(0.85)))
         context.draw(Text(style.name).font(.system(size: nameSize, weight: .heavy)).foregroundColor(.white),
-                     at: CGPoint(x: plate.midX, y: plate.minY + plate.height * 0.78))
+                     at: namePoint)
 
         let corner = CGPoint(x: plate.maxX - cs * 0.1, y: plate.minY + cs * 0.1)
         let badgeSize = max(cs * 0.4, 8)
@@ -2260,17 +2455,17 @@ struct MapScene: View {
             }
         case .research:
             if decor.researchActive {
-                // 煙突と、上へ流れて薄れる煙（周期 2.4 秒）
-                let chimney = CGRect(x: plate.minX + plate.width * 0.18, y: plate.minY - cs * 0.3,
-                                     width: cs * 0.28, height: cs * 0.36)
-                context.fill(Path(chimney), with: .color(Color(white: 0.35)))
+                // 上へ流れて薄れる矩形の煙（周期 2.4 秒。ドット格子に揃えた角欠けの塊）
                 for k in 0..<3 {
                     let phase = (now / 2.4 + Double(k) / 3).truncatingRemainder(dividingBy: 1)
                     let p = CGFloat(phase)
                     let r = cs * (0.12 + 0.16 * p)
                     let center = CGPoint(x: chimney.midX + CGFloat(sin(phase * 2 * Double.pi)) * cs * 0.15,
                                          y: chimney.minY - r - p * cs * 1.1)
-                    context.fill(Path(ellipseIn: CGRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2)),
+                    let side = max((r * 2 / u).rounded() * u, u)
+                    let puff = CGRect(x: ((center.x - side / 2) / u).rounded() * u,
+                                      y: ((center.y - side / 2) / u).rounded() * u, width: side, height: side)
+                    context.fill(side >= u * 3 ? Self.notchedRect(puff, notch: u) : Path(puff),
                                  with: .color(Color(white: 0.8).opacity(0.6 * (1 - phase))))
                 }
             }

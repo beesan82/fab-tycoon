@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "status": "r3-dot",
+  "modelId": "I2",
+  "footprint": {
+    "width": 4,
+    "depth": 2
+  },
+  "loadPorts": 2,
+  "orientations": {
+    "front": {
+      "body": {
+        "image": "eq_i2_front_body",
+        "drawScale": 1.05,
+        "anchor": "bottomCenter",
+        "pixelSize": {
+          "width": 1152,
+          "height": 480
+        }
+      },
+      "lamp": {
+        "overlay": "code-drawn",
+        "note": "ドット絵版ではシグナルタワーを描いていない。状態表示は従来のコード描画ランプ（フットプリント矩形の右上）を正とする。"
+      },
+      "layers": []
+    }
+  },
+  "knownIssues": [
+    "ドット絵版（R3、r3-implementation-log.md）。side 方向は未制作（front のみ）。回転 90/270 でも front を使う暫定運用。",
+    "drawScale は初期7機種の表示ドット径（0.014〜0.018セル/dot）に揃えた推定値。接地感・はみ出しは実機（RC）で確認する。"
+  ]
+}

@@ -70,7 +70,6 @@ struct DerivedState: Equatable {
     func wph(_ process: ProcessType) -> Double { processWPH[process] ?? 0 }
     func units(_ process: ProcessType) -> Int { activeUnits[process] ?? 0 }
 
-    var maxProcessWPH: Double { processWPH.values.max() ?? 0 }
     var marketIndex: Double { cycleFactor * walkFactor }
     var marketCondition: MarketCondition { MarketCondition(index: marketIndex) }
 }
@@ -126,17 +125,9 @@ enum BuyBlockReason: Equatable {
     case unknownModel
     /// 対応ノード外・研究が必要など（現状は購入不可）
     case locked([String])
-    case noFreeSlot
     case insufficientCash(shortfallYen: Double)
     /// 指定位置に置けない（理由の文言）
     case cannotPlace(String)
-
-    var isLock: Bool {
-        switch self {
-        case .unknownModel, .locked: return true
-        case .noFreeSlot, .insufficientCash, .cannotPlace: return false
-        }
-    }
 }
 
 /// 歩留まり異常の対策を実行した結果
@@ -160,7 +151,6 @@ enum Engine {
     static let baseOfflineCapSeconds = 4.0 * 3_600
     /// オフライン効率の基礎値（研究で加算される）
     static let baseOfflineEfficiency = 0.5
-    static let offlineStepSeconds = 60.0
     /// 市況サイクル周期（ゲーム内分。実2.5時間）
     static let marketCycleMinutes = 90_000.0
     static let marketCycleAmplitude = 0.3
@@ -225,11 +215,6 @@ enum Engine {
     /// 製品ごとのウェハ1枚あたりのダイ数
     static func productDiesPerWafer(state: GameState) -> Int {
         currentProduct(state: state).diesPerWafer
-    }
-
-    /// 製品単体の売上原価率（ノード加算前）
-    static func productCogsRate(state: GameState) -> Double {
-        currentProduct(state: state).cogsRate
     }
 
     // MARK: ノード経済
@@ -545,16 +530,22 @@ enum Engine {
         state.gameHoursElapsed += gameMinutes / 60
         // 補助金の審査は実時間で進む（オフライン中も時計は進むので、復帰直後の tick で交付される）。
         // frozenPriceYen を渡した呼び出し（価格固定のシミュレーション）では精算・評価・異常の抽選をしない
+        // tick 前の価格（derived を1回だけ計算して使い回す。価格固定の経路では計算しない）
+        var livePriceYen: Double? = nil
         if frozenPriceYen == nil {
             settleSubsidyIfDue(state: &state)
             evaluateMilestones(state: &state)
+            let preTickDerived = derived(state: state)
+            livePriceYen = preTickDerived.currentPriceYen
             // 歩留まり異常の発生抽選はプレイ中のみ
-            maybeStartExcursion(state: &state, dtGameHours: gameMinutes / 60, derived: derived(state: state))
+            maybeStartExcursion(state: &state, dtGameHours: gameMinutes / 60, derived: preTickDerived)
         }
 
         // ゲームループの正は SimCore（§1.2）。配置と整合させたスナップショットから復元してステップ実行する
-        var sim = reconciledSim(state: &state)
-        sim.settlementPriceYen = frozenPriceYen ?? derived(state: state).currentPriceYen
+        // 異常の抽選・配置整合は価格（製品・ノード・市況）を変えないので、tick 前の価格をそのまま渡せる
+        var sim = reconciledSim(state: &state, knownPriceYen: livePriceYen)
+        // livePriceYen は frozenPriceYen が nil のとき必ずある（最後の ?? は init が計算した同じ値）
+        sim.settlementPriceYen = frozenPriceYen ?? livePriceYen ?? sim.settlementPriceYen
         if let excursion = state.activeExcursion, let spec = Catalog.excursion(id: excursion.specId) {
             sim.excursionToolId = excursion.causeToolId
             sim.excursionDefectMultiplier = spec.defectMultiplier
@@ -743,10 +734,10 @@ enum Engine {
         return snapshot
     }
 
-    /// reconciledSnapshot から復元した SimCore
-    static func reconciledSim(state: inout GameState) -> SimCore {
+    /// reconciledSnapshot から復元した SimCore。knownPriceYen が nil なら精算価格を derived から計算する
+    static func reconciledSim(state: inout GameState, knownPriceYen: Double? = nil) -> SimCore {
         let snapshot = reconciledSnapshot(state: &state)
-        var sim = SimCore(state: state, snapshot: snapshot)
+        var sim = SimCore(state: state, snapshot: snapshot, knownPriceYen: knownPriceYen)
         resyncLearningWafersBase(&sim, state: state)
         return sim
     }
@@ -864,7 +855,7 @@ enum Engine {
         return reasons
     }
 
-    /// 購入できない理由。床面積が上限なのでスロット不足（.noFreeSlot）ではブロックしない（置けなければ倉庫へ）
+    /// 購入できない理由。床面積が上限なのでスロット不足ではブロックしない（置けなければ倉庫へ）
     static func buyBlockReason(state: GameState, modelId: String) -> BuyBlockReason? {
         guard let model = Catalog.model(id: modelId) else { return .unknownModel }
         let locks = lockReasons(model: model, state: state)
@@ -1035,12 +1026,6 @@ enum Engine {
         let tool = state.fab.placed.remove(at: index)
         state.fab.storedEquipment.append(equipmentInstance(tool))
         return true
-    }
-
-    /// 倉庫の装置を再設置できるか（倉庫に存在し、接続できる空きへ自動配置できる）
-    static func canAttachEquipment(state: GameState, instanceId: UUID) -> Bool {
-        guard let instance = state.fab.storedEquipment.first(where: { $0.id == instanceId }) else { return false }
-        return autoPlaced(state: state, tool: ToolInstance(instance: instance)) != nil
     }
 
     /// 倉庫の装置を接続できる空きへ自動配置する（ポートは空）。置けなければ false
@@ -1666,10 +1651,6 @@ enum Engine {
         return cheapest - state.cashYen + cheapest * emergencyMarginRate
     }
 
-    static func canApplyEmergencySubsidy(state: GameState) -> Bool {
-        emergencyGrantYen(state: state) != nil
-    }
-
     @discardableResult
     static func applyEmergencySubsidy(state: inout GameState, now: Date = Date()) -> Bool {
         guard let amount = emergencyGrantYen(state: state) else { return false }
@@ -1994,18 +1975,6 @@ enum Engine {
     static func processYieldAfterSelling(state: GameState, instanceId: UUID) -> Double {
         guard let process = processOf(instanceId: instanceId, in: state) else { return 0 }
         return derived(state: stateAfterSelling(state, instanceId: instanceId)).processYields[process] ?? 0
-    }
-
-    static func lineYieldAfterAdding(state: GameState, modelId: String) -> Double {
-        derivedAfterAdding(state, modelId: modelId).lineYield
-    }
-
-    static func lineYieldAfterUpgrading(state: GameState, instanceId: UUID) -> Double {
-        derived(state: stateAfterUpgrading(state, instanceId: instanceId)).lineYield
-    }
-
-    static func lineYieldAfterSelling(state: GameState, instanceId: UUID) -> Double {
-        derived(state: stateAfterSelling(state, instanceId: instanceId)).lineYield
     }
 
     static func detectionRateAfterAdding(state: GameState, modelId: String) -> Double {

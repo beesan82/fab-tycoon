@@ -272,9 +272,6 @@ struct Fab: Codable, Equatable, Identifiable {
     /// 予約中のノード移行（v4 で追加）
     var nodeSwitch: NodeSwitchState = NodeSwitchState()
 
-    /// 倉庫の装置は枠を消費しない
-    var freeSlots: Int { max(0, slots - equipment.count) }
-
     enum CodingKeys: String, CodingKey {
         case id
         case name

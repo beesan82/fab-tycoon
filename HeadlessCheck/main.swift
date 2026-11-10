@@ -2356,4 +2356,218 @@ r2GlossarySeen.stats.seenFieldNoteIds.insert("fn.first_rail")
 check(Engine.isGlossaryUnlocked(.fieldNoteSeen("fn.first_rail"), state: r2GlossarySeen),
       "R2: fn.first_rail を既読にすると .fieldNoteSeen(fn.first_rail) が解放される")
 
+// MARK: - R3: スプライト・性能
+
+// R3. 全20機種のスプライト・メタデータ整合（design/sprites/<id>.json・生成 PNG・Assets.xcassets の同期）
+print("== R3. 全20機種のスプライト・メタデータ整合 ==")
+let r3RepoRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+
+/// design/sprites/<id小文字>.json のうち検証に使うフィールドだけのミラー（layers・lamp・knownIssues 等は省く）
+struct R3SpriteMeta: Decodable {
+    struct Footprint: Decodable {
+        var width: Int
+        var depth: Int
+    }
+    struct PixelSize: Decodable {
+        var width: Int
+        var height: Int
+    }
+    struct Body: Decodable {
+        var image: String
+        var drawScale: Double
+        var anchor: String
+        var pixelSize: PixelSize
+    }
+    struct Orientation: Decodable {
+        var body: Body
+    }
+    struct Orientations: Decodable {
+        var front: Orientation
+    }
+    var modelId: String
+    var footprint: Footprint
+    var loadPorts: Int
+    var orientations: Orientations
+}
+
+/// data の offset から 4 バイトをビッグエンディアン UInt32 として読む（範囲外なら nil）
+func r3BigEndianUInt32(_ data: Data, at offset: Int) -> UInt32? {
+    guard offset >= 0, offset + 4 <= data.count else { return nil }
+    var value: UInt32 = 0
+    for i in 0..<4 {
+        value = (value << 8) | UInt32(data[data.startIndex + offset + i])
+    }
+    return value
+}
+
+check(Catalog.equipment.count == 20, "R3: Catalog.equipment は20機種（実数 \(Catalog.equipment.count)）")
+let r3SpriteDecoder = JSONDecoder()
+for model in Catalog.equipment {
+    let lower = model.id.lowercased()
+    let metaURL = r3RepoRoot.appendingPathComponent("design/sprites/\(lower).json")
+    guard let metaData = try? Data(contentsOf: metaURL) else {
+        check(false, "R3: \(model.id): \(metaURL.path) を読めない")
+        continue
+    }
+    let meta: R3SpriteMeta
+    do {
+        meta = try r3SpriteDecoder.decode(R3SpriteMeta.self, from: metaData)
+    } catch {
+        check(false, "R3: \(model.id): \(lower).json を R3SpriteMeta にデコードできない: \(error)")
+        continue
+    }
+    check(true, "R3: \(model.id): design/sprites/\(lower).json を読んでデコードできる")
+    check(meta.modelId == model.id, "R3: \(model.id): modelId が一致（\(meta.modelId)）")
+    check(meta.footprint.width == model.simFootprint.width && meta.footprint.depth == model.simFootprint.depth,
+          "R3: \(model.id): footprint \(meta.footprint.width)×\(meta.footprint.depth) が simFootprint \(model.simFootprint.width)×\(model.simFootprint.depth) と一致")
+    check(meta.loadPorts == model.simLoadPortCount,
+          "R3: \(model.id): loadPorts \(meta.loadPorts) が simLoadPortCount \(model.simLoadPortCount) と一致")
+    let body = meta.orientations.front.body
+    let imageName = "eq_\(lower)_front_body"
+    check(body.image == imageName, "R3: \(model.id): front.body.image が \(imageName)（実際 \(body.image)）")
+    check(body.anchor == "bottomCenter", "R3: \(model.id): front.body.anchor が bottomCenter（実際 \(body.anchor)）")
+    check((0.9...1.4).contains(body.drawScale), "R3: \(model.id): drawScale \(body.drawScale) が 0.9〜1.4")
+    let pngURL = r3RepoRoot.appendingPathComponent("design/sprites/generated/\(imageName).png")
+    let pngData = try? Data(contentsOf: pngURL)
+    let pngWidth = pngData.flatMap { r3BigEndianUInt32($0, at: 16) }
+    let pngHeight = pngData.flatMap { r3BigEndianUInt32($0, at: 20) }
+    check(pngData != nil && pngWidth.map { Int($0) } == body.pixelSize.width && pngHeight.map { Int($0) } == body.pixelSize.height,
+          "R3: \(model.id): generated/\(imageName).png の IHDR 実寸 \(pngWidth.map { "\($0)" } ?? "-")×\(pngHeight.map { "\($0)" } ?? "-") が pixelSize \(body.pixelSize.width)×\(body.pixelSize.height) と一致")
+    let datasetURL = r3RepoRoot.appendingPathComponent("FabTycoon/Assets.xcassets/eq_\(lower)_meta.dataset/\(lower).json")
+    let datasetData = try? Data(contentsOf: datasetURL)
+    check(datasetData != nil && datasetData == metaData,
+          "R3: \(model.id): Assets.xcassets の eq_\(lower)_meta.dataset/\(lower).json が design/sprites/\(lower).json とバイト一致")
+    let imagesetURL = r3RepoRoot.appendingPathComponent("FabTycoon/Assets.xcassets/\(imageName).imageset/\(imageName).png")
+    let imagesetData = try? Data(contentsOf: imagesetURL)
+    check(pngData != nil && imagesetData != nil && imagesetData == pngData,
+          "R3: \(model.id): Assets.xcassets の \(imageName).imageset/\(imageName).png が generated の PNG とバイト一致")
+}
+
+// R3. 性能計測：3×3 区画にレーン6本の蛇行レール（48 列まで）・装置60台を置き、tick ＋ derived の 1 tick 平均を計る
+print("== R3. 性能計測（48×48・装置60台） ==")
+var r3Perf = GameState.initial()
+guard var r3Layout = r3Perf.fab.layout else { fail("R3: 新規ゲームに layout が無い") }
+var r3Parcels = Set<ParcelCoord>()
+for y in 0...2 {
+    for x in 0...2 {
+        r3Parcels.insert(ParcelCoord(x: x, y: y))
+    }
+}
+r3Layout.parcels = r3Parcels
+
+// レール：同じ位置のセルは先に置いたものを残す（レーン間の折れ角はレーン本体より先に置かれる）
+var r3Rails: [RailCell] = []
+var r3RailSeen = Set<GridPoint>()
+func r3Rail(_ x: Int, _ y: Int, _ direction: RailDirection, _ kind: RailCellKind) {
+    let point = GridPoint(x: x, y: y)
+    guard r3RailSeen.insert(point).inserted else { return }
+    r3Rails.append(RailCell(point: point, direction: direction, kind: kind))
+}
+let r3LaneYs = [5, 11, 19, 27, 35, 43]
+for (index, y) in r3LaneYs.enumerated() {
+    let eastbound = index % 2 == 0
+    for x in 0...46 {
+        if eastbound {
+            if x == 46 { r3Rail(x, y, .south, .corner) } else { r3Rail(x, y, .east, .straight) }
+        } else {
+            if x == 0 { r3Rail(x, y, .south, .corner) } else { r3Rail(x, y, .west, .straight) }
+        }
+    }
+    if index + 1 < r3LaneYs.count {
+        let nextY = r3LaneYs[index + 1]
+        let turnX = eastbound ? 46 : 0
+        for turnY in (y + 1)..<nextY {
+            r3Rail(turnX, turnY, .south, .straight)
+        }
+        r3Rail(turnX, nextY, eastbound ? .west : .east, .corner)
+    }
+}
+// 戻りレーン：最終レーン西端から南下し、y=45 を東へ、x=47 を北上して第1レーン東端へ
+r3Rail(0, 44, .south, .straight)
+r3Rail(0, 45, .east, .corner)
+for x in 1...46 { r3Rail(x, 45, .east, .straight) }
+r3Rail(47, 45, .north, .corner)
+for y in stride(from: 44, through: 6, by: -1) { r3Rail(47, y, .north, .straight) }
+r3Rail(47, 5, .west, .corner)
+r3Layout.rails = r3Rails
+r3Layout.stocker = Stocker(origin: GridPoint(x: 3, y: 6))
+r3Layout.entry = EntryPort(origin: GridPoint(x: 1, y: 6))
+r3Layout.shipping = ShippingPort(origin: GridPoint(x: 9, y: 9))
+
+// 装置：パス1はレールに4近傍で接する原点だけ、パス2は通常の first-fit（いずれも y → x・回転 0）
+let r3FillerIds = ["L4", "L3", "L2", "D2", "E3", "I2", "C2", "Q3", "P3", "D3", "E2", "Q2", "P2",
+                   "L1", "D1", "E1", "I1", "C1", "Q1", "P1",
+                   "L1", "D1", "E1", "I1", "C1", "Q1", "P1",
+                   "L1", "D1", "E1", "I1", "C1", "Q1", "P1",
+                   "L1", "D1", "E1", "I1", "C1", "Q1", "P1", "D1",
+                   "L1", "D1", "E1", "I1", "C1", "Q1", "P1"]
+let r3RailPoints = Set(r3Layout.rails.map { $0.point })
+let r3Width = ((r3Layout.parcels.map { $0.x }.max() ?? 0) + 1) * FloorLayout.parcelSize
+let r3Height = ((r3Layout.parcels.map { $0.y }.max() ?? 0) + 1) * FloorLayout.parcelSize
+func r3TouchesRail(_ tool: ToolInstance, origin: GridPoint) -> Bool {
+    let footprint = FloorLayout.cells(origin: origin, size: FloorLayout.footprintSize(modelId: tool.modelId, rotation: 0))
+    return footprint.contains { cell in RailDirection.ordered.contains { r3RailPoints.contains(cell.moved($0)) } }
+}
+var r3Placed = r3Perf.fab.placed
+var r3NewTools: [ToolInstance] = []
+var r3Leftovers: [ToolInstance] = []
+for tool in r3FillerIds.map({ ToolInstance(instance: EquipmentInstance(modelId: $0)) }) {
+    var result: ToolInstance? = nil
+    r3Pass1: for y in 0..<r3Height {
+        for x in 0..<r3Width {
+            let origin = GridPoint(x: x, y: y)
+            guard r3TouchesRail(tool, origin: origin) else { continue }
+            if let candidate = r3Layout.placed(tool, origin: origin, rotation: 0, among: r3Placed) {
+                result = candidate
+                break r3Pass1
+            }
+        }
+    }
+    if let placedTool = result {
+        r3Placed.append(placedTool)
+        r3NewTools.append(placedTool)
+    } else {
+        r3Leftovers.append(tool)
+    }
+}
+for tool in r3Leftovers {
+    r3Pass2: for y in 0..<r3Height {
+        for x in 0..<r3Width {
+            if let candidate = r3Layout.placed(tool, origin: GridPoint(x: x, y: y), rotation: 0, among: r3Placed) {
+                r3Placed.append(candidate)
+                r3NewTools.append(candidate)
+                break r3Pass2
+            }
+        }
+    }
+}
+for tool in r3NewTools {
+    r3Perf.fab.equipment.append(EquipmentInstance(id: tool.id, modelId: tool.modelId))
+}
+r3Perf.fab.placed = r3Placed
+r3Perf.fab.layout = r3Layout
+r3Perf.fab.sim = nil
+print("  区画: \(r3Layout.parcels.count)  レール: \(r3Layout.rails.count)セル  配置: \(r3Perf.fab.placed.count)台（追加 \(r3NewTools.count)／\(r3FillerIds.count)台）")
+check(r3Layout.parcels.count == 9, "R3: 区画は 3×3 = 9")
+check(r3Layout.rails.count >= 300, "R3: レールは 300 セル以上（実数 \(r3Layout.rails.count)）")
+check(r3Perf.fab.placed.count == 60, "R3: 配置台数は 60（実数 \(r3Perf.fab.placed.count)）")
+
+// ウォームアップ 400 tick（実100秒）
+for _ in 0..<400 {
+    Engine.tick(state: &r3Perf, dtRealSeconds: 0.25)
+}
+let r3WarmLots = r3Perf.fab.sim?.lots.count ?? 0
+check(r3WarmLots >= 80, "R3: ウォームアップ後のロット数が 80 以上（実数 \(r3WarmLots)）")
+
+// 計測 200 tick：tick ＋ derived の合計時間
+let r3MeasureTicks = 200
+let r3Start = Date()
+for _ in 0..<r3MeasureTicks {
+    Engine.tick(state: &r3Perf, dtRealSeconds: 0.25)
+    _ = Engine.derived(state: r3Perf)
+}
+let r3AverageMs = Date().timeIntervalSince(r3Start) * 1_000 / Double(r3MeasureTicks)
+print("  1 tick 平均（tick ＋ derived）: \(num(r3AverageMs, 3)) ms（\(r3MeasureTicks) tick）")
+check(r3AverageMs < 250, "R3: 1 tick 平均 \(num(r3AverageMs, 3)) ms が tick 間隔 250ms 未満")
+
 print("HEADLESS CHECK PASSED")
