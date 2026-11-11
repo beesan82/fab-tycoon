@@ -8,7 +8,7 @@ import Foundation
 // (3) 残りは、シミュレート区間の後半 50%（最低 6 ゲーム時間）の実測レートで外挿し、資金・統計・学習枚数 W にのみ加える。
 //     ロット位置・装置状態はシミュレート終了時のもの（定常ならそれが正しい末状態）。外挿のロットは実在しないので
 //     Fab.sim には入れない。
-// (4) ゲーム内時計・市況位相・プレイ秒は進めない（従来のオフラインと同扱い）。
+// (4) ゲーム内時計・市況位相・プレイ秒は進めない（従来のオフラインと同扱い）。ただし市場イベントの残り時間だけは実時間基準のため、不在時間ぶん減らす（P6）。
 // 安全弁：ライン寸断（LayoutAnalysis）・デッドロック・計測窓のスループット 0 のいずれかなら外挿しない
 // （詰まったまま稼がない）。SimCore は乱数を使わないので、同じセーブ・同じ経過秒なら結果は再現する。
 // 根拠：全時間の本シミュレーション（方式 A）は上限拡大で起動が重くなり、集計のみ（方式 B）は詰まりや立ち上げで外れる。
@@ -123,6 +123,9 @@ enum OfflineProgress {
         sim.wipCap = SimCore.operatingWipCap(layout: state.fab.layout)
         let frozenPrice = state.market.recentAvgPriceYen
         sim.settlementPriceYen = frozenPrice
+        // 汚染事故中なら歩留まり倍率を掛ける。開始時点の状態でオフライン区間全体に倍率が効く近似
+        // （区間の途中でイベントが終わっても倍率は外さない）
+        sim.eventYieldMultiplier = Engine.contaminationActive(state: state) ? Engine.eventYieldPenaltyFactor : 1
 
         // 3. 本シミュレーション（整数分だけ）。計測窓は後半 50%（最低 6 ゲーム時間、区間全体が上限）
         let simSteps = max(0, Int(min(Double(max(stepBudget, 0)), effectiveGameMin)))
@@ -161,6 +164,13 @@ enum OfflineProgress {
         let completedLots = s2.completedLots - s0.completedLots
 
         // 6. state への反映（生産系は全額）
+        // 市場イベントの継続時間は実時間基準なので、不在時間（上限適用後）だけ残り時間を減らし期限切れを外す。新規発生はしない
+        if !state.market.activeEvents.isEmpty {
+            for index in state.market.activeEvents.indices {
+                state.market.activeEvents[index].remainingRealSeconds -= capped
+            }
+            state.market.activeEvents.removeAll { $0.remainingRealSeconds <= 0 }
+        }
         state.learningWafers[sim.releaseNodeId, default: 0] += total.releasedWafers
         state.stats.totalWafersInput += total.releasedWafers
         state.stats.totalGoodChips += total.goodChips
@@ -195,12 +205,14 @@ enum OfflineProgress {
         state.stats.totalGrossSalesYen += sold.grossYen
         state.stats.totalCogsYen += sold.cogsYen
         state.stats.totalRevenueYen += sold.netYen
+        Engine.accruePeriodPL(state: &state, grossYen: sold.grossYen, cogsYen: sold.cogsYen,
+                              penaltyYen: sold.penaltyYen, netYen: sold.netYen)
 
         state.fab.running = total.completedWafers + total.releasedWafers > 0
         // 末状態はシミュレーション終了時のもの（外挿分のロットは実在しない）
         state.fab.placed = sim.tools
         state.fab.sim = sim.snapshot()
-        // gameHoursElapsed・market・stats.playSeconds は進めない。異常も発生させない
+        // gameHoursElapsed・market（activeEvents の残り時間を除く）・stats.playSeconds は進めない。異常も発生させない
         Engine.evaluateMilestones(state: &state)
 
         // 7. レポート

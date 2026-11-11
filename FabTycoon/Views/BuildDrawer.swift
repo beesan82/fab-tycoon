@@ -194,7 +194,7 @@ private struct BuildModelTile: View {
                                 }
                             }
                             HStack(spacing: 8) {
-                                Text(MoneyFormat.yen(model.priceYen))
+                                Text(MoneyFormat.yen(Engine.purchasePriceYen(state: state, model: model)))
                                     .font(.subheadline.bold())
                                     .foregroundStyle(isShort ? Color.red : Color.primary)
                                 Text("公称 \(MoneyFormat.decimal(model.nominalWPH, digits: 0)) WPH")

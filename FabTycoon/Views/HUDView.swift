@@ -35,6 +35,10 @@ struct HUDView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("スループット \(MoneyFormat.decimal(wph, digits: 1)) WPH")
+            // 発生中の市場イベント（最大 2 件）
+            ForEach(Array(state.market.activeEvents.prefix(2)), id: \.specId) { active in
+                marketEventChip(active)
+            }
             Spacer(minLength: 0)
             Button {
                 showNumbers.toggle()
@@ -69,6 +73,31 @@ struct HUDView: View {
         .sheet(isPresented: $showingSettings) {
             SettingsView()
         }
+    }
+
+    /// 市場イベントのチップ（名前＋残り時間）。汚染事故だけ赤系
+    @ViewBuilder
+    private func marketEventChip(_ active: ActiveMarketEvent) -> some View {
+        if let spec = Catalog.marketEvent(id: active.specId) {
+            let isPenalty = spec.kind == .yieldPenalty
+            Text("\(spec.name) \(Self.remainingMinutesText(active.remainingRealSeconds))")
+                .font(.caption2.bold())
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(isPenalty ? Color.red.opacity(0.15) : Color.accentColor.opacity(0.15))
+                )
+                .accessibilityLabel("市場イベント \(spec.name)、\(Self.remainingMinutesText(active.remainingRealSeconds))")
+        }
+    }
+
+    /// 「あと12分」形式の残り時間（実秒。1分未満は「あと1分」）
+    static func remainingMinutesText(_ seconds: Double) -> String {
+        let minutes = seconds.isFinite ? Int((max(seconds, 0) / 60).rounded(.up)) : 0
+        return "あと\(max(minutes, 1))分"
     }
 
     /// 「Day 3 07:30」形式のゲーム内時計（LineView.clockText と同じ計算）

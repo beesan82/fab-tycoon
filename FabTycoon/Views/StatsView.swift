@@ -78,7 +78,49 @@ struct StatsView: View {
                 row("ボトルネック", derived.bottleneck?.displayName ?? "—")
                 row("市況指数", "\(MoneyFormat.decimal(derived.marketIndex, digits: 2))（\(derived.marketCondition.label)）")
             }
+            Section("市場イベント") {
+                let activeEvents = store.state.market.activeEvents
+                if activeEvents.isEmpty {
+                    row("発生中のイベント", "なし")
+                } else {
+                    ForEach(activeEvents, id: \.specId) { active in
+                        marketEventRow(active)
+                    }
+                }
+                row("現在のイベント単価倍率", multiplierText(derived.eventPriceFactor))
+            }
+            Section("期間損益（ゲーム内24時間）") {
+                row("売上", MoneyFormat.yen(stats.plGrossYen))
+                row("売上原価", MoneyFormat.yen(stats.plCogsYen))
+                row("市場不良ペナルティ", MoneyFormat.yen(stats.plPenaltyYen))
+                row("粗利", MoneyFormat.yen(stats.plNetYen))
+                if [stats.plPrevGrossYen, stats.plPrevCogsYen, stats.plPrevPenaltyYen, stats.plPrevNetYen].contains(where: { $0 != 0 }) {
+                    Text("前期間")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                    row("前期間の売上", MoneyFormat.yen(stats.plPrevGrossYen))
+                    row("前期間の売上原価", MoneyFormat.yen(stats.plPrevCogsYen))
+                    row("前期間の市場不良ペナルティ", MoneyFormat.yen(stats.plPrevPenaltyYen))
+                    row("前期間の粗利", MoneyFormat.yen(stats.plPrevNetYen))
+                }
+            }
         }
+    }
+
+    /// 発生中の市場イベント 1 件（名前・残り実時間・効果説明）
+    @ViewBuilder
+    private func marketEventRow(_ active: ActiveMarketEvent) -> some View {
+        let spec = Catalog.marketEvent(id: active.specId)
+        VStack(alignment: .leading, spacing: 2) {
+            row(spec?.name ?? active.specId, "あと \(MoneyFormat.duration(active.remainingRealSeconds))")
+            if let spec {
+                Text(spec.effectText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.vertical, 2)
     }
 
     private func row(_ title: String, _ value: String) -> some View {

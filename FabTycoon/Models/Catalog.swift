@@ -1399,3 +1399,85 @@ extension Catalog {
         excursions.first { $0.causeProcess == process }
     }
 }
+
+// MARK: - 市場イベント（特需）
+
+/// 市場イベント（特需）のカタログ
+struct MarketEventSpec: Identifiable, Equatable {
+    let id: String
+    let name: String
+    /// 効果種別
+    let kind: Kind
+    /// kind == .price のときの単価倍率。それ以外では 1.0
+    let priceMultiplier: Double
+    /// 価格効果の対象ノードid。空配列 = 全ノード対象
+    let targetNodeIds: [String]
+    /// 発生条件となる解放ノードid（このノード以降の世代に到達している場合のみ発生）。nil = 常時
+    let requiredNodeId: String?
+    /// 継続時間（実秒。improvement-analysis の再定義により実時間基準 10〜40 分）
+    let durationRealSeconds: Double
+    /// 抽選の重み（汚染事故だけ低確率）
+    let weight: Double
+    /// プレイヤー向けの効果説明文
+    let effectText: String
+
+    enum Kind: Equatable {
+        case price          // 単価倍率（targetNodeIds で対象を絞る）
+        case yieldPenalty   // 歩留まり相対 -10%
+        case equipmentDiscount // 装置購入価格 -20%
+    }
+}
+
+extension Catalog {
+    /// 市場イベント。継続時間は DESIGN のゲーム内時間（6〜48時間）を
+    /// 実時間 600〜2400 秒（10〜40 分）へ線形写像した値
+    static let marketEvents: [MarketEventSpec] = [
+        MarketEventSpec(
+            id: "ev.ai_boom", name: "AIブーム", kind: .price,
+            priceMultiplier: 2.0, targetNodeIds: ["n7", "n5", "n3", "n2"], requiredNodeId: "n7",
+            durationRealSeconds: 1380, weight: 1.0,
+            effectText: "7nm以下の単価 ×2.0"
+        ),
+        MarketEventSpec(
+            id: "ev.game_console", name: "ゲーム機ブーム", kind: .price,
+            priceMultiplier: 1.8, targetNodeIds: ["n28", "n14"], requiredNodeId: nil,
+            durationRealSeconds: 1080, weight: 1.0,
+            effectText: "28nm・14nmの単価 ×1.8"
+        ),
+        MarketEventSpec(
+            id: "ev.automotive", name: "車載増産", kind: .price,
+            priceMultiplier: 1.6, targetNodeIds: ["n28"], requiredNodeId: nil,
+            durationRealSeconds: 2400, weight: 1.0,
+            effectText: "28nmの単価 ×1.6"
+        ),
+        MarketEventSpec(
+            id: "ev.smartphone", name: "スマホ新機種", kind: .price,
+            priceMultiplier: 1.5, targetNodeIds: ["n5", "n3"], requiredNodeId: "n5",
+            durationRealSeconds: 840, weight: 1.0,
+            effectText: "5nm・3nmの単価 ×1.5"
+        ),
+        MarketEventSpec(
+            id: "ev.oversupply", name: "在庫過剰", kind: .price,
+            priceMultiplier: 0.6, targetNodeIds: [], requiredNodeId: nil,
+            durationRealSeconds: 840, weight: 1.0,
+            effectText: "全ノードの単価 ×0.6"
+        ),
+        MarketEventSpec(
+            id: "ev.contamination", name: "汚染事故", kind: .yieldPenalty,
+            priceMultiplier: 1.0, targetNodeIds: [], requiredNodeId: nil,
+            durationRealSeconds: 600, weight: 0.4,
+            effectText: "歩留まり -10%（進行中ノード）"
+        ),
+        MarketEventSpec(
+            id: "ev.subsidy_boost", name: "補助金", kind: .equipmentDiscount,
+            priceMultiplier: 1.0, targetNodeIds: [], requiredNodeId: nil,
+            durationRealSeconds: 600, weight: 1.0,
+            effectText: "装置の購入価格 -20%"
+        ),
+    ]
+
+    private static let marketEventIndex: [String: MarketEventSpec] =
+        Dictionary(uniqueKeysWithValues: marketEvents.map { ($0.id, $0) })
+
+    static func marketEvent(id: String) -> MarketEventSpec? { marketEventIndex[id] }
+}

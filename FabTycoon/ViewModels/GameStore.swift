@@ -17,6 +17,14 @@ struct PlacementFeedback: Equatable {
     let at: Date
 }
 
+/// 市場イベントの開始・終了の通知（MarketEventToast に渡す）
+struct MarketEventNotice: Identifiable, Equatable {
+    let id = UUID()
+    let specId: String
+    /// true = 開始、false = 終了
+    let isStart: Bool
+}
+
 /// ゲーム状態の保持・時間進行・セーブを担う。メインスレッドからのみ使う。
 final class GameStore: ObservableObject {
     @Published var state: GameState
@@ -33,6 +41,8 @@ final class GameStore: ObservableObject {
     @Published var trackedLotId: UUID?
     /// トースト表示中の現場ノート id（§4.3）
     @Published var activeFieldNote: String?
+    /// 市場イベントの開始・終了通知（トースト表示用）
+    @Published var marketEventNotice: MarketEventNotice?
     /// 配置直後のフィードバック（§3.2）
     @Published var placementFeedback: PlacementFeedback?
     /// ライン寸断が解消されるたびに +1。View が「ライン成立」トーストに使う（§3.2）
@@ -107,10 +117,12 @@ final class GameStore: ObservableObject {
         let dt = min(max(now.timeIntervalSince(lastTick), 0), Self.maxTickDelta)
         lastTick = now
         guard dt > 0 else { return }
+        let eventsBefore = activeMarketEventIds
         Engine.tick(state: &state, dtRealSeconds: dt)
         Engine.settleResearchIfDue(state: &state, now: now)
         refresh()
         evaluateR2AfterTick()
+        detectMarketEventChanges(before: eventsBefore)
         if now.timeIntervalSince(lastSave) >= Self.autosaveInterval {
             save()
         }
@@ -124,6 +136,7 @@ final class GameStore: ObservableObject {
             // 不在中に期限が来た研究・補助金を、オフライン進行より先に精算する
             Engine.settleResearchIfDue(state: &state, now: now)
             Engine.settleSubsidyIfDue(state: &state, now: now)
+            let eventsBefore = activeMarketEventIds
             if gap > Self.offlineThreshold {
                 offlineReport = Self.advanceOffline(state: &state, elapsedRealSeconds: gap)
             } else if gap > 0 {
@@ -133,6 +146,7 @@ final class GameStore: ObservableObject {
             lastTick = now
             refresh()
             evaluateR2AfterTick()
+            detectMarketEventChanges(before: eventsBefore)
             start()
         case .background:
             stop()
@@ -199,6 +213,26 @@ final class GameStore: ObservableObject {
             return reentrantId
         }
         return Engine.pendingFieldNotes(state: state, derived: derived).first
+    }
+
+    // MARK: 市場イベントの通知
+
+    private var activeMarketEventIds: Set<String> {
+        Set(state.market.activeEvents.map(\.specId))
+    }
+
+    /// tick 前のイベント集合と比べ、開始・終了があればトースト用の通知を出す。
+    /// 開始を優先し、複数あればカタログ順の先頭 1 件だけ。表示中の通知は上書きしない
+    private func detectMarketEventChanges(before: Set<String>) {
+        guard marketEventNotice == nil else { return }
+        let after = activeMarketEventIds
+        let started = after.subtracting(before)
+        let ended = before.subtracting(after)
+        if let spec = Catalog.marketEvents.first(where: { started.contains($0.id) }) {
+            marketEventNotice = MarketEventNotice(specId: spec.id, isStart: true)
+        } else if let spec = Catalog.marketEvents.first(where: { ended.contains($0.id) }) {
+            marketEventNotice = MarketEventNotice(specId: spec.id, isStart: false)
+        }
     }
 
     private static func containsLineBreak(_ problems: [LayoutProblem]) -> Bool {
@@ -469,6 +503,10 @@ final class GameStore: ObservableObject {
         activeFieldNote = nil
     }
 
+    func dismissMarketEventNotice() {
+        marketEventNotice = nil
+    }
+
     /// FOUP 追跡の開始／終了（nil で終了）
     func trackLot(_ lotId: UUID?) {
         trackedLotId = lotId
@@ -514,6 +552,7 @@ final class GameStore: ObservableObject {
         // R2 の実行時状態も戻す。古い追跡・ノート・寸断状態が残ると誤った「ライン成立」トースト等が出るため
         trackedLotId = nil
         activeFieldNote = nil
+        marketEventNotice = nil
         placementFeedback = nil
         hadLineBreak = Self.containsLineBreak(Engine.layoutProblems(state: state))
         do {

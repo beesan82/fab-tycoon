@@ -1459,7 +1459,7 @@ struct MapScene: View {
     private var confirmTitle: String {
         switch placement {
         case .purchase(let modelId):
-            let price = Catalog.model(id: modelId)?.priceYen ?? 0
+            let price = Catalog.model(id: modelId).map { Engine.purchasePriceYen(state: store.state, model: $0) } ?? 0
             return "ここに置く（\(MoneyFormat.yen(price))）"
         case .stored:
             return "ここに置く"

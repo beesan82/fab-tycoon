@@ -349,6 +349,8 @@ struct SimCore {
     var excursionToolId: UUID? = nil
     /// 異常の欠陥倍率（工程全体に対する値。原因装置の台数シェアで割り戻して適用する）
     var excursionDefectMultiplier: Double = 1
+    /// 市場イベント（汚染事故）によるロット歩留まり倍率。Engine.tick / OfflineProgress が毎回設定する（スナップショットには保存しない）
+    var eventYieldMultiplier: Double = 1
     /// false なら投入しない（ノード切替の排出モード）。搬送・処理・払い出しは通常どおり
     var releasesEnabled: Bool = true
 
@@ -1337,7 +1339,8 @@ struct SimCore {
             * exp(-lot.learningWafersAtRelease / (node.learnWafers * research.learnWafersMultiplier))
         let scale = node.yieldInit < 1 ? (1 - learned) / (1 - node.yieldInit) : 0
         let rawYield = 1 - (1 - lot.goodFraction) * scale
-        let lotYield = min(max(1 - (1 - rawYield) / product.yieldMultiplier, 0), 0.99)
+        // 市場イベント（汚染事故）の倍率は上限 0.99 で丸めた後に掛ける（倍率 0.9 なら最大でも 0.891）
+        let lotYield = min(max(1 - (1 - rawYield) / product.yieldMultiplier, 0), 0.99) * eventYieldMultiplier
         let detectionRate = 1 - lot.undetectedFraction
 
         let r = Self.settle(lotYield: lotYield, detectionRate: detectionRate, node: node, product: product,

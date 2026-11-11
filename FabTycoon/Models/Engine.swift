@@ -67,6 +67,13 @@ struct DerivedState: Equatable {
     /// 実時間1分あたりの純収入の理論値（従来式）
     var theoreticalIncomePerMinuteYen: Double = 0
 
+    /// 市場イベントによる単価倍率（イベント係数 × ノード別需要係数。対象外ノードのイベントは 1.0）
+    var eventPriceFactor: Double = 1
+    /// 市場イベントによる歩留まり倍率（汚染事故中は 0.9）
+    var eventYieldFactor: Double = 1
+    /// 市場イベントによる装置購入価格倍率（補助金イベント中は 0.8）
+    var equipmentDiscountFactor: Double = 1
+
     func wph(_ process: ProcessType) -> Double { processWPH[process] ?? 0 }
     func units(_ process: ProcessType) -> Int { activeUnits[process] ?? 0 }
 
@@ -195,6 +202,18 @@ enum Engine {
     static let excursionMinimumCostYen = 5_000_000.0
     /// 歩留まり異常の発生抽選用の乱数源（0以上1未満）。テストで差し替え可能
     static var excursionRandomUnit: () -> Double = { Double.random(in: 0..<1) }
+    /// 市場イベント：発生間隔の期待値（実秒）。DESIGN §2.5「平均ゲーム内1日に1回（実時間24分に1回）」の実時間換算
+    static let eventMeanIntervalRealSeconds = 1_440.0
+    /// 市場イベント：同時発生の上限（DESIGN §2.5）
+    static let eventMaxConcurrent = 2
+    /// 汚染事故の歩留まり倍率（相対 -10%）
+    static let eventYieldPenaltyFactor = 0.9
+    /// 補助金イベントの装置購入価格倍率（-20%）
+    static let eventEquipmentDiscountFactor = 0.8
+    /// 期間P&L の区切り（ゲーム内分 = 24時間）
+    static let plPeriodGameMinutes = 1_440.0
+    /// 市場イベントの発生抽選用の乱数源（0以上1未満）。テストで差し替え可能
+    static var eventRandomUnit: () -> Double = { Double.random(in: 0..<1) }
 
     // MARK: 製品倍率
 
@@ -416,12 +435,14 @@ enum Engine {
                 processYields[spec.causeProcess] = degraded
             }
         }
+        // 市場イベント（汚染事故）の歩留まり倍率。異常の有無に関わらず両方の式に掛け、excursionYieldLoss は異常分だけを保つ
+        let eventYieldFactor = contaminationActive(state: state) ? eventYieldPenaltyFactor : 1
         let rawLineYield = 1 - ((1 - processProduct) * learningDefectScale + excursionDefectAdd)
         // 製品倍率は欠陥側に効く（倍率 >1 で欠陥が 1/倍率 に縮み、<1 で増える）
-        let lineYield = min(max(1 - (1 - rawLineYield) / productYieldMultiplier(state: state), 0), 0.99)
+        let lineYield = min(max(1 - (1 - rawLineYield) / productYieldMultiplier(state: state), 0), 0.99) * eventYieldFactor
         // 異常が無かった場合との差（「なぜ？」内訳の表示用）
         let rawLineYieldWithoutExcursion = 1 - (1 - processProduct) * learningDefectScale
-        let lineYieldWithoutExcursion = min(max(1 - (1 - rawLineYieldWithoutExcursion) / productYieldMultiplier(state: state), 0), 0.99)
+        let lineYieldWithoutExcursion = min(max(1 - (1 - rawLineYieldWithoutExcursion) / productYieldMultiplier(state: state), 0), 0.99) * eventYieldFactor
         let excursionYieldLoss = max(0, lineYieldWithoutExcursion - lineYield)
 
         // 検査スクリーニング：基礎検出率＋検査能力の余裕度
@@ -440,7 +461,7 @@ enum Engine {
         let marketDefectRate = shippedTotal > 0 ? shippedDefectFraction / shippedTotal : 0
 
         let cycleFactor = 1 + marketCycleAmplitude * sin(2 * Double.pi * state.market.gameTimeMinutes / marketCycleMinutes)
-        let price = productDiePriceYen(state: state) * cycleFactor * state.market.walkFactor
+        let price = productDiePriceYen(state: state) * cycleFactor * state.market.walkFactor * eventPriceFactor(state: state)
         // 純売上（原価・ペナルティ控除後）をウェハ1枚あたりに直したもの
         // = (良品+出荷不良)×単価×(1−原価率) − 出荷不良×単価×1.5×製品倍率
         let penaltyRate = marketDefectPenaltyRate * productMarketPenaltyMultiplier(state: state)
@@ -489,7 +510,10 @@ enum Engine {
             measuredYield: sim?.yieldEMA ?? 0,
             measuredDetectionRate: sim?.detectionEMA ?? 0,
             measuredIncomePerMinuteYen: measuredIncome,
-            theoreticalIncomePerMinuteYen: theoreticalIncome
+            theoreticalIncomePerMinuteYen: theoreticalIncome,
+            eventPriceFactor: eventPriceFactor(state: state),
+            eventYieldFactor: eventYieldFactor,
+            equipmentDiscountFactor: equipmentDiscountFactor(state: state)
         )
     }
 
@@ -534,6 +558,8 @@ enum Engine {
         var livePriceYen: Double? = nil
         if frozenPriceYen == nil {
             settleSubsidyIfDue(state: &state)
+            // 市場イベントの更新はプレイ中のみ。この tick の価格に新規イベントが反映されるよう preTickDerived より前に置く
+            updateMarketEvents(state: &state, dtRealSeconds: dtRealSeconds)
             evaluateMilestones(state: &state)
             let preTickDerived = derived(state: state)
             livePriceYen = preTickDerived.currentPriceYen
@@ -553,6 +579,7 @@ enum Engine {
             sim.excursionToolId = nil
             sim.excursionDefectMultiplier = 1
         }
+        sim.eventYieldMultiplier = contaminationActive(state: state) ? eventYieldPenaltyFactor : 1
         // ノード切替の予約中は投入を止めて仕掛かりを流し切る（排出モード）
         sim.releasesEnabled = state.fab.nodeSwitch.pendingNodeId == nil
         sim.wipCap = SimCore.operatingWipCap(layout: state.fab.layout)
@@ -612,6 +639,11 @@ enum Engine {
         state.stats.totalGrossSalesYen += (statsAfter.sumGrossYen - statsBefore.sumGrossYen) * soldFraction
         state.stats.totalCogsYen += (statsAfter.sumCogsYen - statsBefore.sumCogsYen) * soldFraction
         state.stats.totalRevenueYen += netYen * soldFraction
+        accruePeriodPL(state: &state,
+                       grossYen: (statsAfter.sumGrossYen - statsBefore.sumGrossYen) * soldFraction,
+                       cogsYen: (statsAfter.sumCogsYen - statsBefore.sumCogsYen) * soldFraction,
+                       penaltyYen: penaltyYen * soldFraction,
+                       netYen: netYen * soldFraction)
         if completedLots > 0 {
             state.market.recentAvgPriceYen =
                 state.market.recentAvgPriceYen * (1 - recentPriceSmoothing) + price * recentPriceSmoothing
@@ -646,6 +678,99 @@ enum Engine {
         state.stats.totalRevenueYen += revenueYen
         state.market.recentAvgPriceYen =
             state.market.recentAvgPriceYen * (1 - recentPriceSmoothing) + priceYen * recentPriceSmoothing
+    }
+
+    // MARK: 市場イベント
+
+    /// 発生可能な市場イベント（発生中・解放条件未達を除く）
+    static func eligibleMarketEvents(state: GameState) -> [MarketEventSpec] {
+        let activeIds = Set(state.market.activeEvents.map { $0.specId })
+        let nodeRank = Catalog.nodes.firstIndex { $0.id == state.fab.currentNodeId } ?? 0
+        return Catalog.marketEvents.filter { spec in
+            if activeIds.contains(spec.id) { return false }
+            if let required = spec.requiredNodeId {
+                let requiredRank = Catalog.nodes.firstIndex { $0.id == required } ?? Int.max
+                if nodeRank < requiredRank { return false }
+            }
+            return true
+        }
+    }
+
+    /// 市場イベントの更新：残り時間を減らし、期限切れを外し、枠が空いていればポアソン抽選で新規発生させる。
+    /// プレイ中の tick からのみ呼ぶ（オフラインでは新規発生しない）
+    static func updateMarketEvents(state: inout GameState, dtRealSeconds: Double) {
+        guard dtRealSeconds > 0 else { return }
+        for index in state.market.activeEvents.indices {
+            state.market.activeEvents[index].remainingRealSeconds -= dtRealSeconds
+        }
+        state.market.activeEvents.removeAll { $0.remainingRealSeconds <= 0 }
+        guard state.market.activeEvents.count < eventMaxConcurrent else { return }
+        // 平均 eventMeanIntervalRealSeconds に1回のポアソン到着
+        let p = 1 - exp(-dtRealSeconds / eventMeanIntervalRealSeconds)
+        guard eventRandomUnit() < p else { return }
+        let candidates = eligibleMarketEvents(state: state)
+        guard !candidates.isEmpty else { return }
+        let totalWeight = candidates.reduce(0) { $0 + $1.weight }
+        var roll = eventRandomUnit() * totalWeight
+        var picked = candidates[candidates.count - 1]
+        for candidate in candidates {
+            roll -= candidate.weight
+            if roll < 0 { picked = candidate; break }
+        }
+        state.market.activeEvents.append(ActiveMarketEvent(specId: picked.id, remainingRealSeconds: picked.durationRealSeconds))
+    }
+
+    /// 現在のノードに効く価格イベントの倍率の積（DESIGN §2.5 の価格決定式のイベント係数 × ノード別需要係数）
+    static func eventPriceFactor(state: GameState) -> Double {
+        var factor = 1.0
+        for active in state.market.activeEvents {
+            guard let spec = Catalog.marketEvent(id: active.specId), spec.kind == .price else { continue }
+            if spec.targetNodeIds.isEmpty || spec.targetNodeIds.contains(state.fab.currentNodeId) {
+                factor *= spec.priceMultiplier
+            }
+        }
+        return factor
+    }
+
+    /// 汚染事故が発生中か
+    static func contaminationActive(state: GameState) -> Bool {
+        state.market.activeEvents.contains { Catalog.marketEvent(id: $0.specId)?.kind == .yieldPenalty }
+    }
+
+    /// 装置購入価格の倍率（補助金イベント）
+    static func equipmentDiscountFactor(state: GameState) -> Double {
+        state.market.activeEvents.contains { Catalog.marketEvent(id: $0.specId)?.kind == .equipmentDiscount }
+            ? eventEquipmentDiscountFactor : 1.0
+    }
+
+    /// 装置の実購入価格（補助金イベント中は割引）
+    static func purchasePriceYen(state: GameState, model: EquipmentModel) -> Double {
+        model.priceYen * equipmentDiscountFactor(state: state)
+    }
+
+    // MARK: 期間P&L
+
+    /// 期間P&L へ売上を計上する。累計（total*）へ加えるのと同じ金額を、同じ呼び出しでここへも加えること（二重計上・欠落の防止）。
+    /// 期間は market.gameTimeMinutes を plPeriodGameMinutes で区切ったインデックスで管理し、跨いだら現在期間を前期間へ移す
+    static func accruePeriodPL(state: inout GameState, grossYen: Double, cogsYen: Double, penaltyYen: Double, netYen: Double) {
+        let index = Int(floor(state.market.gameTimeMinutes / plPeriodGameMinutes))
+        if state.stats.plPeriodIndex < 0 {
+            state.stats.plPeriodIndex = index
+        } else if index > state.stats.plPeriodIndex {
+            state.stats.plPrevGrossYen = state.stats.plGrossYen
+            state.stats.plPrevCogsYen = state.stats.plCogsYen
+            state.stats.plPrevPenaltyYen = state.stats.plPenaltyYen
+            state.stats.plPrevNetYen = state.stats.plNetYen
+            state.stats.plGrossYen = 0
+            state.stats.plCogsYen = 0
+            state.stats.plPenaltyYen = 0
+            state.stats.plNetYen = 0
+            state.stats.plPeriodIndex = index
+        }
+        state.stats.plGrossYen += grossYen
+        state.stats.plCogsYen += cogsYen
+        state.stats.plPenaltyYen += penaltyYen
+        state.stats.plNetYen += netYen
     }
 
     // MARK: オフライン
@@ -860,8 +985,9 @@ enum Engine {
         guard let model = Catalog.model(id: modelId) else { return .unknownModel }
         let locks = lockReasons(model: model, state: state)
         if !locks.isEmpty { return .locked(locks) }
-        if state.cashYen < model.priceYen {
-            return .insufficientCash(shortfallYen: model.priceYen - state.cashYen)
+        let price = purchasePriceYen(state: state, model: model)
+        if state.cashYen < price {
+            return .insufficientCash(shortfallYen: price - state.cashYen)
         }
         return nil
     }
@@ -887,7 +1013,8 @@ enum Engine {
     static func buy(state: inout GameState, modelId: String, now: Date = Date()) -> Bool {
         guard canBuy(state: state, modelId: modelId), let model = Catalog.model(id: modelId) else { return false }
         adoptLegacyInstalledTools(state: &state)
-        state.cashYen -= model.priceYen
+        let price = purchasePriceYen(state: state, model: model)
+        state.cashYen -= price
         let instance = EquipmentInstance(modelId: modelId, level: 1, purchasedAt: now)
         let tool = ToolInstance(instance: instance)
         if state.fab.layout != nil {
@@ -899,7 +1026,7 @@ enum Engine {
         } else {
             state.fab.placed.append(tool)
         }
-        state.subsidy.totalInvestedYen += model.priceYen
+        state.subsidy.totalInvestedYen += price
         return true
     }
 
@@ -916,9 +1043,10 @@ enum Engine {
                                              among: state.fab.placed)
         else { return false }
         let lineWPHBefore = derived(state: state).lineWPH
-        state.cashYen -= model.priceYen
+        let price = purchasePriceYen(state: state, model: model)
+        state.cashYen -= price
         state.fab.placed.append(placedTool)
-        state.subsidy.totalInvestedYen += model.priceYen
+        state.subsidy.totalInvestedYen += price
         // 現場ノート fn.not_bottleneck 用：この購入がラインを速くしなかった（ラインWPHの上昇が閾値未満）
         // という事実だけを記録する。ノートを出すかどうかは pendingFieldNotes が判定する
         if derived(state: state).lineWPH - lineWPHBefore < notBottleneckMinGainWPH {
@@ -1229,6 +1357,7 @@ enum Engine {
         state.stats.totalShippedChips += chips
         state.stats.totalMarketDefectChips += sale.defectChips
         state.stats.totalMarketPenaltyYen += sale.penaltyYen
+        accruePeriodPL(state: &state, grossYen: grossYen, cogsYen: cogsYen, penaltyYen: sale.penaltyYen, netYen: netYen)
         recordSale(state: &state, revenueYen: netYen, priceYen: priceYen)
         return netYen
     }

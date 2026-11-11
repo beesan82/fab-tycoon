@@ -2570,4 +2570,164 @@ let r3AverageMs = Date().timeIntervalSince(r3Start) * 1_000 / Double(r3MeasureTi
 print("  1 tick 平均（tick ＋ derived）: \(num(r3AverageMs, 3)) ms（\(r3MeasureTicks) tick）")
 check(r3AverageMs < 250, "R3: 1 tick 平均 \(num(r3AverageMs, 3)) ms が tick 間隔 250ms 未満")
 
+// MARK: - P6: 市場イベント＋期間P&L
+
+print("== P6: 市場イベント＋期間P&L ==")
+
+/// スクリプト列を順に返し、尽きたら 0.5 を返す乱数源
+func p6Scripted(_ values: [Double]) -> () -> Double {
+    var index = 0
+    return {
+        defer { index += 1 }
+        return index < values.count ? values[index] : 0.5
+    }
+}
+
+func p6WithEvents(_ ids: [String], remaining: Double = 600, nodeId: String? = nil) -> GameState {
+    var state = GameState.initial()
+    if let nodeId { state.fab.currentNodeId = nodeId }
+    state.market.activeEvents = ids.map { ActiveMarketEvent(specId: $0, remainingRealSeconds: remaining) }
+    return state
+}
+
+// 1. カタログ sanity
+check(Catalog.marketEvents.count == 7, "P6: 市場イベントは 7 種（実数 \(Catalog.marketEvents.count)）")
+check(Catalog.marketEvents.allSatisfy { (600.0...2400.0).contains($0.durationRealSeconds) },
+      "P6: 全イベントの継続時間が実時間 600〜2400 秒（10〜40 分）に収まる")
+check(Catalog.marketEvent(id: "ev.ai_boom")?.priceMultiplier == 2.0, "P6: AIブームの単価倍率は 2.0")
+
+// 2. 旧セーブ互換
+check(r1FixtureState.market.activeEvents.isEmpty, "P6: 旧セーブ（R1 fixture）の発生中イベントは空")
+check(r1FixtureState.stats.plPeriodIndex == -1 && r1FixtureState.stats.plGrossYen == 0,
+      "P6: 旧セーブの期間P&L は未開始（plPeriodIndex == -1、plGrossYen == 0）")
+
+// 3. 抽選の決定性
+var p6DetA = GameState.initial()
+var p6DetB = GameState.initial()
+Engine.eventRandomUnit = p6Scripted([0, 0])
+Engine.updateMarketEvents(state: &p6DetA, dtRealSeconds: 60)
+Engine.eventRandomUnit = p6Scripted([0, 0])
+Engine.updateMarketEvents(state: &p6DetB, dtRealSeconds: 60)
+check(p6DetA.market.activeEvents == p6DetB.market.activeEvents, "P6: 同じ乱数列なら抽選結果が一致する（決定性）")
+check(p6DetA.market.activeEvents.count == 1
+      && p6DetA.market.activeEvents.first?.specId == "ev.game_console"
+      && p6DetA.market.activeEvents.first?.remainingRealSeconds == 1080,
+      "P6: 乱数列 [0, 0] では n28 で発生可能な先頭の ev.game_console が残り 1080 秒で発生する")
+var p6NoFire = GameState.initial()
+Engine.eventRandomUnit = { 0.999_999 }
+Engine.updateMarketEvents(state: &p6NoFire, dtRealSeconds: 60)
+check(p6NoFire.market.activeEvents.isEmpty, "P6: 乱数が発生確率以上ならイベントは発生しない")
+
+// 4. 解放条件
+let p6EligibleN28 = Set(Engine.eligibleMarketEvents(state: GameState.initial()).map { $0.id })
+check(!p6EligibleN28.contains("ev.ai_boom") && !p6EligibleN28.contains("ev.smartphone"),
+      "P6: n28 では AIブーム・スマホ新機種は発生しない")
+check(p6EligibleN28 == ["ev.game_console", "ev.automotive", "ev.oversupply", "ev.contamination", "ev.subsidy_boost"],
+      "P6: n28 で発生可能なのはゲーム機・車載・在庫過剰・汚染事故・補助金の 5 件（実数 \(p6EligibleN28.sorted())）")
+var p6N7 = GameState.initial()
+p6N7.fab.currentNodeId = "n7"
+let p6EligibleN7 = Set(Engine.eligibleMarketEvents(state: p6N7).map { $0.id })
+check(p6EligibleN7.contains("ev.ai_boom") && !p6EligibleN7.contains("ev.smartphone"),
+      "P6: n7 では AIブームが解放され、スマホ新機種はまだ発生しない")
+var p6N5 = GameState.initial()
+p6N5.fab.currentNodeId = "n5"
+let p6EligibleN5 = Set(Engine.eligibleMarketEvents(state: p6N5).map { $0.id })
+check(p6EligibleN5.contains("ev.smartphone"), "P6: n5 ではスマホ新機種も発生可能")
+
+// 5. 価格係数とノード対象
+var p6Price = GameState.initial()
+let p6BasePrice = Engine.derived(state: p6Price).currentPriceYen
+p6Price.market.activeEvents = [ActiveMarketEvent(specId: "ev.game_console", remainingRealSeconds: 600)]
+check(abs(Engine.eventPriceFactor(state: p6Price) - 1.8) < 1e-9, "P6: ゲーム機ブーム中の n28 の価格係数は 1.8")
+let p6BoomPrice = Engine.derived(state: p6Price).currentPriceYen
+check(abs(p6BoomPrice - p6BasePrice * 1.8) <= abs(p6BasePrice * 1.8) * 1e-6,
+      "P6: ゲーム機ブーム中の単価は通常の 1.8 倍（\(num(p6BasePrice)) → \(num(p6BoomPrice))）")
+check(abs(Engine.eventPriceFactor(state: p6WithEvents(["ev.ai_boom"])) - 1.0) < 1e-9,
+      "P6: AIブームは対象外の n28 には効かない（係数 1.0）")
+check(abs(Engine.eventPriceFactor(state: p6WithEvents(["ev.ai_boom"], nodeId: "n7")) - 2.0) < 1e-9,
+      "P6: AIブームは対象の n7 で係数 2.0")
+check(abs(Engine.eventPriceFactor(state: p6WithEvents(["ev.oversupply", "ev.game_console"])) - 1.8 * 0.6) < 1e-9,
+      "P6: 在庫過剰とゲーム機ブームの同時発生は係数が乗算される（1.8 × 0.6）")
+
+// 6. 期限切れ
+var p6Expire = p6WithEvents(["ev.oversupply"], remaining: 30)
+Engine.eventRandomUnit = { 0.999_999 }
+Engine.updateMarketEvents(state: &p6Expire, dtRealSeconds: 31)
+check(p6Expire.market.activeEvents.isEmpty, "P6: 残り時間を過ぎたイベントは外れる")
+check(abs(Engine.eventPriceFactor(state: p6Expire) - 1.0) < 1e-9, "P6: 期限切れ後の価格係数は 1.0 に戻る")
+
+// 7. 同時上限
+var p6Concurrent = p6WithEvents(["ev.game_console", "ev.automotive"])
+Engine.eventRandomUnit = { 0 }
+Engine.updateMarketEvents(state: &p6Concurrent, dtRealSeconds: 60)
+check(p6Concurrent.market.activeEvents.count == 2,
+      "P6: 同時発生は 2 件が上限（実数 \(p6Concurrent.market.activeEvents.count)）")
+
+// 8. 汚染事故
+var p6Cont = GameState.initial()
+let p6YieldBase = Engine.derived(state: p6Cont).lineYield
+p6Cont.market.activeEvents = [ActiveMarketEvent(specId: "ev.contamination", remainingRealSeconds: 600)]
+let p6ContDerived = Engine.derived(state: p6Cont)
+check(abs(p6ContDerived.lineYield - p6YieldBase * 0.9) < 1e-9,
+      "P6: 汚染事故中の歩留まりは相対 -10%（\(num(p6YieldBase, 4)) → \(num(p6ContDerived.lineYield, 4))）")
+check(p6ContDerived.eventYieldFactor == 0.9, "P6: 汚染事故中の eventYieldFactor は 0.9")
+
+// 9. 補助金イベントと購入
+var p6Sub = GameState.initial()
+let p6Model = Catalog.model(id: "D1")!
+check(Engine.purchasePriceYen(state: p6Sub, model: p6Model) == p6Model.priceYen, "P6: 通常時の購入価格は定価")
+p6Sub.market.activeEvents = [ActiveMarketEvent(specId: "ev.subsidy_boost", remainingRealSeconds: 600)]
+check(abs(Engine.purchasePriceYen(state: p6Sub, model: p6Model) - p6Model.priceYen * 0.8) < 1,
+      "P6: 補助金イベント中の購入価格は定価の 80%")
+check(Engine.derived(state: p6Sub).equipmentDiscountFactor == 0.8, "P6: 補助金イベント中の equipmentDiscountFactor は 0.8")
+let p6SubCashBefore = p6Sub.cashYen
+check(Engine.buy(state: &p6Sub, modelId: "D1"), "P6: 補助金イベント中も D1 を購入できる")
+check(abs((p6SubCashBefore - p6Sub.cashYen) - p6Model.priceYen * 0.8) < 1,
+      "P6: 補助金イベント中の購入で減る現金は定価の 80%（\(num(p6SubCashBefore - p6Sub.cashYen, 0)) 円）")
+
+// 10. 期間P&L の直接計上とロールオーバー
+var p6PL = GameState.initial()
+p6PL.market.gameTimeMinutes = 100
+Engine.accruePeriodPL(state: &p6PL, grossYen: 1000, cogsYen: 400, penaltyYen: 100, netYen: 500)
+check(p6PL.stats.plGrossYen == 1000 && p6PL.stats.plNetYen == 500 && p6PL.stats.plPeriodIndex == 0,
+      "P6: 初回計上で期間 0 が始まり、売上 1000・純益 500 が載る")
+Engine.accruePeriodPL(state: &p6PL, grossYen: 500, cogsYen: 200, penaltyYen: 50, netYen: 250)
+check(p6PL.stats.plGrossYen == 1500, "P6: 同一期間の計上は累積する（売上 1500）")
+p6PL.market.gameTimeMinutes = 1500
+Engine.accruePeriodPL(state: &p6PL, grossYen: 300, cogsYen: 100, penaltyYen: 0, netYen: 200)
+check(p6PL.stats.plPrevGrossYen == 1500 && p6PL.stats.plGrossYen == 300 && p6PL.stats.plPeriodIndex == 1,
+      "P6: 期間を跨ぐと前期間へ移り（前期売上 1500）、今期は 300 から始まる（期間 1）")
+
+// 11. 在庫売却の二重計上なし
+var p6Sell = GameState.initial()
+p6Sell.fab.inventoryChips = 1000
+let p6SellGrossTotalBefore = p6Sell.stats.totalGrossSalesYen
+let p6SellPLGrossBefore = p6Sell.stats.plGrossYen
+let p6SellRevenueBefore = p6Sell.stats.totalRevenueYen
+let p6SellPLNetBefore = p6Sell.stats.plNetYen
+Engine.sellInventory(state: &p6Sell, priceYen: 1200)
+let p6SellPLGrossDelta = p6Sell.stats.plGrossYen - p6SellPLGrossBefore
+let p6SellGrossTotalDelta = p6Sell.stats.totalGrossSalesYen - p6SellGrossTotalBefore
+check(abs(p6SellPLGrossDelta - 1000 * 1200) < 1 && abs(p6SellGrossTotalDelta - 1000 * 1200) < 1,
+      "P6: 在庫売却の売上は期間P&L と累計に同額（1000 × 1200 円）ずつ計上される")
+check(abs((p6Sell.stats.plNetYen - p6SellPLNetBefore) - (p6Sell.stats.totalRevenueYen - p6SellRevenueBefore)) < 1,
+      "P6: 在庫売却の純益は期間P&L と累計で一致する")
+let p6SellPLGrossAfter = p6Sell.stats.plGrossYen
+Engine.sellInventory(state: &p6Sell, priceYen: 1200)
+check(p6Sell.stats.plGrossYen == p6SellPLGrossAfter, "P6: 在庫が空なら再売却しても期間P&L は増えない")
+
+// 12. tick 統合（期間P&L と累計の一致）
+var p6Tick = GameState.initial()
+Engine.eventRandomUnit = { 0.999_999 }
+for _ in 0..<400 {
+    Engine.tick(state: &p6Tick, dtRealSeconds: 0.25)
+}
+print("  期間売上: \(num(p6Tick.stats.plGrossYen, 0)) 円  累計売上: \(num(p6Tick.stats.totalGrossSalesYen, 0)) 円")
+check(abs(p6Tick.stats.plGrossYen - p6Tick.stats.totalGrossSalesYen) < 1, "P6: tick 後の期間売上と累計売上が一致する")
+check(abs(p6Tick.stats.plNetYen - p6Tick.stats.totalRevenueYen) < 1, "P6: tick 後の期間純益と累計純益が一致する")
+check(p6Tick.stats.plGrossYen > 0, "P6: tick で実際に売上が立っている")
+
+// 13. 乱数源を既定へ戻す
+Engine.eventRandomUnit = { Double.random(in: 0..<1) }
+
 print("HEADLESS CHECK PASSED")

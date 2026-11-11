@@ -28,6 +28,7 @@
 		B1000000000000000000001E /* ProblemsPopover.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001E /* ProblemsPopover.swift */; };
 		B1000000000000000000001F /* FacilitySheets.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001F /* FacilitySheets.swift */; };
 		B10000000000000000000022 /* FieldNoteToast.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000022 /* FieldNoteToast.swift */; };
+		B10000000000000000000023 /* MarketEventToast.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000023 /* MarketEventToast.swift */; };
 		B10000000000000000000021 /* RailCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000021 /* RailCard.swift */; };
 		B10000000000000000000020 /* LotCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000020 /* LotCard.swift */; };
 /* End PBXBuildFile section */
@@ -55,6 +56,7 @@
 		A1000000000000000000001E /* ProblemsPopover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProblemsPopover.swift; sourceTree = "<group>"; };
 		A1000000000000000000001F /* FacilitySheets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FacilitySheets.swift; sourceTree = "<group>"; };
 		A10000000000000000000022 /* FieldNoteToast.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FieldNoteToast.swift; sourceTree = "<group>"; };
+		A10000000000000000000023 /* MarketEventToast.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarketEventToast.swift; sourceTree = "<group>"; };
 		A10000000000000000000021 /* RailCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RailCard.swift; sourceTree = "<group>"; };
 		A10000000000000000000020 /* LotCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LotCard.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -133,6 +135,7 @@
 				A1000000000000000000001E /* ProblemsPopover.swift */,
 				A1000000000000000000001F /* FacilitySheets.swift */,
 				A10000000000000000000022 /* FieldNoteToast.swift */,
+				A10000000000000000000023 /* MarketEventToast.swift */,
 				A10000000000000000000021 /* RailCard.swift */,
 				A10000000000000000000020 /* LotCard.swift */,
 				A10000000000000000000012 /* StatsView.swift */,
@@ -234,6 +237,7 @@
 				B1000000000000000000001E /* ProblemsPopover.swift in Sources */,
 				B1000000000000000000001F /* FacilitySheets.swift in Sources */,
 				B10000000000000000000022 /* FieldNoteToast.swift in Sources */,
+				B10000000000000000000023 /* MarketEventToast.swift in Sources */,
 				B10000000000000000000021 /* RailCard.swift in Sources */,
 				B10000000000000000000020 /* LotCard.swift in Sources */,
 				B10000000000000000000012 /* StatsView.swift in Sources */,

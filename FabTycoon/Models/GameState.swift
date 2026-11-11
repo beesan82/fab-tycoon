@@ -331,10 +331,37 @@ struct EquipmentInstance: Codable, Equatable, Identifiable {
     }
 }
 
+/// 発生中の市場イベント（特需）。残り時間は実秒で数える（継続時間が実時間基準のため）
+struct ActiveMarketEvent: Codable, Equatable {
+    var specId: String
+    var remainingRealSeconds: Double
+}
+
 struct MarketState: Codable, Equatable {
     var gameTimeMinutes: Double = 0
     var walkFactor: Double = 1.0
     var recentAvgPriceYen: Double = 1_200
+    /// 発生中の市場イベント（特需）
+    var activeEvents: [ActiveMarketEvent] = []
+
+    enum CodingKeys: String, CodingKey {
+        case gameTimeMinutes
+        case walkFactor
+        case recentAvgPriceYen
+        case activeEvents
+    }
+}
+
+// 旧セーブ互換：全フィールドを欠けていてもデフォルト値で読む
+extension MarketState {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = MarketState()
+        gameTimeMinutes = try container.decodeIfPresent(Double.self, forKey: .gameTimeMinutes) ?? defaults.gameTimeMinutes
+        walkFactor = try container.decodeIfPresent(Double.self, forKey: .walkFactor) ?? defaults.walkFactor
+        recentAvgPriceYen = try container.decodeIfPresent(Double.self, forKey: .recentAvgPriceYen) ?? defaults.recentAvgPriceYen
+        activeEvents = try container.decodeIfPresent([ActiveMarketEvent].self, forKey: .activeEvents) ?? defaults.activeEvents
+    }
 }
 
 struct Stats: Codable, Equatable {
@@ -375,6 +402,24 @@ struct Stats: Codable, Equatable {
     var tutorialStep: Int = 0
     /// 現場ノートの「初めて」判定の補助：条件キー → 初回発生時の gameHoursElapsed（R2 で追加）
     var noteTriggerMemo: [String: Double] = [:]
+    /// 期間P&L（ゲーム内24時間区切り）の対象期間インデックス（market.gameTimeMinutes / 1440）。-1 = 未初期化
+    var plPeriodIndex: Int = -1
+    /// 現在期間の売上（総額）
+    var plGrossYen: Double = 0
+    /// 現在期間の売上原価
+    var plCogsYen: Double = 0
+    /// 現在期間の市場不良ペナルティ
+    var plPenaltyYen: Double = 0
+    /// 現在期間の粗利（総額 - 原価 - ペナルティと一致する純額）
+    var plNetYen: Double = 0
+    /// 前期間の売上（総額）
+    var plPrevGrossYen: Double = 0
+    /// 前期間の売上原価
+    var plPrevCogsYen: Double = 0
+    /// 前期間の市場不良ペナルティ
+    var plPrevPenaltyYen: Double = 0
+    /// 前期間の粗利
+    var plPrevNetYen: Double = 0
 
     enum CodingKeys: String, CodingKey {
         case totalRevenueYen
@@ -398,6 +443,15 @@ struct Stats: Codable, Equatable {
         case seenFieldNoteIds
         case tutorialStep
         case noteTriggerMemo
+        case plPeriodIndex
+        case plGrossYen
+        case plCogsYen
+        case plPenaltyYen
+        case plNetYen
+        case plPrevGrossYen
+        case plPrevCogsYen
+        case plPrevPenaltyYen
+        case plPrevNetYen
     }
 }
 
@@ -429,5 +483,14 @@ extension Stats {
         // 既定値 0 ではなく完了済みの 5 を入れて旧セーブには出さない
         tutorialStep = try container.decodeIfPresent(Int.self, forKey: .tutorialStep) ?? 5
         noteTriggerMemo = try container.decodeIfPresent([String: Double].self, forKey: .noteTriggerMemo) ?? defaults.noteTriggerMemo
+        plPeriodIndex = try container.decodeIfPresent(Int.self, forKey: .plPeriodIndex) ?? defaults.plPeriodIndex
+        plGrossYen = try container.decodeIfPresent(Double.self, forKey: .plGrossYen) ?? defaults.plGrossYen
+        plCogsYen = try container.decodeIfPresent(Double.self, forKey: .plCogsYen) ?? defaults.plCogsYen
+        plPenaltyYen = try container.decodeIfPresent(Double.self, forKey: .plPenaltyYen) ?? defaults.plPenaltyYen
+        plNetYen = try container.decodeIfPresent(Double.self, forKey: .plNetYen) ?? defaults.plNetYen
+        plPrevGrossYen = try container.decodeIfPresent(Double.self, forKey: .plPrevGrossYen) ?? defaults.plPrevGrossYen
+        plPrevCogsYen = try container.decodeIfPresent(Double.self, forKey: .plPrevCogsYen) ?? defaults.plPrevCogsYen
+        plPrevPenaltyYen = try container.decodeIfPresent(Double.self, forKey: .plPrevPenaltyYen) ?? defaults.plPrevPenaltyYen
+        plPrevNetYen = try container.decodeIfPresent(Double.self, forKey: .plPrevNetYen) ?? defaults.plPrevNetYen
     }
 }

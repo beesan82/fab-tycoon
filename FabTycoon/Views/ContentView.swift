@@ -72,6 +72,10 @@ struct ContentView: View {
                 }
                 Spacer(minLength: 0)
                 VStack(spacing: 8) {
+                    if let notice = store.marketEventNotice {
+                        MarketEventToast(notice: notice)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
                     if let noteId = store.activeFieldNote {
                         FieldNoteToast(noteId: noteId,
                                        onOpenGlossary: { termId in
