@@ -34,7 +34,7 @@ struct MarketEventToast: View {
             }
             Text(spec?.name ?? notice.specId)
                 .font(.subheadline.bold())
-                .lineLimit(1)
+                .fixedSize(horizontal: false, vertical: true)
             if notice.isStart, let spec {
                 Text(spec.effectText)
                     .font(.caption)

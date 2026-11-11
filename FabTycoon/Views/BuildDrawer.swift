@@ -186,7 +186,8 @@ private struct BuildModelTile: View {
                             HStack(spacing: 6) {
                                 Text(model.name)
                                     .font(.subheadline.bold())
-                                    .lineLimit(1)
+                                    .lineLimit(2)
+                                    .fixedSize(horizontal: false, vertical: true)
                                 if isLocked {
                                     Image(systemName: "lock.fill")
                                         .font(.caption)
@@ -205,6 +206,8 @@ private struct BuildModelTile: View {
                                     .foregroundStyle(.secondary)
                             }
                             .monospacedDigit()
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
                             if let message = Self.blockMessage(block) {
                                 Label(message, systemImage: isLocked ? "lock" : "exclamationmark.circle")
                                     .font(.caption2)

@@ -31,8 +31,6 @@ struct RailCard: View {
                     Label("先頭の行き先：\(MapCardText.destinationText(state: state, lot: head))",
                           systemImage: "arrow.triangle.turn.up.right.circle")
                         .font(.subheadline)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
                 }
                 Text("行き先の装置のポートが空くまで、後ろの FOUP も進めません。行き先の工程を増やすか、レールを足して逃げ道を作りましょう。")
                     .font(.caption)

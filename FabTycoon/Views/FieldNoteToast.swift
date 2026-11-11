@@ -49,8 +49,8 @@ struct FieldNoteToast: View {
             }
             Text(title)
                 .font(.subheadline.bold())
-                .lineLimit(expanded ? nil : 1)
-                .fixedSize(horizontal: false, vertical: expanded)
+                .lineLimit(expanded ? nil : 2)
+                .fixedSize(horizontal: false, vertical: true)
             if let spec {
                 Text(spec.body)
                     .font(expanded ? .callout : .caption)

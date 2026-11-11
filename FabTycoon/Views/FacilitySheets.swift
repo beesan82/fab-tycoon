@@ -199,8 +199,8 @@ private struct LibrarySheet: View {
                         .font(.subheadline.weight(isUnread ? .bold : .regular))
                         .foregroundStyle(.primary)
                         .multilineTextAlignment(.leading)
-                        .lineLimit(isExpanded ? nil : 1)
-                        .fixedSize(horizontal: false, vertical: isExpanded)
+                        .lineLimit(isExpanded ? nil : 2)
+                        .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 4)
                     if isUnread {
                         Text("未読")
@@ -279,6 +279,7 @@ struct EntrySheet: View {
     @State private var nodeSwitchTarget: FacilityStringTarget?
     /// リトルの法則ライブの項をタップしたときに資料室で開く図鑑エントリ
     @State private var glossaryTarget: FacilityStringTarget?
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         let state = store.state
@@ -452,15 +453,27 @@ struct EntrySheet: View {
         // cycleTimeEMA はゲーム分 → ゲーム時間に
         let cycleTime = (sim?.cycleTimeEMA ?? 0) / 60
         Section {
-            HStack(alignment: .top, spacing: 4) {
-                littleTerm(value: "\(wip)", label: "WIP", unit: "FOUP", termId: "term.wip")
-                littleOperator("＝")
-                littleTerm(value: MoneyFormat.decimal(throughput, digits: 2), label: "スループット", unit: "FOUP／時", termId: "term.little")
-                littleOperator("×")
-                littleTerm(value: MoneyFormat.decimal(cycleTime, digits: 1), label: "サイクルタイム", unit: "時間", termId: "term.cycletime")
+            if dynamicTypeSize.isAccessibilitySize {
+                VStack(spacing: 2) {
+                    littleTerm(value: "\(wip)", label: "WIP", unit: "FOUP", termId: "term.wip")
+                    littleOperator("＝")
+                    littleTerm(value: MoneyFormat.decimal(throughput, digits: 2), label: "スループット", unit: "FOUP／時", termId: "term.little")
+                    littleOperator("×")
+                    littleTerm(value: MoneyFormat.decimal(cycleTime, digits: 1), label: "サイクルタイム", unit: "時間", termId: "term.cycletime")
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+            } else {
+                HStack(alignment: .top, spacing: 4) {
+                    littleTerm(value: "\(wip)", label: "WIP", unit: "FOUP", termId: "term.wip")
+                    littleOperator("＝")
+                    littleTerm(value: MoneyFormat.decimal(throughput, digits: 2), label: "スループット", unit: "FOUP／時", termId: "term.little")
+                    littleOperator("×")
+                    littleTerm(value: MoneyFormat.decimal(cycleTime, digits: 1), label: "サイクルタイム", unit: "時間", termId: "term.cycletime")
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 6)
             if cycleTime > 0 {
                 Text("ライン上の行列（WIP）が伸びたら、出荷ペースが落ちたのか、1 個が出るまでの時間が延びたのかを見比べよう。装置を足してスループットが上がると、同じ WIP でもサイクルタイムは縮む。")
                     .font(.caption)
@@ -656,11 +669,12 @@ struct ShippingSheet: View {
 
 struct WelcomeCardView: View {
     var onClose: () -> Void
+    @ScaledMetric(relativeTo: .largeTitle) private var iconSize: CGFloat = 40
 
     var body: some View {
         VStack(spacing: 18) {
             Image(systemName: "map.fill")
-                .font(.system(size: 40))
+                .font(.system(size: iconSize))
                 .foregroundStyle(.blue)
             Text("画面がマップ中心になりました")
                 .font(.title3.bold())

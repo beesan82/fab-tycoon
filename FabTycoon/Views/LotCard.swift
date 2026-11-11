@@ -56,8 +56,6 @@ struct LotCard: View {
                     } label: {
                         Label("この工程を学ぶ", systemImage: "book")
                             .font(.subheadline)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
@@ -202,8 +200,7 @@ struct LotCard: View {
         }
         return Label(text, systemImage: "arrow.triangle.turn.up.right.circle")
             .font(.subheadline)
-            .lineLimit(1)
-            .minimumScaleFactor(0.8)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private static func isProcessing(state: GameState, toolId: UUID, lotId: UUID) -> Bool {
@@ -218,8 +215,8 @@ struct LotCard: View {
             Text(value)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
+                .multilineTextAlignment(.trailing)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .font(.subheadline)
     }

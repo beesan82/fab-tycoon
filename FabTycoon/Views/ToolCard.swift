@@ -16,6 +16,7 @@ enum ToolCardDetent: Int {
 
 struct ToolCard: View {
     @EnvironmentObject private var store: GameStore
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     let toolId: UUID
     var onClose: () -> Void
@@ -74,7 +75,7 @@ struct ToolCard: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .toolCardHeight(detent)
+        .modifier(ToolCardHeightModifier(detent: detent))
         .background(RoundedRectangle(cornerRadius: 18).fill(.regularMaterial))
         .clipShape(RoundedRectangle(cornerRadius: 18))
         .overlay(alignment: .top) {
@@ -82,7 +83,8 @@ struct ToolCard: View {
                 Text(actionMessage)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.white)
-                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                     .background(Capsule().fill(Color.red.opacity(0.9)))
@@ -197,19 +199,16 @@ struct ToolCard: View {
                     Spacer(minLength: 4)
                     statusLabel(info.status)
                 }
-                HStack(spacing: 6) {
-                    if info.isBottleneck {
-                        chip("律速", color: .red)
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 4) {
+                        headerChips(info)
+                        headerStats(info)
                     }
-                    if let text = info.unconnectedText {
-                        chip(text, color: .gray)
+                } else {
+                    HStack(spacing: 6) {
+                        headerChips(info)
+                        headerStats(info)
                     }
-                    Text("待ち \(info.waitingLots) FOUP ／ 稼働率 \(MoneyFormat.percent(info.utilization, digits: 0))")
-                        .font(.caption)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
                 }
                 HStack(spacing: 6) {
                     if let rank = info.stepRank {
@@ -219,9 +218,34 @@ struct ToolCard: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
             }
         }
+    }
+
+    /// チップが 1 つもないときは何も出さない（空の HStack でも親スタックの間隔が入り、統計テキストがずれるため）
+    @ViewBuilder
+    private func headerChips(_ info: ToolCardInfo) -> some View {
+        if info.isBottleneck || info.unconnectedText != nil {
+            HStack(spacing: 6) {
+                if info.isBottleneck {
+                    chip("律速", color: .red)
+                }
+                if let text = info.unconnectedText {
+                    chip(text, color: .gray)
+                }
+            }
+        }
+    }
+
+    private func headerStats(_ info: ToolCardInfo) -> some View {
+        Text("待ち \(info.waitingLots) FOUP ／ 稼働率 \(MoneyFormat.percent(info.utilization, digits: 0))")
+            .font(.caption)
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
     }
 
     private func statusLabel(_ status: ToolCardStatus) -> some View {
@@ -234,7 +258,7 @@ struct ToolCard: View {
                 .font(.caption.bold())
                 .lineLimit(1)
         }
-        .fixedSize()
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private func chip(_ text: String, color: Color) -> some View {
@@ -517,6 +541,7 @@ struct ToolCard: View {
                                 Text("\(siblingInfo.model.name) #\(siblingInfo.serial)")
                                     .font(.subheadline)
                                     .lineLimit(1)
+                                    .minimumScaleFactor(0.8)
                                 Text("Lv\(siblingInfo.tool.level) ・ 待ち \(siblingInfo.waitingLots) FOUP ・ 稼働率 \(MoneyFormat.percent(siblingInfo.utilization, digits: 0))")
                                     .font(.caption2)
                                     .monospacedDigit()
@@ -552,7 +577,8 @@ struct ToolCard: View {
                 Spacer()
                 Text(info.model.name)
                     .font(.subheadline.bold())
-                    .lineLimit(1)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
                 Spacer()
                 if let glossaryId {
                     Button {
@@ -862,19 +888,26 @@ private struct ToolEducationBlock: View {
 
 // MARK: - 高さの段
 
-private extension View {
-    /// コンパクト＝固定 176pt、展開＝画面の 56%、全画面＝ HUD とドックの間を使い切る
+/// コンパクト＝固定 176pt（アクセシビリティサイズでは最小 176pt）、展開＝画面の 56%、全画面＝ HUD とドックの間を使い切る
+private struct ToolCardHeightModifier: ViewModifier {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    let detent: ToolCardDetent
+
     @ViewBuilder
-    func toolCardHeight(_ detent: ToolCardDetent) -> some View {
+    func body(content: Content) -> some View {
         switch detent {
         case .compact:
-            frame(height: ToolCard.compactHeight)
+            if dynamicTypeSize.isAccessibilitySize {
+                content.frame(minHeight: ToolCard.compactHeight)
+            } else {
+                content.frame(height: ToolCard.compactHeight)
+            }
         case .expanded:
-            containerRelativeFrame(.vertical, alignment: .bottom) { length, _ in
+            content.containerRelativeFrame(.vertical, alignment: .bottom) { length, _ in
                 length * ToolCard.expandedFraction
             }
         case .full:
-            frame(maxHeight: .infinity)
+            content.frame(maxHeight: .infinity)
                 .layoutPriority(1)
         }
     }
