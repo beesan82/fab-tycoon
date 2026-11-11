@@ -119,7 +119,7 @@ enum OfflineProgress {
         }
         // 学習 W の起点を state.learningWafers から引き直す（Engine.reconciledSim と同じ自己修復）
         Engine.resyncLearningWafersBase(&sim, state: state)
-        // WIP 上限は運転点に強制する（付録 C.5。テンプレートはレール 54 セルで 59、旧リング型は 45）
+        // WIP 上限は運転点に強制する（付録 C.5。テンプレートはレール 48 セルで 53、旧リング型は 45、蛇行型は 59）
         sim.wipCap = SimCore.operatingWipCap(layout: state.fab.layout)
         let frozenPrice = state.market.recentAvgPriceYen
         sim.settlementPriceYen = frozenPrice

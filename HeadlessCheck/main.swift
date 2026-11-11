@@ -802,16 +802,16 @@ print("== 0.6.0. 検査グレード（Q3） ==")
 var q3State = GameState.initial()
 // P4 読み替え：fab.equipment への直接代入をやめ、placed に D3・Q3 を置いて sim を作り直す。
 // ノードは freshSnapshot（state を読む）より前に n5 にする。
-// 位置は指示案の D3 (0,0)・Q3 (4,0) ではなく D3 (0,3)・Q3 (4,3) にする：テンプレートのレールは y=5 から下にあり、
-// y=0〜1 に置くとポートが無く未接続になって derived（接続フィルタ付き）の成膜が 0 台になり、
+// 位置は D3 (1,4)・Q3 (4,4) にする：一直線型テンプレートのレールは本線 y=6 と戻りレーンのみで、
+// y=0〜1 や旧第1レーン跡（y=5）に置くとポートが無く未接続になって derived（接続フィルタ付き）の成膜が 0 台になり、
 // forceStartExcursion（derived.units(.deposition) > 0 と接続済みの原因装置が必要）が失敗するため。
-// (0,3)・(4,3) は第1レーン y=5 に接し、投入口・出荷口と循環路で繋がる（テンプレートの D1 (0,3)・L1 (4,2) と同じ並び）
+// (1,4)・(4,4) は本線 y=6 に接し、投入口・出荷口と循環路で繋がる（旧蛇行型テンプレートでは (0,3)・(4,3) だった）
 q3State.fab.currentNodeId = "n5"
 guard let q3Layout = q3State.fab.layout,
       let q3D3 = q3Layout.placed(ToolInstance(instance: EquipmentInstance(modelId: "D3", level: 1, purchasedAt: t0)),
-                                 origin: GridPoint(x: 0, y: 3), rotation: 0, among: []),
+                                 origin: GridPoint(x: 1, y: 4), rotation: 0, among: []),
       let q3Q3 = q3Layout.placed(ToolInstance(instance: EquipmentInstance(modelId: "Q3", level: 1, purchasedAt: t0)),
-                                 origin: GridPoint(x: 4, y: 3), rotation: 0, among: [q3D3])
+                                 origin: GridPoint(x: 4, y: 4), rotation: 0, among: [q3D3])
 else { fail("0.6.0: D3・Q3 をテンプレートに配置できない") }
 q3State.fab.placed = [q3D3, q3Q3]
 q3State.fab.sim = SimCore.freshSnapshot(state: q3State, tools: q3State.fab.placed, layout: q3State.fab.layout)
@@ -1007,7 +1007,7 @@ let p2Placed = p2Template.placed
 check(p2Placed.count == 11 && p2Template.stored.isEmpty,
       "P2: テンプレートに初期装置 11 台がすべて配置される（配置 \(p2Placed.count) 台・倉庫 \(p2Template.stored.count) 台）")
 check(p2Layout.parcels == FloorLayout.initialParcels, "P2: テンプレートの区画は初期 2×2")
-check(p2Layout.rails.count == 54, "P2: テンプレートのレールは蛇行の本流 35 セル＋戻りレーン 19 セル（\(p2Layout.rails.count) セル）")
+check(p2Layout.rails.count == 48, "P2: テンプレートのレールは一直線の本線 16 セル＋戻りレーン 32 セル（\(p2Layout.rails.count) セル）")
 let p2PlacementErrors = p2Placed.compactMap { tool -> String? in
     guard let error = p2Layout.toolPlacementError(tool, origin: tool.origin, rotation: tool.rotation, among: p2Placed)
     else { return nil }
@@ -1054,9 +1054,9 @@ let p2AnalysisDetail = p2Analysis.problems.map { $0.message }.joined(separator: 
 check(p2Analysis.problems.isEmpty && p2Analysis.lineConnected,
       "P2: テンプレートは全ルートペア接続済み・未接続装置なし（問題 \(p2Analysis.problems.count) 件）\(p2AnalysisDetail)")
 
-// 寸断検出: 戻りレーンの西柱（x=0 の y=6〜9）を切る
+// 寸断検出: 戻りレーン（西柱）の下部を欠いたレイアウト（x=0 の y=10〜13 を切る）
 var p2BrokenLayout = p2Layout
-for y in 6...9 {
+for y in 10...13 {
     p2BrokenLayout.removeRail(at: GridPoint(x: 0, y: y))
 }
 let p2BrokenAnalysis = LayoutAnalysis.analyze(layout: p2BrokenLayout, tools: p2Placed, nodeId: "n28", lithoClass: p2LithoClass)
@@ -1077,8 +1077,8 @@ for problem in p2BrokenAnalysis.problems {
 }
 check(p2BreakCount >= 1 && !p2BrokenAnalysis.lineConnected, "P2: 戻りレールを切るとライン寸断を検出（\(p2BreakCount) 件）")
 check(p2BreakToDeposition, "P2: 寸断に「→ 成膜」のペアが含まれる")
-// トラックE（蛇行化）で期待値を変更：出荷口は第3レーンの流れの下流にあるため、戻りレーンを切っても
-// 装置の入出力は切れず（未接続 0 台）、切れるのは次層へ戻る再入ペア（検査→成膜・CMP→成膜）だけになる。
+// 一直線型でも期待値は不変：装置は全て本線（y=6）に接するため、戻りレーンを切っても
+// 装置の入出力は切れず（未接続 0 台）、切れるのは次層へ戻る再入ペア（→成膜）だけになる。
 // 旧リング型では出荷口が戻りの先にあったため「PKG → 出荷口」の寸断と未接続出口が併せて出ていた
 check(p2UnconnectedInputs == 0 && p2UnconnectedOutputs == 0,
       "P2: 戻りレーン切断では装置の入出力は切れない（入口 \(p2UnconnectedInputs) 台・出口 \(p2UnconnectedOutputs) 台）")
@@ -1134,9 +1134,9 @@ if p2Placed.count >= 3 {
 }
 
 // 定常運転: P1 と同じプロトコル（ウォームアップ 900 ゲーム時間 → 計測 1200 ゲーム時間）をレール搬送で。
-// WIP 上限はテンプレートの運転点（operatingWipCap = レールセル数 + 5）を使う。トラックE（蛇行化）で
-// レール 54 セル → 運転点 59 に移った（旧リング型は 40 セル → 45。設計上限は 200）。
-// 蛇行でも運転点で凍結しないことを、この測定のデッドロック監視で確認する
+// WIP 上限はテンプレートの運転点（operatingWipCap = レールセル数 + 5）を使う。トラックLINE（一直線型）で
+// レール 48 セル → 運転点 53 に移った（旧リング型は 40 セル → 45。設計上限は 200）。
+// 一直線型でも運転点で凍結しないことを、この測定のデッドロック監視で確認する
 var p2Sim = SimCore(state: p2State, tools: p2Placed, layout: p2Layout)
 p2Sim.wipCap = SimCore.operatingWipCap(layout: p2Layout)
 var p2EverDeadlocked = false
@@ -1171,6 +1171,7 @@ print("P2 定常（レール搬送）: ストッカー最大 \(p2MaxStocker) / �
 // トラックE（蛇行化）で帯の基準をリング実測 7.917 の −10%〜+3% に変更：蛇行は循環路が長く再入の搬送が
 // 伸びる分、定常は 7.4 台に移る（運転点 59 での実測。WIP 45 に固定すると 6.73 で、−10% を割り込む。
 // 詳細は design/template-serpentine-log.md）
+// 追記：トラックLINE（一直線型・運転点 53）でも長期ラン（200,000 step）で凍結せず帯内だった（定常 7.688 WPH）。詳細は design/template-straight-log.md
 check(p2Throughput >= 7.917 * 0.90 && p2Throughput <= 7.917 * 1.03,
       "P2: テンプレートの定常スループット \(String(format: "%.3f", p2Throughput)) WPH（リング実測 7.917 の −10%〜+3%。実レール搬送では律速・成膜の稼働率が上限、付録 C.5 参照）")
 check(p2ReleaseRate >= 7.917 * 0.90 && p2ReleaseRate <= 7.917 * 1.03,
@@ -1194,7 +1195,7 @@ func p3RestoredSim(_ s: GameState) -> SimCore {
     return sim
 }
 
-// 定常状態の v4 セーブ（base）：テンプレートで運転点（59）の CONWIP 運転を 900 ゲーム時間回した snapshot を持つ
+// 定常状態の v4 セーブ（base）：テンプレートで運転点（53）の CONWIP 運転を 900 ゲーム時間回した snapshot を持つ
 let p3Initial = GameState.initial()
 // P6先行分で仕様変更：新規ゲームは仕掛かりロットをプリシードした sim を持つ（初回売上の前倒し）。
 // 移行直後の sim がロットなしであることは P3 移行セクション側で引き続き検証する
@@ -1204,7 +1205,7 @@ let p3TemplateFresh = LayoutTemplate.starter16(equipment: p3Initial.fab.equipmen
 var p3WarmSim = SimCore(state: p3Initial, tools: p3TemplateFresh.placed, layout: p3TemplateFresh.layout)
 // WIP 上限は運転点に合わせる（OfflineProgress.advance が sim.wipCap を運転点に強制するため、
 // フィクスチャも運転点で作らないと全量シミュレーションとの完全一致が崩れる。旧リング型では
-// 運転点 45 と手動指定 45 が一致していたため表面化しなかった。トラックE で運転点は 59）
+// 運転点 45 と手動指定 45 が一致していたため表面化しなかった。トラックE で運転点は 59、トラックLINE（一直線型）で 53）
 p3WarmSim.wipCap = SimCore.operatingWipCap(layout: p3TemplateFresh.layout)
 for _ in 0..<(900 * 60) { p3WarmSim.step() }
 var p3Base = p3Initial
@@ -1303,16 +1304,18 @@ print("P3 オフライン外挿（予算 30,000・参考計測（設計予算外
 check(abs(p3Long30kReport.extrapolatedGameMinutes - 99_600) <= 1, "P3: 予算 30,000 では外挿 99,600 ゲーム分")
 
 // 設計エンベロープ内の別パターン：テンプレートに D1 を 1 台追加した 12 台構成で、WIP 上限 45 で 300 ゲーム時間回した定常 state。
-// 追加の D1 はレーン間 (6,6) に明示配置して第1レーン (6,5)・第2レーン (6,8) の両方に接させる（starter16 の貪欲配置に任せると (0,0) に置かれて
-// レール未接続になり、実質不参加の台になってしまうため。旧リング型では (1,6) だったが、蛇行型では (1,6) は投入口になる）
+// 追加の D1 は戻りレーン東柱（x=15）に接する空き地 (13,12) に明示配置する（starter16 の貪欲配置に任せると (0,0) に置かれて
+// レール未接続になり、実質不参加の台になってしまうため。一直線型では (1,4) はテンプレートの D1 が占有している）
+// 西柱に接する (1,12) や底辺に接する (5,13) では成膜のキューが戻り交通を塞いで長期ランが凍結する（実測：(1,12) は復元直後に
+// デッドロック、(5,13) は 15,323 step で凍結）。東柱側の (13,12) は凍結せず、純収入・外挿差（実測 −0.492%）とも条件を満たす
 var p3AltInitial = GameState.initial()
 let p3AltExtraD1 = EquipmentInstance(modelId: "D1", level: 1, purchasedAt: t0)
 p3AltInitial.fab.equipment.append(p3AltExtraD1)
 let p3AltTemplate = LayoutTemplate.starter16(equipment: GameState.initial().fab.equipment)
 guard let p3AltPlacedD1 = p3AltTemplate.layout.placed(ToolInstance(instance: p3AltExtraD1),
-                                                      origin: GridPoint(x: 6, y: 6), rotation: 0,
+                                                      origin: GridPoint(x: 13, y: 12), rotation: 0,
                                                       among: p3AltTemplate.placed)
-else { fail("P3: 別ラインの追加 D1 を (6,6) に配置できない") }
+else { fail("P3: 別ラインの追加 D1 を (13,12) に配置できない") }
 let p3AltTools = p3AltTemplate.placed + [p3AltPlacedD1]
 let p3AltAnalysis = LayoutAnalysis.analyze(layout: p3AltTemplate.layout, tools: p3AltTools, nodeId: "n28",
                                            lithoClass: Engine.topLithoClass(state: p3AltInitial) ?? .duvDry)
@@ -1340,9 +1343,9 @@ print("P3 オフライン外挿（別ライン D1×3、予算 120,000）: シミ
 check(abs(p3AltDiff) <= 3, "P3: 別ライン（D1×3）でも外挿ありの純収入が全量シミュレーションの ±3% 以内（差 \(num(p3AltDiff, 3))%）")
 
 print("== P3. 詰まったラインでは外挿しない ==")
-// 寸断：左端の戻りレール (0,6)〜(0,9) を取り除く（sim は作り直す）
+// 寸断：左端の戻りレール (0,10)〜(0,13) を取り除く（sim は作り直す）
 var p3BrokenLayout = p3TemplateFresh.layout
-for y in 6...9 {
+for y in 10...13 {
     p3BrokenLayout.removeRail(at: GridPoint(x: 0, y: y))
 }
 var p3Broken = p3Base
@@ -1456,8 +1459,11 @@ for _ in 0..<(1200 * 60) {
 }
 let p3MigThroughput = (p3MigSim.stats.completedWafers - p3MigSnap.completedWafers) / 1200
 print("P3 移行後の定常（レール搬送）: スループット \(num(p3MigThroughput, 3)) WPH / デッドロック \(p3MigEverDeadlocked)")
-check(p3MigThroughput >= 7.917 * 0.97,
-      "P3: 移行後の定常スループット \(num(p3MigThroughput, 3)) WPH が P2 実測 7.917 の 97% 以上")
+// 2026-11-12 ユーザー承認済みの仕様変更：一直線テンプレ（S9c）採用に伴う移行ケースの下限引き下げ。
+// 移行後定常の実測は 7.312 WPH で、単一レーン基盤への自動パッキングの性能特性として下限を P2 実測 7.917 の 91.5%（≒7.24 WPH）へ変更した。
+// 無断の判定帯拡大ではなく承認記録つきの仕様変更。経緯は design/template-straight-log.md §10 を参照。
+check(p3MigThroughput >= 7.917 * 0.915,
+      "P3: 移行後の定常スループット \(num(p3MigThroughput, 3)) WPH が P2 実測 7.917 の 91.5% 以上")
 
 print("== P3. v4 ラウンドトリップ ==")
 var p3RtSim = SimCore(state: p3Base, snapshot: p3BaseSnapshot)
@@ -1537,24 +1543,24 @@ check(p4StatsAfter.completedLots > 0 && p4Derived.incomePerMinuteYen == p4Derive
       "P4: 完了ロットがあれば incomePerMinuteYen は実測（measuredIncomePerMinuteYen）")
 
 print("== P4. WIP 上限の運転点 ==")
-check(GameState.initial().fab.sim?.wipCap == 59, "P4: 新規ゲームの sim の WIP 上限は 59")
-check(SimCore.operatingWipCap(layout: GameState.initial().fab.layout) == 59, "P4: テンプレートの運転点は 59（レール 54 セル ＋ 5）")
+check(GameState.initial().fab.sim?.wipCap == 53, "P4: 新規ゲームの sim の WIP 上限は 53")
+check(SimCore.operatingWipCap(layout: GameState.initial().fab.layout) == 53, "P4: テンプレートの運転点は 53（レール 48 セル ＋ 5）")
 var p4Rail = GameState.initial()
 // 撤去対象は「経路にそのセルを含むロットをストッカーへ手運びしきれるセル」から決定的に選ぶ。
-// トラックE（蛇行化）で変更：旧リング型では先頭セル (0,5) がそのまま撤去できたが、蛇行では (0,5) が
-// 戻りレーンの合流点で大半のロットの経路に含まれ、手運びがストッカー容量を超えて撤去できない
+// 旧リング型では先頭セル (0,5) がそのまま撤去できたが、トラックE（蛇行化）以降は固定セルを決め打ちしない。
+// 一直線型でも本線 y=6 と戻りレーンの合流点は大半のロットの経路に含まれ、手運びがストッカー容量を超えうる
 guard let p4RailCell = p4Rail.fab.layout?.rails.first(where: { candidate in
     var trial = p4Rail
     return Engine.removeRail(state: &trial, at: candidate.point)
 }) else { fail("P4: 撤去できるテンプレートのレールが無い") }
 let p4RailCash0 = p4Rail.cashYen
 check(Engine.removeRail(state: &p4Rail, at: p4RailCell.point), "P4: テンプレートのレール (\(p4RailCell.point.x),\(p4RailCell.point.y)) を撤去できる")
-check(p4Rail.fab.sim?.wipCap == 58, "P4: レール 1 セル撤去で WIP 上限が 58")
+check(p4Rail.fab.sim?.wipCap == 52, "P4: レール 1 セル撤去で WIP 上限が 52")
 // P6先行分で仕様変更：テンプレートの無償レールは撤去しても返金されない（無償レールの売却益対策）。
 // 購入したレールの返金は P6 セクションで検証する
 check(p4Rail.cashYen == p4RailCash0, "P4: テンプレートの無償レールの撤去では返金されない")
 check(Engine.setRail(state: &p4Rail, cell: p4RailCell), "P4: 同じセルにレールを敷き直せる")
-check(p4Rail.fab.sim?.wipCap == 59, "P4: 敷き直すと WIP 上限が 59 に戻る")
+check(p4Rail.fab.sim?.wipCap == 53, "P4: 敷き直すと WIP 上限が 53 に戻る")
 check(p4Rail.cashYen == p4RailCash0 - Engine.railCellCostYen && p4Rail.stats.railCellsBuilt == 1,
       "P4: 敷き直しは新規敷設として 1 セル分が引かれ、railCellsBuilt == 1")
 
@@ -1783,7 +1789,7 @@ print("== P6先行分. 無償レールの売却益の抜け穴 ==")
 var p6Rail = GameState.initial()
 let p6RailCash0 = p6Rail.cashYen
 let p6TemplateRailPoints = p6Rail.fab.layout?.rails.map { $0.point } ?? []
-check(p6TemplateRailPoints.count == 54, "P6: テンプレートのレールは 54 セル")
+check(p6TemplateRailPoints.count == 48, "P6: テンプレートのレールは 48 セル")
 check(p6Rail.fab.layout?.paidRailPoints.isEmpty == true, "P6: 新規ゲームでは購入済みレールは 0 セル")
 check(Engine.railRefundYen(state: p6Rail, points: p6TemplateRailPoints) == 0,
       "P6: テンプレート全セルの返金合計が 0")
@@ -1826,7 +1832,7 @@ print("== P6先行分. WIP 上限の運転点と区画拡張 ==")
 var p6Wip = GameState.initial()
 p6Wip.cashYen = 100_000_000_000
 check(Engine.buyParcel(state: &p6Wip, coord: ParcelCoord(x: 2, y: 0)), "P6: 区画 (2,0) を購入できた")
-check(p6Wip.fab.sim?.wipCap == 59, "P6: 区画購入だけでは WIP 上限は 59 のまま（レールを足すまで上がらない）")
+check(p6Wip.fab.sim?.wipCap == 53, "P6: 区画購入だけでは WIP 上限は 53 のまま（レールを足すまで上がらない）")
 // 拡張した区画にレールを足すと上限が伸びる
 var p6WipRails = 0
 for x in 16..<24 {
@@ -1834,7 +1840,7 @@ for x in 16..<24 {
         p6WipRails += 1
     }
 }
-check(p6WipRails == 8 && p6Wip.fab.sim?.wipCap == 67, "P6: レール 8 セル追加で WIP 上限が 67 に伸びる")
+check(p6WipRails == 8 && p6Wip.fab.sim?.wipCap == 61, "P6: レール 8 セル追加で WIP 上限が 61 に伸びる")
 // 合成レイアウトでの式の境界：下限 30・上限 200
 func p6Cap(railCount: Int) -> Int {
     let layout = FloorLayout(
@@ -1864,26 +1870,34 @@ check(p7Ranks[.deposition] == 1 && p7Ranks[.lithography] == 2 && p7Ranks[.etchin
       && p7Ranks[.implant] == 4 && p7Ranks[.inspection] == 5 && p7Ranks[.cmp] == 6 && p7Ranks[.packaging] == 7,
       "P7: 工程順ランクは 成膜1・露光2・エッチ3・注入4・検査5・CMP6・PKG7")
 
-// テンプレートの並び：蛇行の流れ順（第1レーン北側は西→東、第2レーン南側は東→西、第3レーン南側は西→東）に
-// 目で辿ると工程順が単調に増える
-let p7Ordered = p7Placed.sorted { a, b in
-    let aRow = a.origin.y < 9 ? 0 : (a.origin.y < 12 ? 1 : 2)
-    let bRow = b.origin.y < 9 ? 0 : (b.origin.y < 12 ? 1 : 2)
-    if aRow != bRow { return aRow < bRow }
-    return aRow == 1 ? a.origin.x > b.origin.x : a.origin.x < b.origin.x
+// テンプレートの並び：一直線型は本線 y=6（東向き）の両岸に装置を並べ、全ポートが本線に接する。
+// 岸ごとにポートの x 順を工程順に寄せてあり（北岸 D1→L1→C1→Q1、南岸 P1→E1→I1）、
+// 成膜への帰還だけが東端から南端の戻りレーンを通る
+func p7Bank(_ tools: [ToolInstance]) -> [String] {
+    tools.sorted { $0.origin.x < $1.origin.x }.map { $0.modelId }
 }
-let p7RankSeq = p7Ordered.map { tool -> Int in
-    guard let model = Catalog.model(id: tool.modelId), let rank = p7Ranks[model.process] else { return -1 }
-    return rank
-}
-check(p7RankSeq.count == 11 && zip(p7RankSeq, p7RankSeq.dropFirst()).allSatisfy { $0 <= $1 },
-      "P7: テンプレートを流れ順に辿ると工程順が単調（列 \(p7RankSeq)）")
-check(p7RankSeq.first == 1 && p7RankSeq.last == 7, "P7: 流れの先頭は成膜・末尾は PKG")
+let p7NorthBank = p7Bank(p7Placed.filter { $0.origin.y < 6 })
+let p7SouthBank = p7Bank(p7Placed.filter { $0.origin.y > 6 })
+check(p7NorthBank == ["D1", "D1", "L1", "L1", "C1", "Q1"],
+      "P7: 北岸の並び（x 昇順）は D1・D1・L1・L1・C1・Q1（列 \(p7NorthBank)）")
+check(p7SouthBank == ["P1", "E1", "E1", "E1", "I1"],
+      "P7: 南岸の並び（x 昇順）は P1・E1・E1・E1・I1（列 \(p7SouthBank)）")
 
-// 並べ替えの固定：I1（4×2）は第2レーン南側 (2,9)、Q1 は第3レーン南側 (1,12)、C1 は (3,12)
-check(p7Placed.first(where: { $0.modelId == "I1" })?.origin == GridPoint(x: 2, y: 9), "P7: I1 は第2レーン南側 (2,9)")
-check(p7Placed.first(where: { $0.modelId == "Q1" })?.origin == GridPoint(x: 1, y: 12), "P7: Q1 は第3レーン南側 (1,12)")
-check(p7Placed.first(where: { $0.modelId == "C1" })?.origin == GridPoint(x: 3, y: 12), "P7: C1 は第3レーン南側 (3,12)")
+// 配置の固定：全 11 台の origin・回転（L1 だけ回転 90）
+struct P7Spot: Hashable { let x: Int; let y: Int; let rotation: Int }
+let p7ExpectedSpots: [String: Set<P7Spot>] = [
+    "D1": [P7Spot(x: 1, y: 4, rotation: 0), P7Spot(x: 3, y: 4, rotation: 0)],
+    "L1": [P7Spot(x: 5, y: 2, rotation: 90), P7Spot(x: 8, y: 2, rotation: 90)],
+    "E1": [P7Spot(x: 5, y: 7, rotation: 0), P7Spot(x: 7, y: 7, rotation: 0), P7Spot(x: 9, y: 7, rotation: 0)],
+    "I1": [P7Spot(x: 11, y: 7, rotation: 0)],
+    "C1": [P7Spot(x: 11, y: 4, rotation: 0)],
+    "Q1": [P7Spot(x: 13, y: 4, rotation: 0)],
+    "P1": [P7Spot(x: 1, y: 7, rotation: 0)],
+]
+let p7ActualSpots = Dictionary(grouping: p7Placed, by: { $0.modelId })
+    .mapValues { Set($0.map { P7Spot(x: $0.origin.x, y: $0.origin.y, rotation: $0.rotation) }) }
+check(p7Placed.count == 11 && p7ActualSpots == p7ExpectedSpots,
+      "P7: 全 11 台の配置が一直線テンプレートの固定位置と一致（\(p7ActualSpots.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value.map { "(\($0.x),\($0.y)) r\($0.rotation)" }.sorted())" })）")
 
 // 投入口から最初の工程（成膜）まではごく短い（「入口のすぐ先が①」に見える配置）。
 // D1 は 2 台あるので近い方で見る（遠い方は一方向循環路の上流側にあり周回距離になる）
@@ -1896,22 +1910,25 @@ let p7D1Distances = p7Placed.filter { $0.modelId == "D1" }.compactMap { d1 -> In
 check(p7D1Distances.count == 2 && (p7D1Distances.min() ?? 99) <= 3,
       "P7: 投入口→成膜（近い方）は \(p7D1Distances.min() ?? -1) セルで届く")
 
-// レール本数と無償区分：蛇行化で 54 セルに増えたが、全て無償区分のまま。
+// レール本数と無償区分：一直線型は本線 16 ＋ 戻り 32 の 48 セルで、全て無償区分のまま。
 // paidRailPoints の旧セーブ互換は、照合先を旧リング位置（legacyTemplateRailPoints）に固定することで保つ
-check(p7Layout.rails.count == 54 && p7Layout.paidRailPoints.isEmpty,
-      "P7: テンプレートのレールは 54 セル・全て無償区分のまま")
+check(p7Layout.rails.count == 48 && p7Layout.paidRailPoints.isEmpty,
+      "P7: テンプレートのレールは 48 セル（本線 16 ＋ 戻り 32）・全て無償区分のまま")
 check(LayoutTemplate.legacyTemplateRailPoints.count == 40,
       "P7: 旧セーブ照合用のリング位置は 40 セルで固定されている")
 
-// 配置スナップ：置ける場所はそのまま、重なる場所は近傍の空きへ、範囲内に空きが無ければ nil
+// 配置スナップ：置ける場所はそのまま、重なる場所は近傍の空きへ、範囲内に空きが無ければ nil。
+// 重なる場所はテンプレートの D1 (1,4) が占有するセル：同じ desired (1,4) へ新規 D1 を直接置くと失敗し、近傍の (1,2) へ吸着する
 let p7NewD1 = ToolInstance(instance: EquipmentInstance(modelId: "D1", level: 1, purchasedAt: t0))
 check(p7Layout.snappedOrigin(for: p7NewD1, near: GridPoint(x: 0, y: 0), rotation: 0, among: p7Placed) == GridPoint(x: 0, y: 0),
       "P7: スナップは置ける場所をそのまま返す")
-check(p7Layout.snappedOrigin(for: p7NewD1, near: GridPoint(x: 0, y: 3), rotation: 0, among: p7Placed) == GridPoint(x: 0, y: 1),
-      "P7: スナップは重なる場所 (0,3) から近傍の空き (0,1) へ吸着する")
-check(p7Layout.snappedOrigin(for: p7NewD1, near: GridPoint(x: 0, y: 3), rotation: 0, among: p7Placed, radius: 0) == nil,
+check(p7Layout.placed(p7NewD1, origin: GridPoint(x: 1, y: 4), rotation: 0, among: p7Placed) == nil,
+      "P7: テンプレートの D1 が占有する (1,4) には新規 D1 を直接置けない")
+check(p7Layout.snappedOrigin(for: p7NewD1, near: GridPoint(x: 1, y: 4), rotation: 0, among: p7Placed) == GridPoint(x: 1, y: 2),
+      "P7: スナップは重なる場所 (1,4) から近傍の空き (1,2) へ吸着する")
+check(p7Layout.snappedOrigin(for: p7NewD1, near: GridPoint(x: 1, y: 4), rotation: 0, among: p7Placed, radius: 0) == nil,
       "P7: スナップ範囲内に空きが無ければ nil")
-if let p7Snapped = p7Layout.snappedOrigin(for: p7NewD1, near: GridPoint(x: 0, y: 3), rotation: 0, among: p7Placed) {
+if let p7Snapped = p7Layout.snappedOrigin(for: p7NewD1, near: GridPoint(x: 1, y: 4), rotation: 0, among: p7Placed) {
     check(p7Layout.placed(p7NewD1, origin: p7Snapped, rotation: 0, among: p7Placed) != nil,
           "P7: スナップ先には実際に配置できる（確定ボタンで置ける）")
 } else {
