@@ -27,6 +27,8 @@ struct ToolCard: View {
     @State private var detent: ToolCardDetent = .compact
     @State private var showsLearnPage = false
     @State private var confirmsSell = false
+    /// 欠陥分析シート（検査工程の装置からだけ開く。アドバイザー等の「検査装置をタップして欠陥分析を開く」案内の受け口）
+    @State private var showsDefectAnalysis = false
     /// 回転・倉庫へが失敗したときの理由（数秒で消す）
     @State private var actionMessage: String?
     @State private var actionMessageNonce = 0
@@ -120,6 +122,9 @@ struct ToolCard: View {
             Button("キャンセル", role: .cancel) {}
         } message: {
             Text(Self.sellMessage(for: info, state: store.state, derived: store.derived))
+        }
+        .sheet(isPresented: $showsDefectAnalysis) {
+            DefectAnalysisSheet()
         }
     }
 
@@ -281,13 +286,25 @@ struct ToolCard: View {
             .background(Circle().fill(color))
     }
 
-    /// 最下段のボタン列（改良／移動／回転／倉庫へ／売却／学ぶ）
+    /// 最下段のボタン列（[欠陥分析]／改良／移動／回転／倉庫へ／売却／学ぶ）
     private func actionRow(_ info: ToolCardInfo) -> some View {
         let state = store.state
         let cost = info.upgradeCostYen
         let canUpgrade = cost.map { state.cashYen >= $0 } ?? false
         return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
+                // 検査装置だけ欠陥分析への導線を出す。展開段でしか見えない processSection ではなく、
+                // コンパクト段でも常に見えるこの列に置く（タップ直後に見えないと導線にならないため）。
+                // 異常発生中はアドバイザーがここへ誘導するので目立たせる
+                if info.model.process == .inspection {
+                    Button {
+                        showsDefectAnalysis = true
+                    } label: {
+                        actionLabel("欠陥分析を開く", systemImage: "waveform.path.ecg")
+                    }
+                    .modifier(DefectAnalysisButtonStyle(prominent: state.activeExcursion != nil))
+                }
+
                 Button {
                     store.upgrade(info.tool.id)
                 } label: {
@@ -883,6 +900,22 @@ private struct ToolEducationBlock: View {
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 10).fill(Color(.tertiarySystemFill)))
+    }
+}
+
+// MARK: - 欠陥分析ボタンのスタイル
+
+/// 歩留まり異常の発生中だけ .borderedProminent、通常は .bordered（両者は型が異なるので分岐を ViewModifier にまとめる）
+private struct DefectAnalysisButtonStyle: ViewModifier {
+    let prominent: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if prominent {
+            content.buttonStyle(.borderedProminent)
+        } else {
+            content.buttonStyle(.bordered)
+        }
     }
 }
 

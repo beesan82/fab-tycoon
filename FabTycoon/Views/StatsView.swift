@@ -37,11 +37,21 @@ struct StatsView: View {
                 row("プレイ時間", MoneyFormat.duration(stats.playSeconds))
             }
             Section("歩留まり") {
-                if store.state.activeExcursion != nil, let excursionProcess = derived.excursionProcess {
-                    Label("歩留まり異常が発生中です（原因工程：\(excursionProcess.displayName)）。検査装置をタップして欠陥分析を開けます。", systemImage: "exclamationmark.triangle.fill")
-                        .font(.subheadline.bold())
-                        .foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true)
+                if let excursion = store.state.activeExcursion {
+                    // 原因工程は欠陥分析シート（hintSection）が原因を明かす条件と同じときだけ名指しする。
+                    // 発生直後から出すとヒント 3 段階の推理が無意味になるため（隠すのは表示だけ）
+                    if excursion.hintsRevealed >= 3, Engine.bestInspectionGrade(state: store.state) == 3,
+                       let excursionProcess = derived.excursionProcess {
+                        Label("歩留まり異常が発生中です（原因工程：\(excursionProcess.displayName)）。検査装置をタップして欠陥分析を開けます。", systemImage: "exclamationmark.triangle.fill")
+                            .font(.subheadline.bold())
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Label("歩留まり異常が発生中です。検査装置をタップして欠陥分析を開いて、原因を特定しましょう。", systemImage: "exclamationmark.triangle.fill")
+                            .font(.subheadline.bold())
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 ForEach(ProcessType.allCases) { process in
                     row(process.displayName, MoneyFormat.percent(derived.processYields[process] ?? 0))

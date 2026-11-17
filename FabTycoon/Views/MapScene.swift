@@ -867,7 +867,7 @@ struct MapScene: View {
         selectedToolId = nil
     }
 
-    /// レールモードの1セルタップ（既存どおり）
+    /// レールモードの1セルタップ（敷設は空きセルのみ。既存レールの向きは変えない）
     private func railTap(_ cell: GridPoint, layout: FloorLayout) {
         switch railTool {
         case .erase:
@@ -875,10 +875,9 @@ struct MapScene: View {
                 message = "撤去できません（ストッカーが満杯です）"
             }
         case .draw:
-            // 既存レールは向きを時計回りに回す（無償）、空きなら東向きで敷く
-            if var existing = layout.railIndex[cell] {
-                existing.direction = existing.direction.rotatedCW
-                store.setRail(cell: existing)
+            // 既存レールは何もしない（誤タップで無言・無償・取り消し不能の向き変更が起きていたため）。空きなら東向きで敷く
+            if layout.railIndex[cell] != nil {
+                return
             } else if layout.railPlacementError(at: cell, among: store.state.fab.placed) == nil {
                 if store.setRail(cell: RailCell(point: cell, direction: .east, kind: .straight)) {
                     lastStrokeNewCells = [cell]
@@ -902,7 +901,9 @@ struct MapScene: View {
 
     /// なぞったセル列から敷くセルを決める。向きは移動方向、方向が変わるセルは角。
     /// 既存レールを壊さないよう、始点が既存レールで直交方向へ出るなら分岐、終点が既存レールなら合流として触らない、
-    /// 途中で既存レールを直交に横切るなら交差にする。同じセルを複数回なぞったら最後のものを使う
+    /// 途中で既存レールを直交に横切るなら交差にする。同じセルを複数回なぞったら最後のものを使う。
+    /// 既存セルの向き（direction）は決して変えない：結果に含めるのは分岐・交差への kind 変換だけで、
+    /// それ以外（同軸の逆向き・通過・折れ曲がり）は触らない（無言・無償・取り消し不能の向き上書きを防ぐ）
     static func plannedRailCells(stroke: [GridPoint], layout: FloorLayout) -> [RailCell] {
         guard stroke.count >= 2 else { return [] }
         let existing = layout.railIndex
@@ -923,16 +924,18 @@ struct MapScene: View {
                 } else if i == 0 {
                     if old.direction == direction { continue }
                     if perpendicular {
+                        // 直交方向へ出るなら分岐に変えるだけ（向きは既存のまま）
                         cell.kind = .branch
                     } else {
-                        cell.direction = direction
-                        cell.kind = .straight
+                        // 同軸の逆方向：向きを反転させず、セル自体に触らない
+                        continue
                     }
                 } else if perpendicular && incoming == outgoing {
+                    // 直交に横切るなら交差に変えるだけ（向きは既存のまま）
                     cell.kind = .cross
                 } else {
-                    cell.direction = direction
-                    cell.kind = (incoming != nil && incoming != direction) ? .corner : .straight
+                    // 同方向・逆方向の通過や折れ曲がり：既存の向きを上書きしないよう触らない
+                    continue
                 }
             } else {
                 let kind: RailCellKind = (incoming != nil && incoming != direction) ? .corner : .straight
@@ -1508,7 +1511,8 @@ struct MapScene: View {
         switch railTool {
         case .draw:
             if railStroke.isEmpty {
-                Text("1本指でなぞって敷設（向きはなぞった方向）、タップで向きを回す。2本指でフロアを動かせます。新規 1セル \(MoneyFormat.yen(Engine.railCellCostYen))")
+                // 既存レールのタップ回転は廃止したので、その旨を案内する
+                Text("1本指でなぞって敷設（向きはなぞった方向）。既存レールの向きはタップでは変わりません。2本指でフロアを動かせます。新規 1セル \(MoneyFormat.yen(Engine.railCellCostYen))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
